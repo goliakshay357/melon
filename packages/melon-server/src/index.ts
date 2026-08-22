@@ -333,6 +333,47 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { path: dir, parent: join(dir, ".."), dirs };
 	});
 
+
+	// Navigator tree: folder → canvases → their bound sessions (+ loose ones).
+	app.get("/tree", async (req, reply) => {
+		const q = req.query as any;
+		let dir: string;
+		try {
+			dir = assertCwd(q.cwd ?? "~");
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const cvDir = join(dir, ".melon", "canvases");
+		const bound = new Set<string>();
+		const canvases: Array<{
+			id: string;
+			name: string;
+			sessions: Array<{ file: string; title?: string }>;
+		}> = [];
+		try {
+			for (const f of readdirSync(cvDir)) {
+				if (!f.endsWith(".json")) continue;
+				try {
+					const cv = JSON.parse(readFileSync(join(cvDir, f), "utf8"));
+					const sessions = (cv.cards ?? [])
+						.filter((c: any) => c.sessionFile)
+						.map((c: any) => {
+							bound.add(c.sessionFile);
+							return { file: c.sessionFile, title: c.title };
+						});
+					canvases.push({ id: cv.id, name: cv.name ?? "Untitled", sessions });
+				} catch { /* skip corrupt */ }
+			}
+		} catch { /* no canvases dir */ }
+
+		const all = (await SessionManager.list(dir)) as any[];
+		const loose = all
+			.filter((s) => !bound.has(s.path))
+			.map((s) => ({ file: s.path, title: s.firstMessage?.slice(0, 60) }));
+
+		return { cwd: dir, canvases, loose };
+	});
+
 	app.get("/sessions/:cardId/events", (req, reply) => {
 		const s = registry.get((req.params as any).cardId);
 		if (!s) return reply.code(404).send({ error: "unknown card" });

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
     ChevronRight,
     FolderOpen,
@@ -21,12 +21,13 @@ interface Project {
     cwd: string;
     sessions: SessionInfo[];
 }
+void 0;
 
 const MELON_API = 'http://127.0.0.1:8788';
 
 export function Sidebar() {
     const [collapsed, setCollapsed] = useState(false);
-    const [projects, setProjects] = useState<Project[]>([]);
+    const [tree, setTree] = useState<Array<any>>([]);
     const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
     const [newCanvasName, setNewCanvasName] = useState('');
     const [pickerOpen, setPickerOpen] = useState(false);
@@ -39,12 +40,26 @@ export function Sidebar() {
     const createCanvas = useCanvasStore((s) => s.createCanvas);
     const resumeSession = useCanvasStore((s) => s.resumeSession);
 
-    useEffect(() => {
-        fetch(`${MELON_API}/projects`)
-            .then((r) => r.json())
-            .then((d) => setProjects(d.projects ?? []))
-            .catch(() => {});
+    const loadTree = useCallback(async () => {
+        try {
+            const pr = await fetch(`${MELON_API}/projects`).then((r) => r.json());
+            const trees = await Promise.all(
+                (pr.projects ?? []).map(async (p: Project) => {
+                    const tr = await fetch(
+                        `${MELON_API}/tree?cwd=${encodeURIComponent(p.cwd)}`,
+                    ).then((r) => r.json());
+                    return { cwd: p.cwd, canvases: tr.canvases ?? [], loose: tr.loose ?? [] };
+                }),
+            );
+            setTree(trees);
+        } catch {
+            /* server down */
+        }
     }, []);
+
+    useEffect(() => {
+        loadTree();
+    }, [loadTree, folder, canvasId]);
 
     const toggleFolder = (cwd: string) =>
         setOpenFolders((prev) => {
@@ -136,45 +151,81 @@ export function Sidebar() {
                             )}
                         </Section>
 
-                        {/* Folders & their past sessions */}
-                        <Section title="Folders & sessions" icon={<FolderOpen className="size-3.5" />}>
+                        {/* Folder ▸ Canvas ▸ sessions */}
+                        <Section title="Folders" icon={<FolderOpen className="size-3.5" />}>
                             <button
                                 className="mb-1 flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs text-primary hover:bg-secondary"
                                 onClick={() => setPickerOpen(true)}
                             >
                                 <FolderPlus className="size-3.5" /> New canvas in another folder…
                             </button>
-                            {projects.map((p) => (
-                                <div key={p.cwd} className="mb-0.5">
+                            {tree.map((t) => (
+                                <div key={t.cwd} className="mb-0.5">
                                     <button
                                         className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs text-card-foreground hover:bg-secondary"
-                                        onClick={() => toggleFolder(p.cwd)}
+                                        onClick={() => toggleFolder(t.cwd)}
                                     >
                                         <ChevronRight
                                             className={cn(
                                                 'size-3 shrink-0 transition-transform',
-                                                openFolders.has(p.cwd) && 'rotate-90',
+                                                openFolders.has(t.cwd) && 'rotate-90',
                                             )}
                                         />
                                         <span className="truncate">
-                                            {p.cwd.split('/').slice(-2).join('/')}
-                                        </span>
-                                        <span className="ml-auto text-[10px] text-muted-foreground">
-                                            {p.sessions.length}
+                                            📁 {t.cwd.split('/').slice(-2).join('/')}
                                         </span>
                                     </button>
-                                    {openFolders.has(p.cwd) && (
+                                    {openFolders.has(t.cwd) && (
                                         <div className="ml-4 border-l border-border pl-1">
-                                            {p.sessions.map((sess) => (
-                                                <button
-                                                    key={sess.id}
-                                                    className="block w-full truncate rounded-md px-2 py-0.5 text-left text-[11px] text-muted-foreground hover:bg-secondary hover:text-card-foreground"
-                                                    title={sess.firstMessage}
-                                                    onClick={() => resumeSession(sess.file)}
-                                                >
-                                                    {sess.firstMessage || sess.id.slice(0, 8)}
-                                                </button>
+                                            {t.canvases.length === 0 && t.loose.length === 0 && (
+                                                <p className="px-2 py-0.5 text-[11px] text-muted-foreground">empty</p>
+                                            )}
+                                            {t.canvases.map((cv: any) => (
+                                                <div key={cv.id} className="mb-0.5">
+                                                    <div
+                                                        className={cn(
+                                                            'flex w-full cursor-pointer items-center justify-between rounded-md px-2 py-0.5 text-[11px] hover:bg-secondary',
+                                                            folder === t.cwd && cv.id === canvasId ? 'font-medium text-primary' : 'text-card-foreground',
+                                                        )}
+                                                        onClick={() => {
+                                                            if (folder !== t.cwd) openFolder(t.cwd).then(() => switchCanvas(cv.id));
+                                                            else switchCanvas(cv.id);
+                                                        }}
+                                                    >
+                                                        <span className="truncate">🖼 {cv.name}</span>
+                                                        <span className="text-[10px] text-muted-foreground">
+                                                            {cv.sessions.length}
+                                                        </span>
+                                                    </div>
+                                                    {cv.sessions.map((sess: any) => (
+                                                        <button
+                                                            key={sess.file}
+                                                            className="block w-full truncate rounded-md px-2 py-0.5 pl-4 text-left text-[10px] text-muted-foreground hover:bg-secondary hover:text-card-foreground"
+                                                            title={sess.title}
+                                                            onClick={() => resumeSession(sess.file)}
+                                                        >
+                                                            • {sess.title || sess.file.split('/').pop()?.slice(0, 20)}
+                                                        </button>
+                                                    ))}
+                                                </div>
                                             ))}
+                                            {t.loose.length > 0 && (
+                                                <div>
+                                                    <p className="px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                                                        loose sessions ({t.loose.length})
+                                                    </p>
+                                                    {t.loose.map((sess: any) => (
+                                                        <button
+                                                            key={sess.file}
+                                                            className="block w-full truncate rounded-md px-2 py-0.5 text-left text-[10px] text-muted-foreground hover:bg-secondary hover:text-card-foreground"
+                                                            title={sess.title}
+                                                            onClick={() => resumeSession(sess.file)}
+                                                        >
+                                                            • {sess.title || sess.file.split('/').pop()?.slice(0, 20)}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            )}
                                         </div>
                                     )}
                                 </div>
