@@ -43,6 +43,14 @@ export function Sidebar() {
     const [folders, setFolders] = useState<Array<{ cwd: string; lastOpenedAt: string }>>([]);
     const [tree, setTree] = useState<Record<string, { canvases: any[]; loose: any[] }>>({});
     const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
+    const [openCanvasSessions, setOpenCanvasSessions] = useState<Set<string>>(new Set());
+
+    const toggleCanvasSessions = (key: string) =>
+        setOpenCanvasSessions((prev) => {
+            const next = new Set(prev);
+            next.has(key) ? next.delete(key) : next.add(key);
+            return next;
+        });
 
     const folder = useCanvasStore((s) => s.folder);
     const canvasId = useCanvasStore((s) => s.canvasId);
@@ -203,6 +211,16 @@ export function Sidebar() {
                                                             else switchCanvas(cv.id);
                                                         }}
                                                     >
+                                                        <ChevronRight
+                                                            className={cn(
+                                                                'size-3 shrink-0 cursor-pointer transition-transform',
+                                                                openCanvasSessions.has(`${cwd}::${cv.id}`) && 'rotate-90',
+                                                            )}
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                toggleCanvasSessions(`${cwd}::${cv.id}`);
+                                                            }}
+                                                        />
                                                         <span
                                                             className="flex-1 truncate"
                                                             onDoubleClick={(e) => {
@@ -227,7 +245,8 @@ export function Sidebar() {
                                                             {cv.sessions.length}
                                                         </span>
                                                     </div>
-                                                    {cv.sessions.map((sess: any) => (
+                                                    {openCanvasSessions.has(`${cwd}::${cv.id}`) &&
+                                                    cv.sessions.map((sess: any) => (
                                                         <button
                                                             key={sess.file}
                                                             className="block w-full truncate rounded-md px-2 py-0.5 pl-4 text-left text-[10px] text-muted-foreground hover:bg-secondary hover:text-card-foreground"
