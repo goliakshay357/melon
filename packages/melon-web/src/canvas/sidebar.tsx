@@ -7,24 +7,17 @@ import {
     Plus,
 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
+import { FolderPicker } from '@/components/folder-picker';
 import { cn } from '@/lib/utils';
 
-interface SessionInfo {
-    id: string;
-    file: string;
-    firstMessage?: string;
-}
-interface Project {
-    cwd: string;
-    sessions: SessionInfo[];
-}
-void 0;
 
 const MELON_API = 'http://127.0.0.1:8788';
 
 export function Sidebar() {
     const [collapsed, setCollapsed] = useState(false);
-    const [tree, setTree] = useState<Array<any>>([]);
+    const [pickerOpen, setPickerOpen] = useState(false);
+    const [folders, setFolders] = useState<Array<{ cwd: string; lastOpenedAt: string }>>([]);
+    const [tree, setTree] = useState<Record<string, { canvases: any[]; loose: any[] }>>({});
     const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
 
     const folder = useCanvasStore((s) => s.folder);
@@ -36,16 +29,18 @@ export function Sidebar() {
 
     const loadTree = useCallback(async () => {
         try {
-            const pr = await fetch(`${MELON_API}/projects`).then((r) => r.json());
-            const trees = await Promise.all(
-                (pr.projects ?? []).map(async (p: Project) => {
+            const fr = await fetch(`${MELON_API}/folders`).then((r) => r.json());
+            const list = (fr.folders ?? []) as Array<{ cwd: string; lastOpenedAt: string }>;
+            setFolders(list);
+            const entries = await Promise.all(
+                list.map(async (f) => {
                     const tr = await fetch(
-                        `${MELON_API}/tree?cwd=${encodeURIComponent(p.cwd)}`,
+                        `${MELON_API}/tree?cwd=${encodeURIComponent(f.cwd)}`,
                     ).then((r) => r.json());
-                    return { cwd: p.cwd, canvases: tr.canvases ?? [], loose: tr.loose ?? [] };
+                    return [f.cwd, { canvases: tr.canvases ?? [], loose: tr.loose ?? [] }] as const;
                 }),
             );
-            setTree(trees);
+            setTree(Object.fromEntries(entries));
         } catch {
             /* server down */
         }
@@ -64,7 +59,7 @@ export function Sidebar() {
 
     // Plus button beside a folder row: new canvas inside THAT folder.
     const newCanvasInFolder = async (cwd: string) => {
-        const entry = tree.find((t) => t.cwd === cwd);
+        const entry = tree[cwd];
         const suggested = `Canvas ${(entry?.canvases.length ?? 0) + 1}`;
         const name = window.prompt('Name your new canvas', suggested)?.trim();
         if (!name) return; // cancelled
@@ -132,33 +127,35 @@ export function Sidebar() {
                     <div className="flex-1 overflow-y-auto">
                         {/* Folder ▸ Canvas ▸ sessions */}
                         <Section title="Folders" icon={<FolderOpen className="size-3.5" />}>
-                            {tree.map((t) => (
-                                <div key={t.cwd} className="mb-0.5">
+                            {folders.map(({ cwd }) => {
+                                const t = tree[cwd] ?? { canvases: [], loose: [] };
+                                return (
+                                <div key={cwd} className="mb-0.5">
                                     <div
                                         className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 hover:bg-secondary"
-                                        onClick={() => toggleFolder(t.cwd)}
+                                        onClick={() => toggleFolder(cwd)}
                                     >
                                         <ChevronRight
                                             className={cn(
                                                 'size-3 shrink-0 cursor-pointer transition-transform',
-                                                openFolders.has(t.cwd) && 'rotate-90',
+                                                openFolders.has(cwd) && 'rotate-90',
                                             )}
                                         />
                                         <span className="flex-1 cursor-pointer truncate text-xs text-card-foreground">
-                                            📁 {t.cwd.split('/').slice(-2).join('/')}
+                                            📁 {cwd.split('/').slice(-2).join('/')}
                                         </span>
                                         <button
                                             className="rounded p-0.5 text-muted-foreground opacity-60 hover:bg-background hover:text-primary hover:opacity-100"
-                                            title={`New canvas in ${t.cwd.split('/').pop()}`}
+                                            title={`New canvas in ${cwd.split('/').pop()}`}
                                             onClick={(e) => {
                                                 e.stopPropagation();
-                                                newCanvasInFolder(t.cwd);
+                                                newCanvasInFolder(cwd);
                                             }}
                                         >
                                             <Plus className="size-3.5" />
                                         </button>
                                     </div>
-                                    {openFolders.has(t.cwd) && (
+                                    {openFolders.has(cwd) && (
                                         <div className="ml-4 border-l border-border pl-1">
                                             {t.canvases.length === 0 && t.loose.length === 0 && (
                                                 <p className="px-2 py-0.5 text-[11px] text-muted-foreground">empty</p>
@@ -168,10 +165,10 @@ export function Sidebar() {
                                                     <div
                                                         className={cn(
                                                             'flex w-full cursor-pointer items-center justify-between gap-1 rounded-md px-2 py-0.5 text-[11px] hover:bg-secondary',
-                                                            folder === t.cwd && cv.id === canvasId ? 'font-medium text-primary' : 'text-card-foreground',
+                                                            folder === cwd && cv.id === canvasId ? 'font-medium text-primary' : 'text-card-foreground',
                                                         )}
                                                         onClick={() => {
-                                                            if (folder !== t.cwd) openFolder(t.cwd).then(() => switchCanvas(cv.id));
+                                                            if (folder !== cwd) openFolder(cwd).then(() => switchCanvas(cv.id));
                                                             else switchCanvas(cv.id);
                                                         }}
                                                     >
@@ -179,7 +176,7 @@ export function Sidebar() {
                                                             className="flex-1 truncate"
                                                             onDoubleClick={(e) => {
                                                                 e.stopPropagation();
-                                                                renameCanvasRow(t.cwd, cv);
+                                                                renameCanvasRow(cwd, cv);
                                                             }}
                                                             title="Double-click to rename"
                                                         >
@@ -190,7 +187,7 @@ export function Sidebar() {
                                                             title="Delete canvas"
                                                             onClick={(e) => {
                                                                 e.stopPropagation();
-                                                                deleteCanvasRow(t.cwd, cv.id);
+                                                                deleteCanvasRow(cwd, cv.id);
                                                             }}
                                                         >
                                                             🗑
@@ -231,7 +228,8 @@ export function Sidebar() {
                                         </div>
                                     )}
                                 </div>
-                            ))}
+                                );
+                            })}
                         </Section>
                     </div>
 
@@ -242,6 +240,19 @@ export function Sidebar() {
                     )}
                 </>
             )}
+
+            <FolderPicker
+                open={pickerOpen}
+                onClose={() => setPickerOpen(false)}
+                onPick={async (path) => {
+                    await fetch(`${MELON_API}/folders`, {
+                        method: 'POST',
+                        headers: { 'content-type': 'application/json' },
+                        body: JSON.stringify({ cwd: path }),
+                    });
+                    await loadTree();
+                }}
+            />
 
         </div>
     );

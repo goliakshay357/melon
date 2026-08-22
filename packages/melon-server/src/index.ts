@@ -125,6 +125,37 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		});
 	}
 
+		// ── Melon-owned folder history (independent of pi's session store) ──
+	interface FolderEntry {
+		cwd: string;
+		addedAt: string;
+		lastOpenedAt: string;
+	}
+	const foldersFile = () => join(getAgentDir(), "melon", "folders.json");
+	function loadFolderHistory(): FolderEntry[] {
+		try {
+			return JSON.parse(readFileSync(foldersFile(), "utf8"));
+		} catch {
+			return [];
+		}
+	}
+	function saveFolderHistory(list: FolderEntry[]): void {
+		const { mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+		mkdirSync(join(getAgentDir(), "melon"), { recursive: true });
+		writeFileSync(foldersFile(), JSON.stringify(list, null, "\t"));
+	}
+	function touchFolder(cwd: string): void {
+		const dir = expandHome(cwd);
+		if (statSync(dir, { throwIfNoEntry: false })?.isDirectory() !== true) return;
+		const list = loadFolderHistory();
+		const now = new Date().toISOString();
+		const existing = list.find((f) => f.cwd === dir);
+		if (existing) existing.lastOpenedAt = now;
+		else list.push({ cwd: dir, addedAt: now, lastOpenedAt: now });
+		list.sort((a, b) => b.lastOpenedAt.localeCompare(a.lastOpenedAt));
+		saveFolderHistory(list);
+	}
+
 	function assertCwd(cwd?: string): string {
 		const dir = expandHome(cwd ?? "");
 		if (!dir || statSync(dir, { throwIfNoEntry: false })?.isDirectory() !== true) {
@@ -316,6 +347,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		} catch (e) {
 			return reply.code(400).send({ error: (e as Error).message });
 		}
+		touchFolder(dir);
 		const ws = body?.canvas ?? body?.workspace; // accept legacy key
 		if (!ws?.id) return reply.code(400).send({ error: "canvas.id required" });
 		const cvDir2 = canvasesDir(dir);
@@ -390,6 +422,26 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			.map((s) => ({ file: s.path, title: s.firstMessage?.slice(0, 60) }));
 
 		return { cwd: dir, canvases, loose };
+	});
+
+	// Melon folder history — the navigator's source of truth.
+	app.get("/folders", async () => ({ folders: loadFolderHistory() }));
+
+	app.post("/folders", async (req, reply) => {
+		const cwd = (req.body as any)?.cwd;
+		try {
+			assertCwd(cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		touchFolder(cwd);
+		return { ok: true };
+	});
+
+	app.delete("/folders", async (req, reply) => {
+		const cwd = expandHome((req.query as any)?.cwd ?? "");
+		saveFolderHistory(loadFolderHistory().filter((f) => f.cwd !== cwd));
+		return { ok: true };
 	});
 
 	app.get("/sessions/:cardId/events", (req, reply) => {
