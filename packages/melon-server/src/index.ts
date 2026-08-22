@@ -14,6 +14,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { homedir } from "node:os";
 import {
 	ModelRuntime,
 	SessionManager,
@@ -248,13 +249,13 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	});
 
 
-	// ── Workspace persistence: <folder>/.melon/workspaces/<id>.json ──
-	function workspacesDir(cwd: string): string {
-		return join(expandHome(cwd), ".melon", "workspaces");
+	// ── Canvas persistence: <folder>/.melon/canvases/<id>.json ──
+	function canvasesDir(cwd: string): string {
+		return join(expandHome(cwd), ".melon", "canvases");
 	}
 
 	// List workspaces in a folder (lightweight: reads each file's meta line).
-	app.get("/workspaces", async (req, reply) => {
+	app.get("/canvases", async (req, reply) => {
 		const q = req.query as any;
 		let dir: string;
 		try {
@@ -262,7 +263,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		} catch (e) {
 			return reply.code(400).send({ error: (e as Error).message });
 		}
-		const wsDir = workspacesDir(dir);
+		const wsDir = canvasesDir(dir);
 		const out: Array<{ id: string; name: string; modified: string }> = [];
 		try {
 			for (const f of readdirSync(wsDir)) {
@@ -273,23 +274,23 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				} catch { /* skip corrupt */ }
 			}
 		} catch { /* no workspaces yet */ }
-		return { workspaces: out };
+		return { canvases: out };
 	});
 
 	// Load one workspace fully.
-	app.get("/workspaces/:id", async (req, reply) => {
+	app.get("/canvases/:id", async (req, reply) => {
 		const q = req.query as any;
-		const wsDir = workspacesDir(expandHome(q.cwd));
+		const wsDir = canvasesDir(expandHome(q.cwd));
 		const file = join(wsDir, `${(req.params as any).id}.json`);
 		try {
 			return JSON.parse(readFileSync(file, "utf8"));
 		} catch {
-			return reply.code(404).send({ error: "workspace not found" });
+			return reply.code(404).send({ error: "canvas not found" });
 		}
 	});
 
 	// Save (upsert).
-	app.put("/workspaces/:id", async (req, reply) => {
+	app.put("/canvases/:id", async (req, reply) => {
 		const body = req.body as any;
 		let dir: string;
 		try {
@@ -298,13 +299,38 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			return reply.code(400).send({ error: (e as Error).message });
 		}
 		const ws = body?.workspace;
-		if (!ws?.id) return reply.code(400).send({ error: "workspace.id required" });
-		const wsDir = workspacesDir(dir);
+		if (!ws?.id) return reply.code(400).send({ error: "canvas.id required" });
+		const wsDir = canvasesDir(dir);
 		const { mkdirSync, writeFileSync } = await import("node:fs");
 		mkdirSync(wsDir, { recursive: true });
 		ws.modified = new Date().toISOString();
 		writeFileSync(join(wsDir, `${ws.id}.json`), JSON.stringify(ws));
 		return { ok: true };
+	});
+
+
+	// Folder navigator: list subdirectories of a path for the in-app picker.
+	app.get("/browse", async (req, reply) => {
+		const q = req.query as any;
+		let dir: string;
+		try {
+			dir = expandHome(q.path && q.path.trim() ? q.path : "~");
+		} catch {
+			dir = homedir();
+		}
+		if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) {
+			return reply.code(400).send({ error: `not a directory: ${dir}` });
+		}
+		let dirs: string[] = [];
+		try {
+			dirs = readdirSync(dir, { withFileTypes: true })
+				.filter((d) => d.isDirectory() && !d.name.startsWith("."))
+				.map((d) => d.name)
+				.sort((a, b) => a.localeCompare(b));
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		return { path: dir, parent: join(dir, ".."), dirs };
 	});
 
 	app.get("/sessions/:cardId/events", (req, reply) => {

@@ -16,6 +16,7 @@ import { ChatCardNode, type ChatCardNodeType } from './chat-card-node';
 import { ForkEdge } from './fork-edge';
 import { Toolbar } from './toolbar';
 import { Sidebar } from './sidebar';
+import { FolderPicker } from '@/components/folder-picker';
 import { useCanvasStore } from '@/store/canvas-store';
 
 type AppNode = ChatCardNodeType;
@@ -27,9 +28,9 @@ export function Canvas() {
     const deleteCards = useCanvasStore((s) => s.deleteCards);
     const scrollAction = useCanvasStore((s) => s.scrollAction);
     const folder = useCanvasStore((s) => s.folder);
-    const workspaceId = useCanvasStore((s) => s.workspaceId);
+    const canvasId = useCanvasStore((s) => s.canvasId);
     const openFolder = useCanvasStore((s) => s.openFolder);
-    const saveWorkspace = useCanvasStore((s) => s.saveWorkspace);
+    const saveCanvas = useCanvasStore((s) => s.saveCanvas);
     const storedViewport = useCanvasStore((s) => s.viewport);
 
     const [nodes, setNodes] = useState<AppNode[]>([]);
@@ -46,6 +47,8 @@ export function Canvas() {
     const shiftPressed = useKeyPress('Shift');
     const { screenToFlowPosition, fitView } = useReactFlow();
     const wrapperRef = useRef<HTMLDivElement>(null);
+    const heroFormRef = useRef<HTMLFormElement>(null);
+    const [pickerOpen, setPickerOpen] = useState(false);
 
     const nodeTypes = useMemo(() => ({ chatCard: ChatCardNode }), []);
     const edgeTypes = useMemo(() => ({ fork: ForkEdge }), []);
@@ -63,20 +66,20 @@ export function Canvas() {
 
 	// Autosave workspace (debounced).
 	useEffect(() => {
-		if (!workspaceId || !folder) return;
-		const t = setTimeout(() => saveWorkspace(), 800);
+		if (!canvasId || !folder) return;
+		const t = setTimeout(() => saveCanvas(), 800);
 		return () => clearTimeout(t);
-	}, [cards, storedViewport, workspaceId, folder]);
+	}, [cards, storedViewport, canvasId, folder]);
 
 	// Apply stored viewport once nodes exist after a workspace load.
 	const appliedViewportFor = useRef<string | null>(null);
 	const { setViewport: rfSetViewport } = useReactFlow();
 	useEffect(() => {
-		if (!storedViewport || appliedViewportFor.current === workspaceId) return;
+		if (!storedViewport || appliedViewportFor.current === canvasId) return;
 		if (nodes.length === 0) return;
-		appliedViewportFor.current = workspaceId ?? '';
+		appliedViewportFor.current = canvasId ?? '';
 		rfSetViewport(storedViewport);
-	}, [nodes.length, workspaceId, storedViewport, rfSetViewport]);
+	}, [nodes.length, canvasId, storedViewport, rfSetViewport]);
 
 	// Capture viewport on move end for persistence.
 	const onMoveEnd = useCallback(
@@ -232,6 +235,7 @@ export function Canvas() {
             {!folder ? (
                 <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
                     <form
+                        ref={heroFormRef}
                         className="pointer-events-auto w-[420px] rounded-2xl border border-border bg-card/95 p-6 shadow-lg backdrop-blur"
                         onSubmit={(e) => {
                             e.preventDefault();
@@ -243,7 +247,7 @@ export function Canvas() {
                             🍉 Melon Canvas
                         </h1>
                         <p className="mb-4 text-center text-xs text-muted-foreground">
-                            Choose a project folder. Workspaces & sessions live here.
+                            Choose a project folder. Canvases & sessions live here.
                         </p>
                         <input
                             name="cwd"
@@ -252,12 +256,29 @@ export function Canvas() {
                             placeholder="/path/to/project or ~/path"
                             className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
                         />
-                        <button
-                            type="submit"
-                            className="mt-3 w-full rounded-lg bg-primary py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-                        >
-                            Open folder
-                        </button>
+                        <div className="mt-3 flex gap-2">
+                            <button
+                                type="button"
+                                className="rounded-lg border border-input px-3 py-2 text-xs text-muted-foreground hover:bg-secondary"
+                                onClick={() => setPickerOpen(true)}
+                            >
+                                📂 Browse…
+                            </button>
+                            <button
+                                type="submit"
+                                className="flex-1 rounded-lg bg-primary py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                            >
+                                Open folder
+                            </button>
+                        </div>
+                        <FolderPicker
+                            open={pickerOpen}
+                            onClose={() => setPickerOpen(false)}
+                            onPick={(path) => {
+                                const input = heroFormRef.current?.querySelector('input[name=cwd]') as HTMLInputElement | null;
+                                if (input) input.value = path;
+                            }}
+                        />
                     </form>
                 </div>
             ) : cards.length === 0 && (

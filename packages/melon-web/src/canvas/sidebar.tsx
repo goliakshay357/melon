@@ -2,12 +2,14 @@ import { useEffect, useState } from 'react';
 import {
     ChevronRight,
     FolderOpen,
+    FolderPlus,
     Layers,
     PanelLeftClose,
     PanelLeftOpen,
     Plus,
 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
+import { FolderPicker } from '@/components/folder-picker';
 import { cn } from '@/lib/utils';
 
 interface SessionInfo {
@@ -26,14 +28,15 @@ export function Sidebar() {
     const [collapsed, setCollapsed] = useState(false);
     const [projects, setProjects] = useState<Project[]>([]);
     const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
-    const [newWsName, setNewWsName] = useState('');
+    const [newCanvasName, setNewCanvasName] = useState('');
+    const [pickerOpen, setPickerOpen] = useState(false);
 
     const folder = useCanvasStore((s) => s.folder);
-    const workspaces = useCanvasStore((s) => s.workspaces);
-    const workspaceId = useCanvasStore((s) => s.workspaceId);
+    const canvases = useCanvasStore((s) => s.canvases);
+    const canvasId = useCanvasStore((s) => s.canvasId);
     const openFolder = useCanvasStore((s) => s.openFolder);
-    const switchWorkspace = useCanvasStore((s) => s.switchWorkspace);
-    const createWorkspace = useCanvasStore((s) => s.createWorkspace);
+    const switchCanvas = useCanvasStore((s) => s.switchCanvas);
+    const createCanvas = useCanvasStore((s) => s.createCanvas);
     const resumeSession = useCanvasStore((s) => s.resumeSession);
 
     useEffect(() => {
@@ -49,6 +52,12 @@ export function Sidebar() {
             next.has(cwd) ? next.delete(cwd) : next.add(cwd);
             return next;
         });
+
+    // Start a new canvas in a folder chosen via the navigator.
+    const newCanvasInPickedFolder = async (path: string) => {
+        await openFolder(path);
+        await createCanvas('Canvas 1');
+    };
 
     return (
         <div
@@ -68,34 +77,31 @@ export function Sidebar() {
             ) : (
                 <>
                     <div className="flex items-center justify-between px-1 pb-2">
-                        <span className="text-xs font-semibold text-muted-foreground">
-                            Navigator
-                        </span>
+                        <span className="text-xs font-semibold text-muted-foreground">Navigator</span>
                         <button
                             className="rounded-md p-1 text-muted-foreground hover:bg-secondary"
                             onClick={() => setCollapsed(true)}
-                            title="Collapse"
                         >
                             <PanelLeftClose className="size-4" />
                         </button>
                     </div>
 
                     <div className="flex-1 overflow-y-auto">
-                        {/* Workspaces in current folder */}
-                        <Section title="Workspaces" icon={<Layers className="size-3.5" />}>
+                        {/* Canvases within current folder */}
+                        <Section title="Canvases" icon={<Layers className="size-3.5" />}>
                             {folder &&
-                                workspaces.map((ws) => (
+                                canvases.map((cv) => (
                                     <button
-                                        key={ws.id}
+                                        key={cv.id}
                                         className={cn(
                                             'block w-full truncate rounded-md px-2 py-1 text-left text-xs hover:bg-secondary',
-                                            ws.id === workspaceId
+                                            cv.id === canvasId
                                                 ? 'bg-secondary font-medium text-primary'
                                                 : 'text-card-foreground',
                                         )}
-                                        onClick={() => switchWorkspace(ws.id)}
+                                        onClick={() => switchCanvas(cv.id)}
                                     >
-                                        {ws.name}
+                                        {cv.name}
                                     </button>
                                 ))}
                             {folder && (
@@ -103,16 +109,16 @@ export function Sidebar() {
                                     className="mt-1 flex gap-1 px-1"
                                     onSubmit={(e) => {
                                         e.preventDefault();
-                                        if (newWsName.trim()) {
-                                            createWorkspace(newWsName.trim());
-                                            setNewWsName('');
+                                        if (newCanvasName.trim()) {
+                                            createCanvas(newCanvasName.trim());
+                                            setNewCanvasName('');
                                         }
                                     }}
                                 >
                                     <input
-                                        value={newWsName}
-                                        onChange={(e) => setNewWsName(e.target.value)}
-                                        placeholder="New workspace…"
+                                        value={newCanvasName}
+                                        onChange={(e) => setNewCanvasName(e.target.value)}
+                                        placeholder="New canvas…"
                                         className="nodrag w-full rounded-md border border-input bg-background px-2 py-1 text-[11px] outline-none focus:border-ring"
                                     />
                                     <button
@@ -125,21 +131,24 @@ export function Sidebar() {
                             )}
                             {!folder && (
                                 <p className="px-2 py-1 text-[11px] text-muted-foreground">
-                                    Pick a folder below to begin.
+                                    Open a folder to begin.
                                 </p>
                             )}
                         </Section>
 
-                        {/* Folders → their past sessions */}
+                        {/* Folders & their past sessions */}
                         <Section title="Folders & sessions" icon={<FolderOpen className="size-3.5" />}>
+                            <button
+                                className="mb-1 flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs text-primary hover:bg-secondary"
+                                onClick={() => setPickerOpen(true)}
+                            >
+                                <FolderPlus className="size-3.5" /> New canvas in another folder…
+                            </button>
                             {projects.map((p) => (
                                 <div key={p.cwd} className="mb-0.5">
                                     <button
                                         className="flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs text-card-foreground hover:bg-secondary"
-                                        onClick={() => {
-                                            toggleFolder(p.cwd);
-                                            if (!openFolders.has(p.cwd) && !folder) openFolder(p.cwd);
-                                        }}
+                                        onClick={() => toggleFolder(p.cwd)}
                                     >
                                         <ChevronRight
                                             className={cn(
@@ -156,14 +165,14 @@ export function Sidebar() {
                                     </button>
                                     {openFolders.has(p.cwd) && (
                                         <div className="ml-4 border-l border-border pl-1">
-                                            {p.sessions.map((s) => (
+                                            {p.sessions.map((sess) => (
                                                 <button
-                                                    key={s.id}
+                                                    key={sess.id}
                                                     className="block w-full truncate rounded-md px-2 py-0.5 text-left text-[11px] text-muted-foreground hover:bg-secondary hover:text-card-foreground"
-                                                    title={s.firstMessage}
-                                                    onClick={() => resumeSession(s.file)}
+                                                    title={sess.firstMessage}
+                                                    onClick={() => resumeSession(sess.file)}
                                                 >
-                                                    {s.firstMessage || s.id.slice(0, 8)}
+                                                    {sess.firstMessage || sess.id.slice(0, 8)}
                                                 </button>
                                             ))}
                                         </div>
@@ -180,6 +189,12 @@ export function Sidebar() {
                     )}
                 </>
             )}
+
+            <FolderPicker
+                open={pickerOpen}
+                onClose={() => setPickerOpen(false)}
+                onPick={newCanvasInPickedFolder}
+            />
         </div>
     );
 }

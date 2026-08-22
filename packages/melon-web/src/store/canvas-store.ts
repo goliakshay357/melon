@@ -21,7 +21,7 @@ function pushLog(cardId: string, line: string) {
 
 type ScrollAction = 'pan' | 'zoom';
 
-export interface WorkspaceMeta {
+export interface CanvasMeta {
     id: string;
     name: string;
     modified?: string;
@@ -29,16 +29,16 @@ export interface WorkspaceMeta {
 
 interface CanvasState {
     cards: SessionCard[];
-    folder: string | null; // real directory this workspace belongs to
-    workspaceId: string | null;
-    workspaceName: string;
-    workspaces: WorkspaceMeta[]; // workspaces within current folder
+    folder: string | null; // real directory this canvas belongs to
+    canvasId: string | null;
+    canvasName: string;
+    canvases: CanvasMeta[]; // canvases within current folder
     viewport?: { x: number; y: number; zoom: number };
     setViewport: (v: { x: number; y: number; zoom: number }) => void;
     openFolder: (folder: string) => Promise<void>;
-    switchWorkspace: (id: string) => Promise<void>;
-    createWorkspace: (name: string) => Promise<void>;
-    saveWorkspace: () => Promise<void>;
+    switchCanvas: (id: string) => Promise<void>;
+    createCanvas: (name: string) => Promise<void>;
+    saveCanvas: () => Promise<void>;
     scrollAction: ScrollAction;
     setScrollAction: (a: ScrollAction) => void;
     addCard: (
@@ -59,14 +59,14 @@ interface CanvasState {
     resumeSession: (sessionFile: string) => Promise<string | null>;
 }
 
-function loadLastLocation(): { folder: string | null; workspaceId: string | null } {
+function loadLastLocation(): { folder: string | null; canvasId: string | null } {
     try {
         return {
             folder: localStorage.getItem('melon:lastFolder'),
-            workspaceId: localStorage.getItem('melon:lastWorkspace'),
+            canvasId: localStorage.getItem('melon:lastCanvas'),
         };
     } catch {
-        return { folder: null, workspaceId: null };
+        return { folder: null, canvasId: null };
     }
 }
 
@@ -75,25 +75,25 @@ const loc = loadLastLocation();
 export const useCanvasStore = create<CanvasState>((set, get) => ({
     cards: [],
     folder: loc.folder,
-    workspaceId: loc.workspaceId,
-    workspaceName: '',
-    workspaces: [],
+    canvasId: loc.canvasId,
+    canvasName: '',
+    canvases: [],
 
     setViewport(v) {
         set({ viewport: v });
     },
 
-    async saveWorkspace() {
-        const { folder, workspaceId, workspaceName, cards, viewport } = get();
-        if (!folder || !workspaceId) return;
-        await fetch(`${MELON_API}/workspaces/${workspaceId}`, {
+    async saveCanvas() {
+        const { folder, canvasId, canvasName, cards, viewport } = get();
+        if (!folder || !canvasId) return;
+        await fetch(`${MELON_API}/canvases/${canvasId}`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify({
                 cwd: folder,
-                workspace: {
-                    id: workspaceId,
-                    name: workspaceName || 'Untitled',
+                canvas: {
+                    id: canvasId,
+                    name: canvasName || 'Untitled',
                     cwd: folder,
                     viewport,
                     cards,
@@ -102,49 +102,49 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         }).catch(() => {});
     },
 
-    async switchWorkspace(id) {
+    async switchCanvas(id) {
         const folder = get().folder;
         if (!folder) return;
         const res = await fetch(
-            `${MELON_API}/workspaces/${id}?cwd=${encodeURIComponent(folder)}`,
+            `${MELON_API}/canvases/${id}?cwd=${encodeURIComponent(folder)}`,
         ).catch(() => null);
         if (!res?.ok) return;
-        const ws = await res.json();
+        const cv = await res.json();
         set({
-            cards: Array.isArray(ws.cards) ? ws.cards : [],
-            workspaceId: id,
-            workspaceName: ws.name ?? 'Untitled',
-            viewport: ws.viewport,
+            cards: Array.isArray(cv.cards) ? cv.cards : [],
+            canvasId: id,
+            canvasName: cv.name ?? 'Untitled',
+            viewport: cv.viewport,
         });
-        localStorage.setItem('melon:lastWorkspace', id);
+        localStorage.setItem('melon:lastCanvas', id);
     },
 
-    async createWorkspace(name) {
+    async createCanvas(name) {
         if (!get().folder) return;
-        const id = `ws_${nanoid(8)}`;
-        set({ workspaceId: id, workspaceName: name || 'Untitled', cards: [] });
-        localStorage.setItem('melon:lastWorkspace', id);
-        await get().saveWorkspace();
+        const id = `cv_${nanoid(8)}`;
+        set({ canvasId: id, canvasName: name || 'Untitled', cards: [] });
+        localStorage.setItem('melon:lastCanvas', id);
+        await get().saveCanvas();
         // refresh list
         const res = await fetch(
-            `${MELON_API}/workspaces?cwd=${encodeURIComponent(get().folder ?? '')}`,
+            `${MELON_API}/canvases?cwd=${encodeURIComponent(get().folder ?? '')}`,
         ).catch(() => null);
-        if (res?.ok) set({ workspaces: (await res.json()).workspaces ?? [] });
+        if (res?.ok) set({ canvases: (await res.json()).canvases ?? [] });
     },
 
     async openFolder(rawFolder) {
-        set({ folder: rawFolder, workspaces: [], cards: [], workspaceId: null });
+        set({ folder: rawFolder, canvases: [], cards: [], canvasId: null });
         localStorage.setItem('melon:lastFolder', rawFolder);
         const res = await fetch(
-            `${MELON_API}/workspaces?cwd=${encodeURIComponent(rawFolder)}`,
+            `${MELON_API}/canvases?cwd=${encodeURIComponent(rawFolder)}`,
         ).catch(() => null);
-        let workspaces: WorkspaceMeta[] = [];
-        if (res?.ok) workspaces = (await res.json()).workspaces ?? [];
-        if (workspaces.length > 0) {
-            set({ workspaces });
-            await get().switchWorkspace(workspaces[0].id);
+        let canvases: CanvasMeta[] = [];
+        if (res?.ok) canvases = (await res.json()).canvases ?? [];
+        if (canvases.length > 0) {
+            set({ canvases });
+            await get().switchCanvas(canvases[0].id);
         } else {
-            await get().createWorkspace('Workspace 1');
+            await get().createCanvas('Canvas 1');
         }
     },
     scrollAction:
