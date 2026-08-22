@@ -18,8 +18,11 @@ export function Sidebar() {
     const [collapsed, setCollapsed] = useState(false);
     const [pickerOpen, setPickerOpen] = useState(false);
 
+    const [pickingNative, setPickingNative] = useState(false);
+
     // Native OS dialog first; custom navigator as fallback.
     const addFolder = async () => {
+        setPickingNative(true);
         try {
             const res = await fetch(`${MELON_API}/pick-folder`, { method: 'POST' });
             if (res.ok) {
@@ -32,6 +35,8 @@ export function Sidebar() {
             }
         } catch {
             /* fall through to in-app navigator */
+        } finally {
+            setPickingNative(false);
         }
         setPickerOpen(true);
     };
@@ -119,7 +124,7 @@ export function Sidebar() {
     return (
         <div
             className={cn(
-                'absolute left-3 top-3 z-10 flex max-h-[80vh] flex-col rounded-xl border border-border bg-card/95 shadow-sm backdrop-blur transition-all',
+                'absolute left-3 top-3 z-10 flex h-[calc(100vh-24px)] max-h-[calc(100vh-24px)] w-72 flex-col rounded-xl border border-border bg-card/95 shadow-sm backdrop-blur transition-all',
                 collapsed ? 'w-10 items-center py-2' : 'w-72 p-2',
             )}
         >
@@ -133,7 +138,7 @@ export function Sidebar() {
                 </button>
             ) : (
                 <>
-                    <div className="flex items-center justify-between px-1 pb-2">
+                    <div className="flex shrink-0 items-center justify-between px-1 pb-2">
                         <span className="text-xs font-semibold text-muted-foreground">Navigator</span>
                         <button
                             className="rounded-md p-1 text-muted-foreground hover:bg-secondary"
@@ -143,14 +148,15 @@ export function Sidebar() {
                         </button>
                     </div>
 
-                    <div className="flex-1 overflow-y-auto">
+                    <div className="min-h-0 flex-1 overflow-y-auto">
                         {/* Folder ▸ Canvas ▸ sessions */}
                         <Section title="Folders" icon={<FolderOpen className="size-3.5" />}>
                             <button
                                 className="mb-1 flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs text-primary hover:bg-secondary"
                                 onClick={addFolder}
                             >
-                                <FolderPlus className="size-3.5" /> Add folder
+                                <FolderPlus className="size-3.5" />
+                                {pickingNative ? 'Opening Finder…' : 'Add folder'}
                             </button>
                             {folders.map(({ cwd }) => {
                                 const t = tree[cwd] ?? { canvases: [], loose: [] };

@@ -451,6 +451,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const commands: Record<string, string[]> = {
 			darwin: [
 				"osascript",
+				"-e",
 				`POSIX path of (choose folder with prompt "Choose a folder for your melon canvas")`,
 			],
 			win32: [
