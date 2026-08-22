@@ -6,6 +6,7 @@ import {
     FolderPlus,
     PanelLeftOpen,
     Plus,
+    X,
 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { FolderPicker } from '@/components/folder-picker';
@@ -80,6 +81,25 @@ export function Sidebar() {
             next.has(cwd) ? next.delete(cwd) : next.add(cwd);
             return next;
         });
+
+    // Remove a folder from melon's history (canvases/sessions stay on disk).
+    const removeFolder = async (cwd: string) => {
+        if (
+            !window.confirm(
+                `Remove ${cwd.split('/').pop()} from the navigator? Canvases & sessions remain on disk.`,
+            )
+        )
+            return;
+        await fetch(`${MELON_API}/folders?cwd=${encodeURIComponent(cwd)}`, {
+            method: 'DELETE',
+        });
+        if (folder === cwd) {
+            localStorage.removeItem('melon:lastFolder');
+            localStorage.removeItem('melon:lastCanvas');
+            useCanvasStore.setState({ cards: [], canvasId: null, canvasName: '', folder: null });
+        }
+        loadTree();
+    };
 
     // Plus button beside a folder row: new canvas inside THAT folder.
     const newCanvasInFolder = async (cwd: string) => {
@@ -175,6 +195,16 @@ export function Sidebar() {
                                         <span className="flex-1 cursor-pointer truncate text-xs text-card-foreground">
                                             📁 {cwd.split('/').slice(-2).join('/')}
                                         </span>
+                                        <button
+                                            className="rounded p-0.5 text-muted-foreground opacity-60 hover:bg-background hover:text-red-500 hover:opacity-100"
+                                            title="Remove folder from navigator"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                removeFolder(cwd);
+                                            }}
+                                        >
+                                            <X className="size-3.5" />
+                                        </button>
                                         <button
                                             className="rounded p-0.5 text-muted-foreground opacity-60 hover:bg-background hover:text-primary hover:opacity-100"
                                             title={`New canvas in ${cwd.split('/').pop()}`}
