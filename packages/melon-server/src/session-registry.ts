@@ -21,6 +21,15 @@ export class SessionRegistry {
 		this.sessions.delete(cardId);
 	}
 
+	/// Comment frames keep streams alive and surface dead sockets.
+	pingAll(): void {
+		for (const s of this.sessions.values()) {
+			for (const client of s.clients) {
+				client.raw.write(`: ping\n\n`);
+			}
+		}
+	}
+
 	broadcast(cardId: string, payload: unknown): void {
 		const s = this.sessions.get(cardId);
 		if (!s) return;

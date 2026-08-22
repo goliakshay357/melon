@@ -100,7 +100,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
             const res = await fetch(`${MELON_API}/sessions/${parentId}/fork`, {
                 method: 'POST',
                 headers: { 'content-type': 'application/json' },
-                body: JSON.stringify({ newCardId: childCardId }),
+                body: JSON.stringify({
+                newCardId: childCardId,
+                sessionFile: parent?.sessionFile,
+            }),
             });
             if (!res.ok) throw new Error(await res.text());
             sessionInfo = await res.json();
@@ -196,17 +199,23 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
         // Ensure a pi session exists for this card (idempotent).
         if (!attached.has(cardId)) {
-            const url = opts?.sessionFile
+            // RESUME-FIRST: if this card ever had a session file, always resume it —
+            // server restarts and page refreshes must never cost us the conversation.
+            const sessionFile = opts?.sessionFile ?? card.sessionFile;
+            const url = sessionFile
                 ? `${MELON_API}/sessions/resume`
                 : `${MELON_API}/sessions`;
-            pushLog(cardId, `→ ATTACH ${new URL(url).pathname} cwd=${opts?.cwd ?? opts?.sessionFile ?? '(default)'}`);
+            pushLog(
+                cardId,
+                `→ ATTACH ${sessionFile ? `RESUME ${sessionFile.split('/').pop()}` : `NEW cwd=${opts?.cwd ?? '(default)'}`}`,
+            );
             try {
                 const res = await fetch(url, {
                     method: 'POST',
                     headers: { 'content-type': 'application/json' },
                     body: JSON.stringify(
-                        opts?.sessionFile
-                            ? { cardId, sessionFile: opts.sessionFile }
+                        sessionFile
+                            ? { cardId, sessionFile }
                             : { cardId, cwd: opts?.cwd ?? '~/Desktop/workspace/melon' },
                     ),
                 });
