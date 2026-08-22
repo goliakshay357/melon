@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+    :root {
+        /* GitHub light default */
+        --background: 210 29% 97%;   /* #f6f8fa */
+        --foreground: 215 13% 14%;   /* #1f2328 */
+        --card: 0 0% 100%;           /* #ffffff */
+        --card-foreground: 215 13% 14%;
+        --primary: 137 64% 32%;      /* #1f883d */
+        --primary-foreground: 0 0% 100%;
+        --secondary: 210 13% 95%;    /* #eff2f5 */
+        --secondary-foreground: 215 13% 20%;
+        --muted: 210 13% 95%;
+        --muted-foreground: 213 9% 43%;  /* #656d76 */
+        --accent: 212 92% 45%;       /* #0969da */
+        --accent-foreground: 0 0% 100%;
+        --border: 210 18% 84%;       /* #d0d7de */
+        --input: 210 18% 84%;
+        --ring: 212 92% 45%;
+        --radius: 6px;
+    }
+
+    .dark {
+        --background: 216 28% 7%;    /* #0d1117 */
+        --foreground: 212 19% 92%;   /* #e6edf3 */
+        --card: 215 20% 11%;         /* #161b22 */
+        --card-foreground: 212 19% 92%;
+        --primary: 138 61% 38%;      /* #2ea043 */
+        --primary-foreground: 0 0% 100%;
+        --secondary: 215 17% 17%;
+        --secondary-foreground: 212 19% 88%;
+        --muted: 215 17% 17%;
+        --muted-foreground: 213 10% 58%; /* #8b949e */
+        --accent: 214 100% 60%;      /* #388bfd */
+        --accent-foreground: 0 0% 100%;
+        --border: 214 12% 22%;       /* #30363d */
+        --input: 214 12% 22%;
+        --ring: 214 100% 60%;
+    }
+}
+
+html,
+body,
+#root {
+    height: 100%;
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
+        Helvetica, Arial, sans-serif;
+}

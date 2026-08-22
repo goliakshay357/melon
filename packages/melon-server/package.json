@@ -1,0 +1,22 @@
+{
+	"name": "@earendil-works/melon-server",
+	"version": "0.0.1",
+	"private": true,
+	"type": "module",
+	"description": "Melon canvas bridge: HTTP/SSE front-end over live pi sessions",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"build": "tsgo -p tsconfig.build.json",
+		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+		"start": "node dist/index.js",
+		"test": "vitest --run",
+		"typecheck": "tsgo -p tsconfig.test.json"
+	},
+	"dependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@fastify/cors": "^10.0.2",
+		"fastify": "^5.2.1"
+	}
+}
