@@ -16,7 +16,6 @@ import { ChatCardNode, type ChatCardNodeType } from './chat-card-node';
 import { ForkEdge } from './fork-edge';
 import { Toolbar } from './toolbar';
 import { Sidebar } from './sidebar';
-import { FolderPicker } from '@/components/folder-picker';
 import { useCanvasStore } from '@/store/canvas-store';
 
 type AppNode = ChatCardNodeType;
@@ -48,7 +47,6 @@ export function Canvas() {
     const { screenToFlowPosition, fitView } = useReactFlow();
     const wrapperRef = useRef<HTMLDivElement>(null);
     const heroFormRef = useRef<HTMLFormElement>(null);
-    const [pickerOpen, setPickerOpen] = useState(false);
 
     const nodeTypes = useMemo(() => ({ chatCard: ChatCardNode }), []);
     const edgeTypes = useMemo(() => ({ fork: ForkEdge }), []);
@@ -261,14 +259,7 @@ export function Canvas() {
                             placeholder="/path/to/project or ~/path — where the agent works"
                             className="w-full rounded-lg border border-input bg-background px-3 py-2 text-xs outline-none focus:border-ring"
                         />
-                        <div className="mt-3 flex gap-2">
-                            <button
-                                type="button"
-                                className="rounded-lg border border-input px-3 py-2 text-xs text-muted-foreground hover:bg-secondary"
-                                onClick={() => setPickerOpen(true)}
-                            >
-                                📂 Browse…
-                            </button>
+                        <div className="mt-3">
                             <button
                                 type="submit"
                                 className="flex-1 rounded-lg bg-primary py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
@@ -276,14 +267,6 @@ export function Canvas() {
                                 Open folder
                             </button>
                         </div>
-                        <FolderPicker
-                            open={pickerOpen}
-                            onClose={() => setPickerOpen(false)}
-                            onPick={(path) => {
-                                const input = heroFormRef.current?.querySelector('input[name=cwd]') as HTMLInputElement | null;
-                                if (input) input.value = path;
-                            }}
-                        />
                     </form>
                 </div>
             ) : cards.length === 0 && (

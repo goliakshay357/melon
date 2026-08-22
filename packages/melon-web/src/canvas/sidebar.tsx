@@ -8,7 +8,6 @@ import {
     Plus,
 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
-import { FolderPicker } from '@/components/folder-picker';
 import { cn } from '@/lib/utils';
 
 
@@ -16,7 +15,6 @@ const MELON_API = 'http://127.0.0.1:8788';
 
 export function Sidebar() {
     const [collapsed, setCollapsed] = useState(false);
-    const [pickerOpen, setPickerOpen] = useState(false);
 
     const [pickingNative, setPickingNative] = useState(false);
 
@@ -301,18 +299,7 @@ export function Sidebar() {
                 </>
             )}
 
-            <FolderPicker
-                open={pickerOpen}
-                onClose={() => setPickerOpen(false)}
-                onPick={async (path) => {
-                    await fetch(`${MELON_API}/folders`, {
-                        method: 'POST',
-                        headers: { 'content-type': 'application/json' },
-                        body: JSON.stringify({ cwd: path }),
-                    });
-                    await loadTree();
-                }}
-            />
+
 
         </div>
     );
