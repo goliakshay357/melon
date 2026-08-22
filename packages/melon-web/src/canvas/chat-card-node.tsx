@@ -8,6 +8,7 @@ import {
 } from '@xyflow/react';
 import { Plus, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
+import { MarkdownBlock } from '@/components/markdown-block';
 import { cn } from '@/lib/utils';
 
 export type ChatCardNodeType = Node<{ cardId: string }, 'chatCard'>;
@@ -121,9 +122,15 @@ export function ChatCardNode({
                                 </div>
                             </details>
                         )}
-                        {m.text || (m.thinking && !m.text ? '' : m.text)}
-                        {!m.text && m.thinking && (
-                            <span className="text-[10px] text-muted-foreground">…</span>
+                        {m.role === 'assistant' ? (
+                            <>
+                                <MarkdownBlock content={m.text} />
+                                {!m.text && m.thinking && (
+                                    <span className="text-[10px] text-muted-foreground">…</span>
+                                )}
+                            </>
+                        ) : (
+                            m.text
                         )}
                     </div>
                 ))}
