@@ -3,6 +3,7 @@ import {
     ChevronRight,
     FolderOpen,
     PanelLeftClose,
+    FolderPlus,
     PanelLeftOpen,
     Plus,
 } from 'lucide-react';
