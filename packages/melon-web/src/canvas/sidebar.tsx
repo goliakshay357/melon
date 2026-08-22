@@ -145,6 +145,12 @@ export function Sidebar() {
                     <div className="flex-1 overflow-y-auto">
                         {/* Folder ▸ Canvas ▸ sessions */}
                         <Section title="Folders" icon={<FolderOpen className="size-3.5" />}>
+                            <button
+                                className="mb-1 flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs text-primary hover:bg-secondary"
+                                onClick={addFolder}
+                            >
+                                <FolderPlus className="size-3.5" /> Add folder
+                            </button>
                             {folders.map(({ cwd }) => {
                                 const t = tree[cwd] ?? { canvases: [], loose: [] };
                                 return (
