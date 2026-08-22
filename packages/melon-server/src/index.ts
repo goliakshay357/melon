@@ -247,6 +247,66 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		};
 	});
 
+
+	// ── Workspace persistence: <folder>/.melon/workspaces/<id>.json ──
+	function workspacesDir(cwd: string): string {
+		return join(expandHome(cwd), ".melon", "workspaces");
+	}
+
+	// List workspaces in a folder (lightweight: reads each file's meta line).
+	app.get("/workspaces", async (req, reply) => {
+		const q = req.query as any;
+		let dir: string;
+		try {
+			dir = assertCwd(q.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const wsDir = workspacesDir(dir);
+		const out: Array<{ id: string; name: string; modified: string }> = [];
+		try {
+			for (const f of readdirSync(wsDir)) {
+				if (!f.endsWith(".json")) continue;
+				try {
+					const raw = JSON.parse(readFileSync(join(wsDir, f), "utf8"));
+					out.push({ id: raw.id ?? f.replace(/\.json$/, ""), name: raw.name ?? "Untitled", modified: raw.modified ?? "" });
+				} catch { /* skip corrupt */ }
+			}
+		} catch { /* no workspaces yet */ }
+		return { workspaces: out };
+	});
+
+	// Load one workspace fully.
+	app.get("/workspaces/:id", async (req, reply) => {
+		const q = req.query as any;
+		const wsDir = workspacesDir(expandHome(q.cwd));
+		const file = join(wsDir, `${(req.params as any).id}.json`);
+		try {
+			return JSON.parse(readFileSync(file, "utf8"));
+		} catch {
+			return reply.code(404).send({ error: "workspace not found" });
+		}
+	});
+
+	// Save (upsert).
+	app.put("/workspaces/:id", async (req, reply) => {
+		const body = req.body as any;
+		let dir: string;
+		try {
+			dir = assertCwd(body?.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const ws = body?.workspace;
+		if (!ws?.id) return reply.code(400).send({ error: "workspace.id required" });
+		const wsDir = workspacesDir(dir);
+		const { mkdirSync, writeFileSync } = await import("node:fs");
+		mkdirSync(wsDir, { recursive: true });
+		ws.modified = new Date().toISOString();
+		writeFileSync(join(wsDir, `${ws.id}.json`), JSON.stringify(ws));
+		return { ok: true };
+	});
+
 	app.get("/sessions/:cardId/events", (req, reply) => {
 		const s = registry.get((req.params as any).cardId);
 		if (!s) return reply.code(404).send({ error: "unknown card" });

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
+import { nanoid } from 'nanoid';
 import { newCardId, type SessionCard } from '@/types/session-card';
 
-const STORAGE_KEY = 'melon:canvas:v1';
 const MELON_API = 'http://127.0.0.1:8788';
 
 // cardId → live SSE stream state
@@ -19,23 +19,26 @@ function pushLog(cardId: string, line: string) {
     }));
 }
 
-function loadCards(): SessionCard[] {
-    try {
-        const raw = localStorage.getItem(STORAGE_KEY);
-        return raw ? (JSON.parse(raw) as SessionCard[]) : [];
-    } catch {
-        return [];
-    }
-}
-
-function persist(cards: SessionCard[]) {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(cards));
-}
-
 type ScrollAction = 'pan' | 'zoom';
+
+export interface WorkspaceMeta {
+    id: string;
+    name: string;
+    modified?: string;
+}
 
 interface CanvasState {
     cards: SessionCard[];
+    folder: string | null; // real directory this workspace belongs to
+    workspaceId: string | null;
+    workspaceName: string;
+    workspaces: WorkspaceMeta[]; // workspaces within current folder
+    viewport?: { x: number; y: number; zoom: number };
+    setViewport: (v: { x: number; y: number; zoom: number }) => void;
+    openFolder: (folder: string) => Promise<void>;
+    switchWorkspace: (id: string) => Promise<void>;
+    createWorkspace: (name: string) => Promise<void>;
+    saveWorkspace: () => Promise<void>;
     scrollAction: ScrollAction;
     setScrollAction: (a: ScrollAction) => void;
     addCard: (
@@ -56,8 +59,94 @@ interface CanvasState {
     resumeSession: (sessionFile: string) => Promise<string | null>;
 }
 
+function loadLastLocation(): { folder: string | null; workspaceId: string | null } {
+    try {
+        return {
+            folder: localStorage.getItem('melon:lastFolder'),
+            workspaceId: localStorage.getItem('melon:lastWorkspace'),
+        };
+    } catch {
+        return { folder: null, workspaceId: null };
+    }
+}
+
+const loc = loadLastLocation();
+
 export const useCanvasStore = create<CanvasState>((set, get) => ({
-    cards: loadCards(),
+    cards: [],
+    folder: loc.folder,
+    workspaceId: loc.workspaceId,
+    workspaceName: '',
+    workspaces: [],
+
+    setViewport(v) {
+        set({ viewport: v });
+    },
+
+    async saveWorkspace() {
+        const { folder, workspaceId, workspaceName, cards, viewport } = get();
+        if (!folder || !workspaceId) return;
+        await fetch(`${MELON_API}/workspaces/${workspaceId}`, {
+            method: 'PUT',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                cwd: folder,
+                workspace: {
+                    id: workspaceId,
+                    name: workspaceName || 'Untitled',
+                    cwd: folder,
+                    viewport,
+                    cards,
+                },
+            }),
+        }).catch(() => {});
+    },
+
+    async switchWorkspace(id) {
+        const folder = get().folder;
+        if (!folder) return;
+        const res = await fetch(
+            `${MELON_API}/workspaces/${id}?cwd=${encodeURIComponent(folder)}`,
+        ).catch(() => null);
+        if (!res?.ok) return;
+        const ws = await res.json();
+        set({
+            cards: Array.isArray(ws.cards) ? ws.cards : [],
+            workspaceId: id,
+            workspaceName: ws.name ?? 'Untitled',
+            viewport: ws.viewport,
+        });
+        localStorage.setItem('melon:lastWorkspace', id);
+    },
+
+    async createWorkspace(name) {
+        if (!get().folder) return;
+        const id = `ws_${nanoid(8)}`;
+        set({ workspaceId: id, workspaceName: name || 'Untitled', cards: [] });
+        localStorage.setItem('melon:lastWorkspace', id);
+        await get().saveWorkspace();
+        // refresh list
+        const res = await fetch(
+            `${MELON_API}/workspaces?cwd=${encodeURIComponent(get().folder ?? '')}`,
+        ).catch(() => null);
+        if (res?.ok) set({ workspaces: (await res.json()).workspaces ?? [] });
+    },
+
+    async openFolder(rawFolder) {
+        set({ folder: rawFolder, workspaces: [], cards: [], workspaceId: null });
+        localStorage.setItem('melon:lastFolder', rawFolder);
+        const res = await fetch(
+            `${MELON_API}/workspaces?cwd=${encodeURIComponent(rawFolder)}`,
+        ).catch(() => null);
+        let workspaces: WorkspaceMeta[] = [];
+        if (res?.ok) workspaces = (await res.json()).workspaces ?? [];
+        if (workspaces.length > 0) {
+            set({ workspaces });
+            await get().switchWorkspace(workspaces[0].id);
+        } else {
+            await get().createWorkspace('Workspace 1');
+        }
+    },
     scrollAction:
         (localStorage.getItem('melon:scroll_action') as ScrollAction) || 'pan',
 
@@ -78,11 +167,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
             status: 'idle',
             messages: [],
         };
-        set((s) => {
-            const cards = [...s.cards, card];
-            persist(cards);
-            return { cards };
-        });
+        set((s) => ({ cards: [...s.cards, card] }));
         return card.id;
     },
 
@@ -135,13 +220,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     },
 
     updateCard(id, patch) {
-        set((s) => {
-            const cards = s.cards.map((c) =>
-                c.id === id ? { ...c, ...patch } : c,
-            );
-            persist(cards);
-            return { cards };
-        });
+        set((s) => ({
+            cards: s.cards.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+        }));
     },
 
     resizeCard(id, width, height) {
@@ -150,18 +231,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
     deleteCards(ids) {
         const dead = new Set(ids);
-        set((s) => {
+        set((s) => ({
             // Orphan children rather than cascading — forks survive parents in v1.
-            const cards = s.cards
+            cards: s.cards
                 .filter((c) => !dead.has(c.id))
                 .map((c) =>
                     c.parentId && dead.has(c.parentId)
                         ? { ...c, parentId: null }
                         : c,
-                );
-            persist(cards);
-            return { cards };
-        });
+                ),
+        }));
     },
 
     async resumeSession(sessionFile) {

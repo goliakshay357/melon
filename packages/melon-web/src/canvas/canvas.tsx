@@ -26,6 +26,11 @@ export function Canvas() {
     const moveCard = useCanvasStore((s) => s.moveCard);
     const deleteCards = useCanvasStore((s) => s.deleteCards);
     const scrollAction = useCanvasStore((s) => s.scrollAction);
+    const folder = useCanvasStore((s) => s.folder);
+    const workspaceId = useCanvasStore((s) => s.workspaceId);
+    const openFolder = useCanvasStore((s) => s.openFolder);
+    const saveWorkspace = useCanvasStore((s) => s.saveWorkspace);
+    const storedViewport = useCanvasStore((s) => s.viewport);
 
     const [nodes, setNodes] = useState<AppNode[]>([]);
     const [theme, setTheme] = useState<'light' | 'dark'>(() =>
@@ -44,6 +49,41 @@ export function Canvas() {
 
     const nodeTypes = useMemo(() => ({ chatCard: ChatCardNode }), []);
     const edgeTypes = useMemo(() => ({ fork: ForkEdge }), []);
+
+	// Restore last location (folder + workspace) on first mount.
+	const restoredRef = useRef(false);
+	useEffect(() => {
+		if (restoredRef.current) return;
+		const f = localStorage.getItem('melon:lastFolder');
+		if (f && !folder) {
+			restoredRef.current = true;
+			openFolder(f);
+		}
+	}, [folder, openFolder]);
+
+	// Autosave workspace (debounced).
+	useEffect(() => {
+		if (!workspaceId || !folder) return;
+		const t = setTimeout(() => saveWorkspace(), 800);
+		return () => clearTimeout(t);
+	}, [cards, storedViewport, workspaceId, folder]);
+
+	// Apply stored viewport once nodes exist after a workspace load.
+	const appliedViewportFor = useRef<string | null>(null);
+	const { setViewport: rfSetViewport } = useReactFlow();
+	useEffect(() => {
+		if (!storedViewport || appliedViewportFor.current === workspaceId) return;
+		if (nodes.length === 0) return;
+		appliedViewportFor.current = workspaceId ?? '';
+		rfSetViewport(storedViewport);
+	}, [nodes.length, workspaceId, storedViewport, rfSetViewport]);
+
+	// Capture viewport on move end for persistence.
+	const onMoveEnd = useCallback(
+		(_e: unknown, vp: { x: number; y: number; zoom: number }) =>
+			useCanvasStore.getState().setViewport(vp),
+		[],
+	);
 
     // Sync store → RF nodes (preserving selection flags across rebuilds).
     useEffect(() => {
@@ -148,6 +188,7 @@ export function Canvas() {
                 }}
                 onPaneClick={closeMenu}
                 onMoveStart={closeMenu}
+                onMoveEnd={onMoveEnd}
                 colorMode={theme}
                 proOptions={{ hideAttribution: true }}
             >
@@ -187,8 +228,39 @@ export function Canvas() {
                 </div>
             )}
 
-            {/* Empty-state hero */}
-            {cards.length === 0 && (
+            {/* Folder chooser — very first screen */}
+            {!folder ? (
+                <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
+                    <form
+                        className="pointer-events-auto w-[420px] rounded-2xl border border-border bg-card/95 p-6 shadow-lg backdrop-blur"
+                        onSubmit={(e) => {
+                            e.preventDefault();
+                            const cwd = new FormData(e.currentTarget).get('cwd');
+                            if (typeof cwd === 'string' && cwd.trim()) openFolder(cwd.trim());
+                        }}
+                    >
+                        <h1 className="mb-1 text-center text-base font-semibold text-card-foreground">
+                            🍉 Melon Canvas
+                        </h1>
+                        <p className="mb-4 text-center text-xs text-muted-foreground">
+                            Choose a project folder. Workspaces & sessions live here.
+                        </p>
+                        <input
+                            name="cwd"
+                            autoFocus
+                            defaultValue="~/Desktop/workspace/melon"
+                            placeholder="/path/to/project or ~/path"
+                            className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
+                        />
+                        <button
+                            type="submit"
+                            className="mt-3 w-full rounded-lg bg-primary py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+                        >
+                            Open folder
+                        </button>
+                    </form>
+                </div>
+            ) : cards.length === 0 && (
                 <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
                     <form
                         className="pointer-events-auto w-[420px] rounded-2xl border border-border bg-card/95 p-6 shadow-lg backdrop-blur"
