@@ -2,14 +2,12 @@ import { useCallback, useEffect, useState } from 'react';
 import {
     ChevronRight,
     FolderOpen,
-    FolderPlus,
     Layers,
     PanelLeftClose,
     PanelLeftOpen,
     Plus,
 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
-import { FolderPicker } from '@/components/folder-picker';
 import { cn } from '@/lib/utils';
 
 interface SessionInfo {
@@ -30,7 +28,6 @@ export function Sidebar() {
     const [tree, setTree] = useState<Array<any>>([]);
     const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
     const [newCanvasName, setNewCanvasName] = useState('');
-    const [pickerOpen, setPickerOpen] = useState(false);
 
     const folder = useCanvasStore((s) => s.folder);
     const canvases = useCanvasStore((s) => s.canvases);
@@ -67,13 +64,6 @@ export function Sidebar() {
             next.has(cwd) ? next.delete(cwd) : next.add(cwd);
             return next;
         });
-
-    // Start a new canvas in a folder chosen via the navigator.
-    const newCanvasInPickedFolder = async (path: string) => {
-        const name = window.prompt('Name your new canvas', 'Canvas 1')?.trim();
-        await openFolder(path);
-        await createCanvas(name || 'Canvas 1');
-    };
 
     // Plus button beside a folder row: new canvas inside THAT folder.
     const newCanvasInFolder = async (cwd: string) => {
@@ -194,12 +184,6 @@ export function Sidebar() {
 
                         {/* Folder ▸ Canvas ▸ sessions */}
                         <Section title="Folders" icon={<FolderOpen className="size-3.5" />}>
-                            <button
-                                className="mb-1 flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-xs text-primary hover:bg-secondary"
-                                onClick={() => setPickerOpen(true)}
-                            >
-                                <FolderPlus className="size-3.5" /> New canvas in another folder…
-                            </button>
                             {tree.map((t) => (
                                 <div key={t.cwd} className="mb-0.5">
                                     <div
@@ -311,11 +295,6 @@ export function Sidebar() {
                 </>
             )}
 
-            <FolderPicker
-                open={pickerOpen}
-                onClose={() => setPickerOpen(false)}
-                onPick={newCanvasInPickedFolder}
-            />
         </div>
     );
 }
