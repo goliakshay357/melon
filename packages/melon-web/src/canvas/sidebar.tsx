@@ -16,6 +16,24 @@ const MELON_API = 'http://127.0.0.1:8788';
 export function Sidebar() {
     const [collapsed, setCollapsed] = useState(false);
     const [pickerOpen, setPickerOpen] = useState(false);
+
+    // Native OS dialog first; custom navigator as fallback.
+    const addFolder = async () => {
+        try {
+            const res = await fetch(`${MELON_API}/pick-folder`, { method: 'POST' });
+            if (res.ok) {
+                const { path } = await res.json();
+                if (path) {
+                    openFolder(path);
+                    loadTree();
+                    return;
+                }
+            }
+        } catch {
+            /* fall through to in-app navigator */
+        }
+        setPickerOpen(true);
+    };
     const [folders, setFolders] = useState<Array<{ cwd: string; lastOpenedAt: string }>>([]);
     const [tree, setTree] = useState<Record<string, { canvases: any[]; loose: any[] }>>({});
     const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());

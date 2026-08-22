@@ -443,6 +443,47 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { ok: true };
 	});
 
+
+	// Native OS folder picker — runs locally, so the dialog appears on the
+	// user's screen and we receive the real absolute path.
+	app.post("/pick-folder", async (_req, reply) => {
+		const { execFile } = await import("node:child_process");
+		const commands: Record<string, string[]> = {
+			darwin: [
+				"osascript",
+				`POSIX path of (choose folder with prompt "Choose a folder for your melon canvas")`,
+			],
+			win32: [
+				"powershell",
+				"-NoProfile",
+				"-Command",
+				"Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose a folder for your melon canvas'; if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }",
+			],
+			linux: ["zenity", "--file-selection", "--directory"],
+		};
+		const [cmd, ...args] = commands[process.platform] ?? commands.linux;
+		try {
+			const stdout = await new Promise<string>((resolve, reject) => {
+				execFile(cmd, args, { timeout: 120000 }, (err, out) =>
+					err ? reject(err) : resolve(String(out)),
+				);
+			});
+			const path = stdout.trim().replace(/\/$/, "");
+			if (!path) return reply.code(409).send({ cancelled: true });
+			if (statSync(path, { throwIfNoEntry: false })?.isDirectory() !== true) {
+				return reply.code(400).send({ error: `not a directory: ${path}` });
+			}
+			touchFolder(path);
+			return { path };
+		} catch (e) {
+			const msg = (e as Error).message ?? "";
+			if (/cancel|err=-128|User dismissed/i.test(msg)) {
+				return reply.code(409).send({ cancelled: true });
+			}
+			return reply.code(500).send({ error: msg });
+		}
+	});
+
 	app.get("/sessions/:cardId/events", (req, reply) => {
 		const s = registry.get((req.params as any).cardId);
 		if (!s) return reply.code(404).send({ error: "unknown card" });
