@@ -2,7 +2,6 @@ import { useCallback, useEffect, useState } from 'react';
 import {
     ChevronRight,
     FolderOpen,
-    Layers,
     PanelLeftClose,
     PanelLeftOpen,
     Plus,
@@ -27,14 +26,12 @@ export function Sidebar() {
     const [collapsed, setCollapsed] = useState(false);
     const [tree, setTree] = useState<Array<any>>([]);
     const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
-    const [newCanvasName, setNewCanvasName] = useState('');
 
     const folder = useCanvasStore((s) => s.folder);
-    const canvases = useCanvasStore((s) => s.canvases);
     const canvasId = useCanvasStore((s) => s.canvasId);
-    const openFolder = useCanvasStore((s) => s.openFolder);
     const switchCanvas = useCanvasStore((s) => s.switchCanvas);
     const createCanvas = useCanvasStore((s) => s.createCanvas);
+    const openFolder = useCanvasStore((s) => s.openFolder);
     const resumeSession = useCanvasStore((s) => s.resumeSession);
 
     const loadTree = useCallback(async () => {
@@ -133,55 +130,6 @@ export function Sidebar() {
                     </div>
 
                     <div className="flex-1 overflow-y-auto">
-                        {/* Canvases within current folder */}
-                        <Section title="Canvases" icon={<Layers className="size-3.5" />}>
-                            {folder &&
-                                canvases.map((cv) => (
-                                    <button
-                                        key={cv.id}
-                                        className={cn(
-                                            'block w-full truncate rounded-md px-2 py-1 text-left text-xs hover:bg-secondary',
-                                            cv.id === canvasId
-                                                ? 'bg-secondary font-medium text-primary'
-                                                : 'text-card-foreground',
-                                        )}
-                                        onClick={() => switchCanvas(cv.id)}
-                                    >
-                                        {cv.name}
-                                    </button>
-                                ))}
-                            {folder && (
-                                <form
-                                    className="mt-1 flex gap-1 px-1"
-                                    onSubmit={(e) => {
-                                        e.preventDefault();
-                                        if (newCanvasName.trim()) {
-                                            createCanvas(newCanvasName.trim());
-                                            setNewCanvasName('');
-                                        }
-                                    }}
-                                >
-                                    <input
-                                        value={newCanvasName}
-                                        onChange={(e) => setNewCanvasName(e.target.value)}
-                                        placeholder="New canvas…"
-                                        className="nodrag w-full rounded-md border border-input bg-background px-2 py-1 text-[11px] outline-none focus:border-ring"
-                                    />
-                                    <button
-                                        type="submit"
-                                        className="rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
-                                    >
-                                        <Plus className="size-3.5" />
-                                    </button>
-                                </form>
-                            )}
-                            {!folder && (
-                                <p className="px-2 py-1 text-[11px] text-muted-foreground">
-                                    Open a folder to begin.
-                                </p>
-                            )}
-                        </Section>
-
                         {/* Folder ▸ Canvas ▸ sessions */}
                         <Section title="Folders" icon={<FolderOpen className="size-3.5" />}>
                             {tree.map((t) => (
