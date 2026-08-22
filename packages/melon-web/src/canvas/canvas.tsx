@@ -250,11 +250,16 @@ export function Canvas() {
                             Choose a project folder. Canvases & sessions live here.
                         </p>
                         <input
+                            name="canvasName"
+                            defaultValue="Canvas 1"
+                            placeholder="Name this canvas"
+                            className="mb-2 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
+                        />
+                        <input
                             name="cwd"
-                            autoFocus
                             defaultValue="~/Desktop/workspace/melon"
-                            placeholder="/path/to/project or ~/path"
-                            className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
+                            placeholder="/path/to/project or ~/path — where the agent works"
+                            className="w-full rounded-lg border border-input bg-background px-3 py-2 text-xs outline-none focus:border-ring"
                         />
                         <div className="mt-3 flex gap-2">
                             <button
@@ -290,7 +295,12 @@ export function Canvas() {
                             const fd = new FormData(e.currentTarget);
                             const input = fd.get('q');
                             const cwd = fd.get('cwd');
+                            const name = fd.get('canvasName');
                             if (typeof input === 'string' && input.trim()) {
+                                if (typeof name === 'string' && name.trim()) {
+                                    useCanvasStore.setState({ canvasName: name.trim() });
+                                    saveCanvas();
+                                }
                                 onHeroSubmit(
                                     input.trim(),
                                     typeof cwd === 'string' && cwd.trim() ? cwd.trim() : undefined,

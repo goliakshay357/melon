@@ -70,14 +70,17 @@ export function Sidebar() {
 
     // Start a new canvas in a folder chosen via the navigator.
     const newCanvasInPickedFolder = async (path: string) => {
+        const name = window.prompt('Name your new canvas', 'Canvas 1')?.trim();
         await openFolder(path);
-        await createCanvas('Canvas 1');
+        await createCanvas(name || 'Canvas 1');
     };
 
     // Plus button beside a folder row: new canvas inside THAT folder.
     const newCanvasInFolder = async (cwd: string) => {
         const entry = tree.find((t) => t.cwd === cwd);
-        const name = `Canvas ${(entry?.canvases.length ?? 0) + 1}`;
+        const suggested = `Canvas ${(entry?.canvases.length ?? 0) + 1}`;
+        const name = window.prompt('Name your new canvas', suggested)?.trim();
+        if (!name) return; // cancelled
         if (folder !== cwd) await openFolder(cwd);
         await createCanvas(name);
         loadTree();
