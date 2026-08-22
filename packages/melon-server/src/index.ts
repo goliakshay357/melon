@@ -85,7 +85,28 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	}
 
 	function wireEvents(cardId: string, runtime: any): void {
+		let deltaCount = 0;
 		runtime.session.subscribe((event: any) => {
+			if (event.type === "agent_start") {
+				console.log(`[${cardId}] agent_start`);
+			} else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+				deltaCount++;
+			} else if (event.type === "agent_end") {
+				const msgs = event.messages ?? [];
+				const last = msgs[msgs.length - 1];
+				console.log(
+					`[${cardId}] agent_end stopReason=${last?.stopReason} deltas=${deltaCount} usage=in:${last?.usage?.input?.tokens ?? "?"} out:${last?.usage?.output?.tokens ?? "?"}`,
+				);
+				deltaCount = 0;
+				// Release the card as soon as the ANSWER is done. pi's prompt()
+				// promise can linger tens of seconds afterwards (post-run
+				// processing) — holding busy for that blocks the next message.
+				const entry = registry.get(cardId);
+				if (entry) entry.busy = false;
+			} else if (event.type === "auto_retry_start" || event.type === "summarization_retry_scheduled") {
+				console.log(`[${cardId}] ${event.type}`);
+			}
+
 			if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
 				registry.broadcast(cardId, {
 					type: "thinking",
@@ -248,9 +269,13 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		s.busy = true;
 		reply.send({ ok: true });
 		const cardId = (req.params as any).cardId;
+		const started = Date.now();
+		console.log(`[${cardId}] prompt:start "${String((req.body as any)?.text).slice(0, 60)}"`);
 		try {
 			await s.runtime.session.prompt((req.body as any)?.text ?? "");
+			console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
 		} catch (e) {
+			console.error(`[${cardId}] prompt:THREW ${(e as Error).stack}`);
 			registry.broadcast(cardId, { type: "error", message: (e as Error).message });
 			registry.broadcast(cardId, { type: "status", status: "error" });
 		} finally {
