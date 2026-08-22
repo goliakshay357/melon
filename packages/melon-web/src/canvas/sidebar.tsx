@@ -260,13 +260,23 @@ export function Sidebar() {
                                             ))}
                                             {t.loose.length > 0 && (
                                                 <div>
-                                                    <p className="px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+                                                    <div
+                                                        className="flex w-full cursor-pointer items-center gap-1 rounded-md px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted-foreground hover:bg-secondary"
+                                                        onClick={() => toggleCanvasSessions(`${cwd}::loose`)}
+                                                    >
+                                                        <ChevronRight
+                                                            className={cn(
+                                                                'size-2.5 transition-transform',
+                                                                openCanvasSessions.has(`${cwd}::loose`) && 'rotate-90',
+                                                            )}
+                                                        />
                                                         loose sessions ({t.loose.length})
-                                                    </p>
-                                                    {t.loose.map((sess: any) => (
+                                                    </div>
+                                                    {openCanvasSessions.has(`${cwd}::loose`) &&
+                                                    t.loose.map((sess: any) => (
                                                         <button
                                                             key={sess.file}
-                                                            className="block w-full truncate rounded-md px-2 py-0.5 text-left text-[10px] text-muted-foreground hover:bg-secondary hover:text-card-foreground"
+                                                            className="block w-full truncate rounded-md px-2 py-0.5 pl-4 text-left text-[10px] text-muted-foreground hover:bg-secondary hover:text-card-foreground"
                                                             title={sess.title}
                                                             onClick={() => resumeSession(sess.file)}
                                                         >
