@@ -263,13 +263,13 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		} catch (e) {
 			return reply.code(400).send({ error: (e as Error).message });
 		}
-		const wsDir = canvasesDir(dir);
+		const cvDir2 = canvasesDir(dir);
 		const out: Array<{ id: string; name: string; modified: string }> = [];
 		try {
-			for (const f of readdirSync(wsDir)) {
+			for (const f of readdirSync(cvDir2)) {
 				if (!f.endsWith(".json")) continue;
 				try {
-					const raw = JSON.parse(readFileSync(join(wsDir, f), "utf8"));
+					const raw = JSON.parse(readFileSync(join(cvDir2, f), "utf8"));
 					out.push({ id: raw.id ?? f.replace(/\.json$/, ""), name: raw.name ?? "Untitled", modified: raw.modified ?? "" });
 				} catch { /* skip corrupt */ }
 			}
@@ -277,11 +277,29 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { canvases: out };
 	});
 
+	// Delete a canvas file.
+	app.delete("/canvases/:id", async (req, reply) => {
+		const q = req.query as any;
+		let dir: string;
+		try {
+			dir = assertCwd(q.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const { rmSync } = await import("node:fs");
+		const file = join(canvasesDir(dir), `${(req.params as any).id}.json`);
+		try {
+			rmSync(file);
+			return { ok: true };
+		} catch {
+			return reply.code(404).send({ error: "canvas not found" });
+		}
+	});
+
 	// Load one workspace fully.
 	app.get("/canvases/:id", async (req, reply) => {
 		const q = req.query as any;
-		const wsDir = canvasesDir(expandHome(q.cwd));
-		const file = join(wsDir, `${(req.params as any).id}.json`);
+		const file = join(canvasesDir(expandHome(q.cwd)), `${(req.params as any).id}.json`);
 		try {
 			return JSON.parse(readFileSync(file, "utf8"));
 		} catch {
@@ -298,13 +316,13 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		} catch (e) {
 			return reply.code(400).send({ error: (e as Error).message });
 		}
-		const ws = body?.workspace;
+		const ws = body?.canvas ?? body?.workspace; // accept legacy key
 		if (!ws?.id) return reply.code(400).send({ error: "canvas.id required" });
-		const wsDir = canvasesDir(dir);
+		const cvDir2 = canvasesDir(dir);
 		const { mkdirSync, writeFileSync } = await import("node:fs");
-		mkdirSync(wsDir, { recursive: true });
+		mkdirSync(cvDir2, { recursive: true });
 		ws.modified = new Date().toISOString();
-		writeFileSync(join(wsDir, `${ws.id}.json`), JSON.stringify(ws));
+		writeFileSync(join(cvDir2, `${ws.id}.json`), JSON.stringify(ws));
 		return { ok: true };
 	});
 
