@@ -5,6 +5,8 @@ export type CardStatus = 'idle' | 'streaming' | 'error';
 export interface ChatMessage {
     role: 'user' | 'assistant';
     text: string;
+    /** Model reasoning stream (thinking models only). */
+    thinking?: string;
 }
 
 /**

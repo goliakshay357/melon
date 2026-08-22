@@ -86,7 +86,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 
 	function wireEvents(cardId: string, runtime: any): void {
 		runtime.session.subscribe((event: any) => {
-			if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+			if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
+				registry.broadcast(cardId, {
+					type: "thinking",
+					text: event.assistantMessageEvent.delta,
+				});
+			} else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
 				registry.broadcast(cardId, { type: "delta", text: event.assistantMessageEvent.delta });
 			} else if (event.type === "agent_start") {
 				registry.broadcast(cardId, { type: "status", status: "streaming" });

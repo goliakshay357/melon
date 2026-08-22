@@ -111,7 +111,20 @@ export function ChatCardNode({
                                 : 'bg-secondary text-secondary-foreground',
                         )}
                     >
-                        {m.text}
+                        {m.role === 'assistant' && m.thinking && (
+                            <details className="mb-1.5 rounded-md border border-border/60 bg-background/60 px-2 py-1">
+                                <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                                    💭 Thinking
+                                </summary>
+                                <div className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap italic leading-relaxed text-muted-foreground">
+                                    {m.thinking}
+                                </div>
+                            </details>
+                        )}
+                        {m.text || (m.thinking && !m.text ? '' : m.text)}
+                        {!m.text && m.thinking && (
+                            <span className="text-[10px] text-muted-foreground">…</span>
+                        )}
                     </div>
                 ))}
             </div>

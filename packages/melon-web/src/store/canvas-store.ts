@@ -5,7 +5,7 @@ const STORAGE_KEY = 'melon:canvas:v1';
 const MELON_API = 'http://127.0.0.1:8788';
 
 // cardId → live SSE stream state
-const streams = new Map<string, { es: EventSource; buffer: string }>();
+const streams = new Map<string, { es: EventSource; buffer: string; thinkingBuffer: string }>();
 const attached = new Set<string>(); // cardIds with an existing server-side session
 
 function pushLog(cardId: string, line: string) {
@@ -208,15 +208,19 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         if (!st) {
             pushLog(cardId, `→ SSE connect /sessions/${cardId}/events`);
             const es = new EventSource(`${MELON_API}/sessions/${cardId}/events`);
-            st = { es, buffer: '' };
+            st = { es, buffer: '', thinkingBuffer: '' };
             streams.set(cardId, st);
             es.onopen = () => pushLog(cardId, '✓ SSE open — listening for deltas');
             es.onmessage = (ev) => {
                 const data = JSON.parse(ev.data as string) as
                     | { type: 'delta'; text: string }
-                    | { type: 'status'; status: 'idle' | 'streaming' | 'error' };
-                if (data.type === 'delta') {
-                    st!.buffer += data.text;
+                    | { type: 'thinking'; text: string }
+                    | { type: 'status'; status: 'idle' | 'streaming' | 'error' }
+                    | { type: 'error'; message: string };
+                const appendToLastAssistant = (patch: {
+                    text?: string;
+                    thinking?: string;
+                }) => {
                     const cur = useCanvasStore
                         .getState()
                         .cards.find((c) => c.id === cardId);
@@ -224,17 +228,32 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                     const msgs = [...cur.messages];
                     const last = msgs[msgs.length - 1];
                     if (last?.role === 'assistant')
-                        msgs[msgs.length - 1] = { ...last, text: st!.buffer };
-                    else msgs.push({ role: 'assistant', text: st!.buffer });
+                        msgs[msgs.length - 1] = { ...last, ...patch };
+                    else
+                        msgs.push({
+                            role: 'assistant',
+                            text: patch.text ?? '',
+                            thinking: patch.thinking,
+                        });
                     useCanvasStore.setState((s) => ({
                         cards: s.cards.map((c) =>
                             c.id === cardId ? { ...c, messages: msgs } : c,
                         ),
                     }));
+                };
+                if (data.type === 'thinking') {
+                    st!.thinkingBuffer += data.text;
+                    appendToLastAssistant({ thinking: st!.thinkingBuffer });
+                } else if (data.type === 'delta') {
+                    st!.buffer += data.text;
+                    appendToLastAssistant({ text: st!.buffer });
                 } else if (data.type === 'status') {
                     if (data.status === 'idle')
                         pushLog(cardId, `← agent_end (${st!.buffer.length} chars received)`);
-                    if (data.status === 'idle') st!.buffer = '';
+                    if (data.status === 'idle') {
+                        st!.buffer = '';
+                        st!.thinkingBuffer = '';
+                    }
                     useCanvasStore.getState().updateCard(cardId, {
                         status: data.status,
                     });
@@ -251,6 +270,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
             };
         } else {
             st.buffer = '';
+            st.thinkingBuffer = '';
         }
         st.es.onerror = () => {
             // Server restarted or connection dropped: force re-attach next send.
