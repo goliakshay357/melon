@@ -12,7 +12,7 @@
 import cors from "@fastify/cors";
 import Fastify, { type FastifyInstance } from "fastify";
 import { randomUUID } from "node:crypto";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import {
@@ -140,7 +140,6 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		}
 	}
 	function saveFolderHistory(list: FolderEntry[]): void {
-		const { mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
 		mkdirSync(join(getAgentDir(), "melon"), { recursive: true });
 		writeFileSync(foldersFile(), JSON.stringify(list, null, "\t"));
 	}
