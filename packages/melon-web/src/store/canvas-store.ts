@@ -43,7 +43,7 @@ interface CanvasState {
         parentId?: string | null,
         forcedId?: string,
     ) => string;
-    forkCard: (parentId: string) => string;
+    forkCard: (parentId: string) => Promise<string>;
     moveCard: (id: string, position: { x: number; y: number }) => void;
     updateCard: (id: string, patch: Partial<SessionCard>) => void;
     resizeCard: (id: string, width: number, height: number) => void;
@@ -86,15 +86,45 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         return card.id;
     },
 
-    forkCard(parentId) {
+    async forkCard(parentId) {
         const parent = get().cards.find((c) => c.id === parentId);
-        return get().addCard(
+        const childCardId = newCardId();
+        let sessionInfo: {
+            sessionFile?: string;
+            model?: string;
+            forkedFromEntryId?: string;
+        } | null = null;
+
+        // Ask the server to clone the pi session (root→leaf → new .jsonl).
+        try {
+            const res = await fetch(`${MELON_API}/sessions/${parentId}/fork`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ newCardId: childCardId }),
+            });
+            if (!res.ok) throw new Error(await res.text());
+            sessionInfo = await res.json();
+            attached.add(childCardId);
+            pushLog(childCardId, `✓ FORKED from ${parentId} — full transcript inherited`);
+        } catch (e) {
+            pushLog(parentId, `⚠️ server fork failed, card will attach on first message: ${e instanceof Error ? e.message : e}`);
+        }
+
+        get().addCard(
             {
                 x: (parent?.position.x ?? 0) + 140,
                 y: (parent?.position.y ?? 0) + 180,
             },
             parentId,
+            childCardId,
         );
+        get().updateCard(childCardId, {
+            title: parent ? `↳ ${parent.title}`.slice(0, 44) : 'New card',
+            sessionFile: sessionInfo?.sessionFile,
+            model: sessionInfo?.model,
+            forkedFromEntryId: sessionInfo?.forkedFromEntryId,
+        });
+        return childCardId;
     },
 
     moveCard(id, position) {

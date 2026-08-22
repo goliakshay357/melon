@@ -186,6 +186,45 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { projects };
 	});
 
+	// Fork: copy root→leaf path into a NEW .jsonl (pi-native clone).
+	// Child becomes a live session under newCardId; the parent keeps its own
+	// runtime re-opened on its original file.
+	app.post("/sessions/:cardId/fork", async (req, reply) => {
+		const parentCardId = (req.params as any).cardId;
+		const s = registry.get(parentCardId);
+		if (!s) return reply.code(404).send({ error: "unknown card" });
+		if (s.busy) return reply.code(409).send({ error: "card is streaming" });
+
+		const parentSessionFile = s.runtime.session.sessionFile;
+		if (!parentSessionFile) {
+			return reply.code(400).send({ error: "nothing to fork yet — send a message first" });
+		}
+
+		const body = req.body as any;
+		const newCardId = body?.newCardId ?? randomUUID();
+		const leaf = s.runtime.session.sessionManager.getLeafEntry();
+
+		const res = await s.runtime.fork(leaf?.id ?? "", { position: "at" });
+		if (res.cancelled) return reply.code(409).send({ error: "fork cancelled" });
+
+		// runtime.session now points at the CHILD file → give it to the child card.
+		wireEvents(newCardId, s.runtime);
+		registry.set(newCardId, { runtime: s.runtime, clients: new Set(), busy: false });
+
+		// Parent card gets a fresh runtime over its original file.
+		await attachSession(parentCardId, SessionManager.open(parentSessionFile));
+
+		const childRuntime = registry.get(newCardId)!;
+		return {
+			newCardId,
+			sessionId: childRuntime.runtime.session.sessionId,
+			sessionFile: childRuntime.runtime.session.sessionFile,
+			model: modelToString(childRuntime.runtime.session.model),
+			forkedFromEntryId: leaf?.id,
+			parentSessionFile,
+		};
+	});
+
 	app.get("/sessions/:cardId/events", (req, reply) => {
 		const s = registry.get((req.params as any).cardId);
 		if (!s) return reply.code(404).send({ error: "unknown card" });
