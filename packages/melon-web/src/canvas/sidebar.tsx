@@ -18,7 +18,7 @@ export function Sidebar() {
 
     const [pickingNative, setPickingNative] = useState(false);
 
-    // Native OS dialog first; custom navigator as fallback.
+    // Native OS dialog — the only way in. Cancel = no-op.
     const addFolder = async () => {
         setPickingNative(true);
         try {
@@ -28,15 +28,11 @@ export function Sidebar() {
                 if (path) {
                     openFolder(path);
                     loadTree();
-                    return;
                 }
             }
-        } catch {
-            /* fall through to in-app navigator */
         } finally {
             setPickingNative(false);
         }
-        setPickerOpen(true);
     };
     const [folders, setFolders] = useState<Array<{ cwd: string; lastOpenedAt: string }>>([]);
     const [tree, setTree] = useState<Record<string, { canvases: any[]; loose: any[] }>>({});
