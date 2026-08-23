@@ -31,6 +31,25 @@ function ChatCardNodeInner({
     const sendMessage = useCanvasStore((s) => s.sendMessage);
     const [draft, setDraft] = useState('');
     const [maximized, setMaximized] = useState(false);
+    const [models, setModels] = useState<Array<{ label: string }>>([]);
+
+    useEffect(() => {
+        if (models.length > 0) return;
+        fetch('http://127.0.0.1:8788/models')
+            .then((r) => r.json())
+            .then((d) => setModels(d.models ?? []))
+            .catch(() => {});
+    }, [models.length]);
+
+    const growTextarea = (el: HTMLTextAreaElement | null) => {
+        if (!el) return;
+        el.style.height = 'auto';
+        el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+    };
+
+    const abortStream = () => {
+        fetch(`http://127.0.0.1:8788/sessions/${id}/abort`, { method: 'POST' }).catch(() => {});
+    };
     const bodyRef = useRef<HTMLDivElement | null>(null);
     // Auto-scroll only while the user is already at the bottom; scrolling up
     // to read pauses it until they return.
@@ -209,19 +228,95 @@ function ChatCardNodeInner({
         </div>
     );
 
+    const folder = useCanvasStore((s) => s.folder);
+
     const footerInput = (
         <div className={cn('shrink-0 border-t border-border p-2', maximized && 'px-4')}>
-            <input
-                className="nodrag w-full rounded-lg border border-input bg-background px-2.5 py-1.5 text-xs outline-none placeholder:text-muted-foreground focus:border-ring"
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={(e) => {
-                    e.stopPropagation();
-                    if (e.key === 'Enter') submit();
-                }}
-                onClick={(e) => e.stopPropagation()}
-                placeholder="Ask anything…"
-            />
+            <div className="rounded-xl border border-input bg-background focus-within:border-ring">
+                <textarea
+                    rows={1}
+                    value={draft}
+                    ref={(el) => growTextarea(el)}
+                    onChange={(e) => {
+                        setDraft(e.target.value);
+                        growTextarea(e.target);
+                    }}
+                    onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            submit();
+                        }
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    placeholder="Ask anything…  (Enter to send, Shift+Enter for newline)"
+                    className="nowheel block max-h-[120px] w-full resize-none bg-transparent px-3 pt-2.5 text-xs leading-relaxed outline-none placeholder:text-muted-foreground"
+                />
+                <div className="flex items-center gap-1 px-2 pb-1.5 pt-1">
+                    {folder && (
+                        <span
+                            className="truncate rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                            title={`Workspace: ${folder}`}
+                        >
+                            📁 {folder.split('/').pop()}
+                        </span>
+                    )}
+                    <select
+                        className="max-w-[150px] cursor-pointer truncate rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none hover:text-foreground"
+                        title="Model"
+                        value={card.model ?? ''}
+                        onChange={(e) =>
+                            useCanvasStore.getState().updateCard(id, { model: e.target.value })
+                        }
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        {(card.model && !models.some((m) => m.label === card.model)
+                            ? [{ label: card.model }, ...models]
+                            : models
+                        ).map((m) => (
+                            <option key={m.label} value={m.label}>
+                                {m.label}
+                            </option>
+                        ))}
+                    </select>
+                    <select
+                        className="cursor-pointer rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none hover:text-foreground"
+                        title="Workspace permissions"
+                        value={card.permission ?? 'full'}
+                        onChange={(e) =>
+                            useCanvasStore.getState().updateCard(id, {
+                                permission: e.target.value as 'full' | 'readonly',
+                            })
+                        }
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        <option value="full">🔓 full access</option>
+                        <option value="readonly">🔒 read-only</option>
+                    </select>
+                    <button
+                        className={cn(
+                            'ml-auto flex size-7 items-center justify-center rounded-full transition-colors',
+                            card.status === 'streaming'
+                                ? 'bg-foreground text-background hover:bg-foreground/80'
+                                : draft.trim()
+                                  ? 'bg-primary text-primary-foreground hover:bg-primary/90'
+                                  : 'bg-secondary text-muted-foreground',
+                        )}
+                        title={card.status === 'streaming' ? 'Stop' : 'Send'}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            if (card.status === 'streaming') abortStream();
+                            else submit();
+                        }}
+                    >
+                        {card.status === 'streaming' ? (
+                            <Square className="size-3" fill="currentColor" />
+                        ) : (
+                            <ArrowUp className="size-4" />
+                        )}
+                    </button>
+                </div>
+            </div>
         </div>
     );
 

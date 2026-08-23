@@ -565,6 +565,35 @@ const app = Fastify({ logger: false });
 		}
 	});
 
+
+	// Available models for the picker.
+	app.get("/models", async () => {
+		const mr = await getModelRuntime();
+		const models = mr.getModels().map((m: any) => ({
+			label: `${m.provider}/${m.id}`,
+			provider: m.provider,
+			id: m.id,
+		}));
+		return { models };
+	});
+
+	// Switch model on a live card session.
+	app.post("/sessions/:cardId/model", async (req, reply) => {
+		const s = registry.get((req.params as any).cardId);
+		if (!s) return reply.code(404).send({ error: "unknown card" });
+		const model = String((req.body as any)?.model ?? "");
+		const [provider, id] = model.split("/");
+		if (!provider || !id) return reply.code(400).send({ error: "model must be provider/id" });
+		try {
+			const m = (await getModelRuntime()).getModel(provider, id);
+			if (!m) return reply.code(400).send({ error: `unknown model: ${model}` });
+			await s.runtime.session.setModel(m);
+			return { ok: true, model };
+		} catch (e) {
+			return reply.code(500).send({ error: (e as Error).message });
+		}
+	});
+
 	app.get("/sessions/:cardId/events", (req, reply) => {
 		const s = registry.get((req.params as any).cardId);
 		if (!s) return reply.code(404).send({ error: "unknown card" });

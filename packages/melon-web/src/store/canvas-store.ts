@@ -573,7 +573,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         const pres = await fetch(`${MELON_API}/sessions/${cardId}/prompt`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ text, viz: card.vizMode === true }),
+            body: JSON.stringify({
+                text,
+                viz: card.vizMode === true,
+                readonly: card.permission === 'readonly',
+            }),
         });
         if (!pres.ok) {
             pushLog(cardId, `✗ PROMPT rejected HTTP ${pres.status}`);

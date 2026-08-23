@@ -38,6 +38,8 @@ export interface SessionCard {
     logs?: string[]; // live pipe trace, newest last
     /** Visualization-first mode: agent explains with diagrams/scenes. */
     vizMode?: boolean;
+    /** Workspace permission for the agent. */
+    permission?: 'full' | 'readonly';
 }
 
 export const newCardId = () => `card_${nanoid(8)}`;
