@@ -18,10 +18,26 @@ export function Sidebar() {
 
     const [pickingNative, setPickingNative] = useState(false);
 
-    // Native OS dialog — the only way in. Cancel = no-op.
+    // Desktop app: real IPC dialog. Browser: local-server osascript bridge.
     const addFolder = async () => {
         setPickingNative(true);
         try {
+            const bridge = (
+                window as unknown as {
+                    melonDesktop?: { pickFolder: () => Promise<string | null> };
+                }
+            ).melonDesktop;
+            if (bridge?.pickFolder) {
+                const picked = await bridge.pickFolder();
+                if (picked) {
+                    await openFolder(picked);
+                    if (!useCanvasStore.getState().canvasId) {
+                        await createCanvas('Canvas 1');
+                    }
+                    loadTree();
+                }
+                return;
+            }
             const res = await fetch(`${MELON_API}/pick-folder`, { method: 'POST' });
             if (res.ok) {
                 const { path } = await res.json();

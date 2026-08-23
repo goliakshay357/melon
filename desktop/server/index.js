@@ -1,0 +1,608 @@
+// Melon bridge — HTTP/SSE front-end over live pi sessions.
+// Melon web is a pi frontend (peer of the TUI); sessions go to pi's default
+// store so both frontends share history for the same folder.
+//
+// Contract:
+//   POST /sessions                    {cardId, cwd}         → {sessionId, sessionFile, model}
+//   POST /sessions/resume             {cardId, sessionFile} → {sessionId, cwd, model}
+//   GET  /projects                                          → {projects: [{cwd, sessions[]}]}
+//   GET  /sessions/:cardId/events     SSE                   → delta | status | tool | error
+//   POST /sessions/:cardId/prompt     {text}                → {ok}
+//   POST /sessions/:cardId/abort
+import cors from "@fastify/cors";
+import Fastify from "fastify";
+import { randomUUID } from "node:crypto";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { homedir } from "node:os";
+import { ModelRuntime, SessionManager, createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, getAgentDir, } from "@earendil-works/pi-coding-agent";
+import { expandHome, loadConfig, modelToString, preview } from "./config.js";
+import { SessionRegistry } from "./session-registry.js";
+let _modelRuntime;
+async function getModelRuntime() {
+    if (!_modelRuntime)
+        _modelRuntime = await ModelRuntime.create();
+    return _modelRuntime;
+}
+export async function buildApp(deps = {}) {
+    const config = loadConfig(deps.config);
+    const PROTOCOL = [
+        "",
+        "[VISUALIZATION PROTOCOL - melon canvas]",
+        "You explain on a visual canvas. When a visual genuinely aids understanding, include:",
+        '1. ```mermaid fenced blocks for flowcharts / sequence / state diagrams.',
+        "2. ```viz-html fenced blocks for interactive 3D/animated scenes.",
+        "viz-html contract (STRICT):",
+        "- ONE complete self-contained HTML document per block.",
+        '- Load three.js via <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js"}}</script> then import * as THREE from \'three\'.',
+        "- Inline all CSS/JS. Dark theme: background #161b22, readable colors.",
+        "- Animation via requestAnimationFrame; canvas fills window; no external files.",
+        "Keep prose explanation around the blocks.",
+    ].join("\n");
+    const app = Fastify({ logger: false });
+    await app.register(cors, { origin: true });
+    const registry = new SessionRegistry();
+    async function createRuntimeFor(sessionManager) {
+        const factory = async ({ cwd, sessionManager: sm, sessionStartEvent, }) => {
+            const services = await createAgentSessionServices({ cwd });
+            return {
+                ...(await createAgentSessionFromServices({
+                    services,
+                    sessionManager: sm,
+                    sessionStartEvent: sessionStartEvent,
+                })),
+                services,
+            };
+        };
+        return createAgentSessionRuntime(factory, {
+            cwd: sessionManager.getCwd(),
+            agentDir: getAgentDir(),
+            sessionManager,
+        });
+    }
+    async function attachSession(cardId, sessionManager) {
+        const runtime = await createRuntimeFor(sessionManager);
+        try {
+            const [provider, id] = config.defaultModel.split("/");
+            const model = (await getModelRuntime()).getModel(provider, id);
+            if (model)
+                await runtime.session.setModel(model);
+            runtime.session.setThinkingLevel(config.defaultThinkingLevel);
+        }
+        catch (e) {
+            console.error("model switch failed:", e?.message ?? e);
+        }
+        wireEvents(cardId, runtime);
+        registry.set(cardId, { runtime, clients: new Set(), busy: false });
+        return runtime;
+    }
+    function wireEvents(cardId, runtime) {
+        let deltaCount = 0;
+        runtime.session.subscribe((event) => {
+            if (event.type === "agent_start") {
+                console.log(`[${cardId}] agent_start`);
+            }
+            else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+                deltaCount++;
+            }
+            else if (event.type === "message_start" ||
+                event.type === "message_end" ||
+                event.type === "turn_start") {
+                // too chatty to broadcast every one; lifecycle shows via agent_* 
+            }
+            else if (event.type === "turn_end") {
+                registry.broadcast(cardId, {
+                    type: "raw",
+                    text: `turn_end (${event.message?.stopReason ?? "done"})`,
+                });
+            }
+            else if (event.type === "auto_retry_start") {
+                registry.broadcast(cardId, { type: "raw", text: "provider error — auto-retrying…" });
+            }
+            else if (event.type === "summarization_retry_scheduled") {
+                registry.broadcast(cardId, { type: "raw", text: "context overflow — summarizing and retrying…" });
+            }
+            else if (event.type === "compaction_start") {
+                registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
+            }
+            else if (event.type === "queue_update") {
+                const q = event;
+                if (q.steering || q.followUp)
+                    registry.broadcast(cardId, {
+                        type: "raw",
+                        text: `queued: ${q.steering ?? ""}${q.followUp ?? ""}`,
+                    });
+            }
+            else if (event.type === "agent_end") {
+                const msgs = event.messages ?? [];
+                const last = msgs[msgs.length - 1];
+                console.log(`[${cardId}] agent_end stopReason=${last?.stopReason} deltas=${deltaCount} usage=in:${last?.usage?.input?.tokens ?? "?"} out:${last?.usage?.output?.tokens ?? "?"}`);
+                deltaCount = 0;
+                // Release the card as soon as the ANSWER is done. pi's prompt()
+                // promise can linger tens of seconds afterwards (post-run
+                // processing) — holding busy for that blocks the next message.
+                const entry = registry.get(cardId);
+                if (entry)
+                    entry.busy = false;
+            }
+            else if (event.type === "auto_retry_start" || event.type === "summarization_retry_scheduled") {
+                console.log(`[${cardId}] ${event.type}`);
+            }
+            if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
+                registry.broadcast(cardId, {
+                    type: "thinking",
+                    text: event.assistantMessageEvent.delta,
+                });
+            }
+            else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+                registry.broadcast(cardId, { type: "delta", text: event.assistantMessageEvent.delta });
+            }
+            else if (event.type === "agent_start") {
+                registry.broadcast(cardId, { type: "status", status: "streaming" });
+            }
+            else if (event.type === "message_start" ||
+                event.type === "message_end" ||
+                event.type === "turn_start") {
+                // too chatty to broadcast every one; lifecycle shows via agent_* 
+            }
+            else if (event.type === "turn_end") {
+                registry.broadcast(cardId, {
+                    type: "raw",
+                    text: `turn_end (${event.message?.stopReason ?? "done"})`,
+                });
+            }
+            else if (event.type === "auto_retry_start") {
+                registry.broadcast(cardId, { type: "raw", text: "provider error — auto-retrying…" });
+            }
+            else if (event.type === "summarization_retry_scheduled") {
+                registry.broadcast(cardId, { type: "raw", text: "context overflow — summarizing and retrying…" });
+            }
+            else if (event.type === "compaction_start") {
+                registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
+            }
+            else if (event.type === "queue_update") {
+                const q = event;
+                if (q.steering || q.followUp)
+                    registry.broadcast(cardId, {
+                        type: "raw",
+                        text: `queued: ${q.steering ?? ""}${q.followUp ?? ""}`,
+                    });
+            }
+            else if (event.type === "agent_end") {
+                registry.broadcast(cardId, { type: "status", status: "idle" });
+            }
+            else if (event.type === "tool_execution_start") {
+                registry.broadcast(cardId, {
+                    type: "tool_start",
+                    callId: event.toolCallId,
+                    name: event.toolName,
+                    args: preview(event.args),
+                });
+            }
+            else if (event.type === "tool_execution_update") {
+                registry.broadcast(cardId, {
+                    type: "tool_update",
+                    callId: event.toolCallId,
+                    output: preview(event.partialResult),
+                });
+            }
+            else if (event.type === "tool_execution_end") {
+                registry.broadcast(cardId, {
+                    type: "tool_end",
+                    callId: event.toolCallId,
+                    isError: event.isError,
+                    output: preview(event.result),
+                });
+            }
+        });
+    }
+    const foldersFile = () => join(getAgentDir(), "melon", "folders.json");
+    function loadFolderHistory() {
+        try {
+            return JSON.parse(readFileSync(foldersFile(), "utf8"));
+        }
+        catch {
+            return [];
+        }
+    }
+    function saveFolderHistory(list) {
+        mkdirSync(join(getAgentDir(), "melon"), { recursive: true });
+        writeFileSync(foldersFile(), JSON.stringify(list, null, "\t"));
+    }
+    function touchFolder(cwd) {
+        const dir = expandHome(cwd);
+        if (statSync(dir, { throwIfNoEntry: false })?.isDirectory() !== true)
+            return;
+        const list = loadFolderHistory();
+        const now = new Date().toISOString();
+        const existing = list.find((f) => f.cwd === dir);
+        if (existing)
+            existing.lastOpenedAt = now;
+        else
+            list.push({ cwd: dir, addedAt: now, lastOpenedAt: now });
+        list.sort((a, b) => b.lastOpenedAt.localeCompare(a.lastOpenedAt));
+        saveFolderHistory(list);
+    }
+    function assertCwd(cwd) {
+        const dir = expandHome(cwd ?? "");
+        if (!dir || statSync(dir, { throwIfNoEntry: false })?.isDirectory() !== true) {
+            throw new Error(`invalid cwd: ${cwd}`);
+        }
+        return dir;
+    }
+    app.post("/sessions", async (req, reply) => {
+        const cardId = req.body?.cardId ?? randomUUID();
+        let dir;
+        try {
+            dir = assertCwd(req.body?.cwd ?? config.defaultCwd);
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        const runtime = await attachSession(cardId, SessionManager.create(dir));
+        return {
+            cardId,
+            sessionId: runtime.session.sessionId,
+            sessionFile: runtime.session.sessionFile,
+            cwd: dir,
+            model: modelToString(runtime.session.model),
+        };
+    });
+    app.post("/sessions/resume", async (req, reply) => {
+        const body = req.body;
+        const cardId = body?.cardId ?? randomUUID();
+        const sessionFile = body?.sessionFile;
+        if (!sessionFile)
+            return reply.code(400).send({ error: "sessionFile required" });
+        const runtime = await attachSession(cardId, SessionManager.open(sessionFile));
+        return {
+            cardId,
+            sessionId: runtime.session.sessionId,
+            sessionFile,
+            cwd: runtime.session.sessionManager.getCwd(),
+            model: modelToString(runtime.session.model),
+        };
+    });
+    app.get("/projects", async () => {
+        const root = join(getAgentDir(), "sessions");
+        const projects = [];
+        const seenCwds = new Set();
+        for (const slug of readdirSync(root)) {
+            const dir = join(root, slug);
+            let files;
+            try {
+                files = readdirSync(dir).filter((f) => f.endsWith(".jsonl"));
+            }
+            catch {
+                continue;
+            }
+            if (files.length === 0)
+                continue;
+            let cwd;
+            try {
+                const header = JSON.parse(readFileSync(join(dir, files[0]), "utf8").split("\n")[0]);
+                cwd = header.cwd;
+            }
+            catch {
+                continue;
+            }
+            if (!cwd || seenCwds.has(cwd))
+                continue;
+            try {
+                const list = (await SessionManager.list(cwd));
+                if (list.length > 0) {
+                    seenCwds.add(cwd);
+                    projects.push({
+                        cwd,
+                        sessions: list.map((s) => ({
+                            id: s.id,
+                            file: s.path,
+                            firstMessage: s.firstMessage?.slice(0, 60),
+                            modified: s.modified,
+                        })),
+                    });
+                }
+            }
+            catch {
+                /* skip unreadable project */
+            }
+        }
+        return { projects };
+    });
+    // Fork: copy root→leaf path into a NEW .jsonl (pi-native clone).
+    // Child becomes a live session under newCardId; the parent keeps its own
+    // runtime re-opened on its original file.
+    app.post("/sessions/:cardId/fork", async (req, reply) => {
+        const parentCardId = req.params.cardId;
+        const body = req.body;
+        const newCardId = body?.newCardId ?? randomUUID();
+        let s = registry.get(parentCardId);
+        // Card not live (e.g. server restarted)? Re-open it from disk.
+        if (!s && body?.sessionFile) {
+            s = { runtime: await createRuntimeFor(SessionManager.open(body.sessionFile)), clients: new Set(), busy: false };
+        }
+        if (!s)
+            return reply.code(404).send({ error: "unknown card" });
+        if (s.busy)
+            return reply.code(409).send({ error: "card is streaming" });
+        const parentSessionFile = s.runtime.session.sessionFile;
+        if (!parentSessionFile) {
+            return reply.code(400).send({ error: "nothing to fork yet — send a message first" });
+        }
+        const leaf = s.runtime.session.sessionManager.getLeafEntry();
+        const res = await s.runtime.fork(leaf?.id ?? "", { position: "at" });
+        if (res.cancelled)
+            return reply.code(409).send({ error: "fork cancelled" });
+        wireEvents(newCardId, s.runtime);
+        registry.set(newCardId, { runtime: s.runtime, clients: new Set(), busy: false });
+        await attachSession(parentCardId, SessionManager.open(parentSessionFile));
+        const childRuntime = registry.get(newCardId);
+        return {
+            newCardId,
+            sessionId: childRuntime.runtime.session.sessionId,
+            sessionFile: childRuntime.runtime.session.sessionFile,
+            model: modelToString(childRuntime.runtime.session.model),
+            forkedFromEntryId: leaf?.id,
+            parentSessionFile,
+        };
+    });
+    // ── Canvas persistence: <folder>/.melon/canvases/<id>.json ──
+    function canvasesDir(cwd) {
+        return join(expandHome(cwd), ".melon", "canvases");
+    }
+    // List workspaces in a folder (lightweight: reads each file's meta line).
+    app.get("/canvases", async (req, reply) => {
+        const q = req.query;
+        let dir;
+        try {
+            dir = assertCwd(q.cwd);
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        const cvDir2 = canvasesDir(dir);
+        const out = [];
+        try {
+            for (const f of readdirSync(cvDir2)) {
+                if (!f.endsWith(".json"))
+                    continue;
+                try {
+                    const raw = JSON.parse(readFileSync(join(cvDir2, f), "utf8"));
+                    out.push({ id: raw.id ?? f.replace(/\.json$/, ""), name: raw.name ?? "Untitled", modified: raw.modified ?? "" });
+                }
+                catch { /* skip corrupt */ }
+            }
+        }
+        catch { /* no workspaces yet */ }
+        return { canvases: out };
+    });
+    // Delete a canvas file.
+    app.delete("/canvases/:id", async (req, reply) => {
+        const q = req.query;
+        let dir;
+        try {
+            dir = assertCwd(q.cwd);
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        const { rmSync } = await import("node:fs");
+        const file = join(canvasesDir(dir), `${req.params.id}.json`);
+        try {
+            rmSync(file);
+            return { ok: true };
+        }
+        catch {
+            return reply.code(404).send({ error: "canvas not found" });
+        }
+    });
+    // Load one workspace fully.
+    app.get("/canvases/:id", async (req, reply) => {
+        const q = req.query;
+        const file = join(canvasesDir(expandHome(q.cwd)), `${req.params.id}.json`);
+        try {
+            return JSON.parse(readFileSync(file, "utf8"));
+        }
+        catch {
+            return reply.code(404).send({ error: "canvas not found" });
+        }
+    });
+    // Save (upsert).
+    app.put("/canvases/:id", async (req, reply) => {
+        const body = req.body;
+        let dir;
+        try {
+            dir = assertCwd(body?.cwd);
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        touchFolder(dir);
+        const ws = body?.canvas ?? body?.workspace; // accept legacy key
+        if (!ws?.id)
+            return reply.code(400).send({ error: "canvas.id required" });
+        const cvDir2 = canvasesDir(dir);
+        const { mkdirSync, writeFileSync } = await import("node:fs");
+        mkdirSync(cvDir2, { recursive: true });
+        ws.modified = new Date().toISOString();
+        writeFileSync(join(cvDir2, `${ws.id}.json`), JSON.stringify(ws));
+        return { ok: true };
+    });
+    // Folder navigator: list subdirectories of a path for the in-app picker.
+    app.get("/browse", async (req, reply) => {
+        const q = req.query;
+        let dir;
+        try {
+            dir = expandHome(q.path && q.path.trim() ? q.path : "~");
+        }
+        catch {
+            dir = homedir();
+        }
+        if (!statSync(dir, { throwIfNoEntry: false })?.isDirectory()) {
+            return reply.code(400).send({ error: `not a directory: ${dir}` });
+        }
+        let dirs = [];
+        try {
+            dirs = readdirSync(dir, { withFileTypes: true })
+                .filter((d) => d.isDirectory() && !d.name.startsWith("."))
+                .map((d) => d.name)
+                .sort((a, b) => a.localeCompare(b));
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        return { path: dir, parent: join(dir, ".."), dirs };
+    });
+    // Navigator tree: folder → canvases → their bound sessions (+ loose ones).
+    app.get("/tree", async (req, reply) => {
+        const q = req.query;
+        let dir;
+        try {
+            dir = assertCwd(q.cwd ?? "~");
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        const cvDir = join(dir, ".melon", "canvases");
+        const bound = new Set();
+        const canvases = [];
+        try {
+            for (const f of readdirSync(cvDir)) {
+                if (!f.endsWith(".json"))
+                    continue;
+                try {
+                    const cv = JSON.parse(readFileSync(join(cvDir, f), "utf8"));
+                    const sessions = (cv.cards ?? [])
+                        .filter((c) => c.sessionFile)
+                        .map((c) => {
+                        bound.add(c.sessionFile);
+                        return { file: c.sessionFile, title: c.title };
+                    });
+                    canvases.push({ id: cv.id, name: cv.name ?? "Untitled", sessions });
+                }
+                catch { /* skip corrupt */ }
+            }
+        }
+        catch { /* no canvases dir */ }
+        const all = (await SessionManager.list(dir));
+        const loose = all
+            .filter((s) => !bound.has(s.path))
+            .map((s) => ({ file: s.path, title: s.firstMessage?.slice(0, 60) }));
+        return { cwd: dir, canvases, loose };
+    });
+    // Melon folder history — the navigator's source of truth.
+    app.get("/folders", async () => ({ folders: loadFolderHistory() }));
+    app.post("/folders", async (req, reply) => {
+        const cwd = req.body?.cwd;
+        try {
+            assertCwd(cwd);
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        touchFolder(cwd);
+        return { ok: true };
+    });
+    app.delete("/folders", async (req, reply) => {
+        const cwd = expandHome(req.query?.cwd ?? "");
+        saveFolderHistory(loadFolderHistory().filter((f) => f.cwd !== cwd));
+        return { ok: true };
+    });
+    // Native OS folder picker — runs locally, so the dialog appears on the
+    // user's screen and we receive the real absolute path.
+    app.post("/pick-folder", async (_req, reply) => {
+        const { execFile } = await import("node:child_process");
+        const commands = {
+            darwin: [
+                "osascript",
+                "-e",
+                `POSIX path of (choose folder with prompt "Choose a folder for your melon canvas")`,
+            ],
+            win32: [
+                "powershell",
+                "-NoProfile",
+                "-Command",
+                "Add-Type -AssemblyName System.Windows.Forms; $d = New-Object System.Windows.Forms.FolderBrowserDialog; $d.Description = 'Choose a folder for your melon canvas'; if ($d.ShowDialog() -eq 'OK') { $d.SelectedPath }",
+            ],
+            linux: ["zenity", "--file-selection", "--directory"],
+        };
+        const [cmd, ...args] = commands[process.platform] ?? commands.linux;
+        try {
+            const stdout = await new Promise((resolve, reject) => {
+                execFile(cmd, args, { timeout: 120000 }, (err, out) => err ? reject(err) : resolve(String(out)));
+            });
+            const path = stdout.trim().replace(/\/$/, "");
+            if (!path)
+                return reply.code(409).send({ cancelled: true });
+            if (statSync(path, { throwIfNoEntry: false })?.isDirectory() !== true) {
+                return reply.code(400).send({ error: `not a directory: ${path}` });
+            }
+            touchFolder(path);
+            return { path };
+        }
+        catch (e) {
+            const msg = e.message ?? "";
+            if (/cancel|err=-128|User dismissed/i.test(msg)) {
+                return reply.code(409).send({ cancelled: true });
+            }
+            return reply.code(500).send({ error: msg });
+        }
+    });
+    app.get("/sessions/:cardId/events", (req, reply) => {
+        const s = registry.get(req.params.cardId);
+        if (!s)
+            return reply.code(404).send({ error: "unknown card" });
+        reply.raw.writeHead(200, {
+            "content-type": "text/event-stream",
+            "cache-control": "no-cache",
+            connection: "keep-alive",
+            // Raw write bypasses @fastify/cors — add the CORS header manually.
+            "access-control-allow-origin": req.headers.origin ?? "*",
+        });
+        reply.raw.flushHeaders(); // send headers NOW — SSE has no body yet
+        s.clients.add(reply);
+        req.raw.on("close", () => s.clients.delete(reply));
+    });
+    app.post("/sessions/:cardId/prompt", async (req, reply) => {
+        const s = registry.get(req.params.cardId);
+        if (!s)
+            return reply.code(404).send({ error: "unknown card" });
+        if (s.busy)
+            return reply.code(409).send({ error: "card is streaming" });
+        s.busy = true;
+        reply.send({ ok: true });
+        const cardId = req.params.cardId;
+        const started = Date.now();
+        console.log(`[${cardId}] prompt:start "${String(req.body?.text).slice(0, 60)}"`);
+        try {
+            let text = req.body?.text ?? "";
+            if (!s.vizProtocolSent) {
+                s.vizProtocolSent = true;
+                text = text + "\n" + PROTOCOL;
+            }
+            await s.runtime.session.prompt(text);
+            console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
+        }
+        catch (e) {
+            console.error(`[${cardId}] prompt:THREW ${e.stack}`);
+            registry.broadcast(cardId, { type: "error", message: e.message });
+            registry.broadcast(cardId, { type: "status", status: "error" });
+        }
+        finally {
+            s.busy = false;
+        }
+    });
+    app.post("/sessions/:cardId/abort", async (req) => {
+        const s = registry.get(req.params.cardId);
+        await s?.runtime.session.abort();
+    });
+    return app;
+}
+// Run directly? (vs imported by tests)
+if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop() ?? "")) {
+    const config = loadConfig();
+    const app = await buildApp();
+    await app.listen({ port: config.port, host: "127.0.0.1" });
+    console.error(`melon-server (pi monorepo) on http://127.0.0.1:${config.port}`);
+}
+//# sourceMappingURL=index.js.map

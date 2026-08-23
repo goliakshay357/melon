@@ -1,0 +1,13 @@
+appId: dev.melon.canvas
+productName: Melon
+directories:
+    output: release
+files:
+    - main.mjs
+    - preload.cjs
+    - static-server.mjs
+    - server/**/*
+    - web-dist/**/*
+mac:
+    target: dmg
+    category: public.app-category.developer-tools
