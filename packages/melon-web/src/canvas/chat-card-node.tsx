@@ -90,6 +90,21 @@ function ChatCardNodeInner({
                 {card.title}
             </span>
             <button
+                className={cn(
+                    'nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary',
+                    card.vizMode ? 'bg-primary/15 text-primary' : 'hover:text-foreground',
+                )}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    useCanvasStore.getState().updateCard(id, {
+                        vizMode: !card.vizMode,
+                    });
+                }}
+                title={card.vizMode ? 'Visualization mode ON' : 'Visualization mode OFF'}
+            >
+                🖼
+            </button>
+            <button
                 className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
                 onClick={(e) => {
                     e.stopPropagation();

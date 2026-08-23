@@ -36,6 +36,8 @@ export interface SessionCard {
     sessionFile?: string; // pi .jsonl on disk — source of truth for resume
     model?: string;
     logs?: string[]; // live pipe trace, newest last
+    /** Visualization-first mode: agent explains with diagrams/scenes. */
+    vizMode?: boolean;
 }
 
 export const newCardId = () => `card_${nanoid(8)}`;
