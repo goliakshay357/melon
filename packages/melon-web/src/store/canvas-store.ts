@@ -33,9 +33,11 @@ interface CanvasState {
     canvasId: string | null;
     canvasName: string;
     canvases: CanvasMeta[]; // canvases within current folder
+    canvasTreeRev: number; // bumped on every canvas mutation — navigator listens
     viewport?: { x: number; y: number; zoom: number };
     setViewport: (v: { x: number; y: number; zoom: number }) => void;
     restoreLast: () => Promise<void>;
+    renameCanvas: (cwd: string, canvasId: string, name: string) => Promise<void>;
     openFolder: (folder: string) => Promise<void>;
     switchCanvas: (id: string) => Promise<void>;
     createCanvas: (name: string) => Promise<void>;
@@ -79,7 +81,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     canvasId: loc.canvasId,
     canvasName: '',
     canvases: [],
-
+    canvasTreeRev: 0,
     setViewport(v) {
         set({ viewport: v });
     },
@@ -104,6 +106,33 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         } catch {
             /* server not up yet */
         }
+    },
+
+    // Single rename path — active-canvas name, disk, and navigator stay in sync.
+    async renameCanvas(cwd, canvasId, name) {
+        const trimmed = name.trim();
+        if (!trimmed || !cwd || !canvasId) return;
+        try {
+            const res = await fetch(
+                `${MELON_API}/canvases/${canvasId}?cwd=${encodeURIComponent(cwd)}`,
+            );
+            if (!res.ok) return;
+            const data = await res.json();
+            data.name = trimmed;
+            const put = await fetch(`${MELON_API}/canvases/${canvasId}`, {
+                method: 'PUT',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({ cwd, canvas: data }),
+            });
+            if (!put.ok) return;
+        } catch {
+            return;
+        }
+        // Reflect immediately everywhere.
+        set((s) => ({
+            canvasName: s.canvasId === canvasId ? trimmed : s.canvasName,
+            canvasTreeRev: s.canvasTreeRev + 1,
+        }));
     },
 
     async saveCanvas() {

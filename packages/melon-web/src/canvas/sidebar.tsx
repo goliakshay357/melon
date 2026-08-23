@@ -55,6 +55,7 @@ export function Sidebar() {
     const createCanvas = useCanvasStore((s) => s.createCanvas);
     const openFolder = useCanvasStore((s) => s.openFolder);
     const resumeSession = useCanvasStore((s) => s.resumeSession);
+    const canvasTreeRev = useCanvasStore((s) => s.canvasTreeRev);
 
     const loadTree = useCallback(async () => {
         try {
@@ -77,7 +78,7 @@ export function Sidebar() {
 
     useEffect(() => {
         loadTree();
-    }, [loadTree, folder, canvasId]);
+    }, [loadTree, folder, canvasId, canvasTreeRev]);
 
     const toggleFolder = (cwd: string) =>
         setOpenFolders((prev) => {
@@ -112,18 +113,7 @@ export function Sidebar() {
     const renameCanvasRow = async (cwd: string, cv: { id: string; name: string }) => {
         const name = window.prompt('Rename canvas', cv.name)?.trim();
         if (!name || name === cv.name) return;
-        const res = await fetch(
-            `${MELON_API}/canvases/${cv.id}?cwd=${encodeURIComponent(cwd)}`,
-        ).catch(() => null);
-        if (!res?.ok) return;
-        const data = await res.json();
-        data.name = name;
-        await fetch(`${MELON_API}/canvases/${cv.id}`, {
-            method: 'PUT',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ cwd, canvas: data }),
-        });
-        loadTree();
+        await useCanvasStore.getState().renameCanvas(cwd, cv.id, name);
     };
 
     return (

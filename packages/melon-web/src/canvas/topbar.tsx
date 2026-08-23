@@ -15,9 +15,8 @@ export function TopBar() {
     const commitRename = () => {
         const name = draft.trim();
         setRenaming(false);
-        if (!name || name === canvasName) return;
-        useCanvasStore.setState({ canvasName: name });
-        useCanvasStore.getState().saveCanvas();
+        if (!name || !folder || !canvasId || name === canvasName) return;
+        useCanvasStore.getState().renameCanvas(folder, canvasId, name);
     };
 
     return (
