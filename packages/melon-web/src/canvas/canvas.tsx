@@ -75,6 +75,20 @@ export function Canvas() {
 		rfSetViewport(storedViewport);
 	}, [nodes.length, canvasId, storedViewport, rfSetViewport]);
 
+	// Cmd/Ctrl+Z restores the last deleted/added card (ignored while typing).
+	useEffect(() => {
+		const onKey = (e: KeyboardEvent) => {
+			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+				const tag = (e.target as HTMLElement)?.tagName;
+				if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+				e.preventDefault();
+				useCanvasStore.getState().undo();
+			}
+		};
+		window.addEventListener('keydown', onKey);
+		return () => window.removeEventListener('keydown', onKey);
+	}, []);
+
 	// Capture viewport on move end for persistence.
 	const onMoveEnd = useCallback(
 		(_e: unknown, vp: { x: number; y: number; zoom: number }) =>

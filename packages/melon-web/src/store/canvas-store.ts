@@ -13,6 +13,13 @@ const MELON_API = 'http://127.0.0.1:8788';
 const streams = new Map<string, { es: EventSource; buffer: string; thinkingBuffer: string }>();
 const attached = new Set<string>(); // cardIds with an existing server-side session
 
+// Undo stack: pre-mutation card snapshots (in-memory only).
+const undoStack: SessionCard[][] = [];
+function pushUndo(cards: SessionCard[]) {
+    undoStack.push(cards.map((c) => ({ ...c })));
+    if (undoStack.length > 25) undoStack.shift();
+}
+
 function pushLog(cardId: string, line: string) {
     const t = new Date().toLocaleTimeString([], { hour12: false });
     useCanvasStore.setState((s) => ({
@@ -58,6 +65,7 @@ interface CanvasState {
     moveCard: (id: string, position: { x: number; y: number }) => void;
     updateCard: (id: string, patch: Partial<SessionCard>) => void;
     resizeCard: (id: string, width: number, height: number) => void;
+    undo: () => boolean;
     deleteCards: (ids: string[]) => void;
     sendMessage: (
         cardId: string,
@@ -211,6 +219,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     },
 
     addCard(position, parentId = null, forcedId?: string) {
+        pushUndo(get().cards);
         const parent = parentId
             ? get().cards.find((c) => c.id === parentId)
             : undefined;
@@ -227,6 +236,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     },
 
     async forkCard(parentId) {
+        pushUndo(get().cards);
         const parent = get().cards.find((c) => c.id === parentId);
         const childCardId = newCardId();
         let sessionInfo: {
@@ -280,11 +290,20 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         }));
     },
 
+    undo() {
+        const snapshot = undoStack.pop();
+        if (!snapshot) return false;
+        set({ cards: snapshot });
+        return true;
+    },
+
     resizeCard(id, width, height) {
         get().updateCard(id, { size: { width: Math.round(width), height: Math.round(height) } });
     },
 
     deleteCards(ids) {
+        if (ids.length === 0) return;
+        pushUndo(get().cards);
         const dead = new Set(ids);
         set((s) => ({
             // Orphan children rather than cascading — forks survive parents in v1.
@@ -324,6 +343,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
     async sendMessage(cardId, text, opts) {
         const card = get().cards.find((c) => c.id === cardId);
+        if (!card || !text.trim()) return;
         if (!card || !text.trim()) return;
         get().updateCard(cardId, {
             status: 'streaming',
