@@ -133,8 +133,8 @@ export function Sidebar() {
     return (
         <div
             className={cn(
-                'absolute left-3 top-3 z-10 flex flex-col overflow-hidden rounded-2xl border border-border bg-card/95 shadow-lg backdrop-blur transition-all duration-200',
-                collapsed ? 'w-12 items-center py-2' : 'h-[calc(100vh-24px)] w-[280px]',
+                'absolute left-0 top-0 z-10 flex h-full flex-col overflow-hidden border-r border-border bg-card transition-all duration-200',
+                collapsed ? 'w-12 items-center py-2' : 'w-[260px]',
             )}
         >
             {collapsed ? (
@@ -147,7 +147,7 @@ export function Sidebar() {
             ) : (
                 <>
                     {/* Brand header */}
-                    <div className="flex shrink-0 items-center gap-2 px-3 pb-2 pt-3">
+                    <div className="flex shrink-0 items-center gap-2 px-3 pb-2 pt-4">
                         <span className="text-base">🍉</span>
                         <span className="flex-1 text-sm font-semibold tracking-tight text-card-foreground">
                             Melon

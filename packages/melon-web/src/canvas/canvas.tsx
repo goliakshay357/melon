@@ -34,7 +34,7 @@ export function Canvas() {
 
     const [nodes, setNodes] = useState<AppNode[]>([]);
     const [theme, setTheme] = useState<'light' | 'dark'>(() =>
-        (localStorage.getItem('melon:theme') as 'light' | 'dark') || 'light',
+        (localStorage.getItem('melon:theme') as 'light' | 'dark') || 'dark',
     );
     useEffect(() => {
         const onTheme = (e: Event) =>

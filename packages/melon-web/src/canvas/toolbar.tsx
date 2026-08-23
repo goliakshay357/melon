@@ -10,7 +10,7 @@ export function Toolbar() {
     const scrollAction = useCanvasStore((s) => s.scrollAction);
     const setScrollAction = useCanvasStore((s) => s.setScrollAction);
     const [theme, setTheme] = useState<'light' | 'dark'>(() =>
-        (localStorage.getItem('melon:theme') as 'light' | 'dark') || 'light',
+        (localStorage.getItem('melon:theme') as 'light' | 'dark') || 'dark',
     );
 
     // Apply + persist theme (GitHub light/dark palettes via .dark class)
