@@ -16,6 +16,7 @@ import { ChatCardNode, type ChatCardNodeType } from './chat-card-node';
 import { ForkEdge } from './fork-edge';
 import { Toolbar } from './toolbar';
 import { Sidebar } from './sidebar';
+import { TopBar } from './topbar';
 import { useCanvasStore } from '@/store/canvas-store';
 
 type AppNode = ChatCardNodeType;
@@ -187,6 +188,7 @@ export function Canvas() {
             </ReactFlow>
 
             <Sidebar />
+            <TopBar />
             <Toolbar />
 
             {/* Right-click context menu */}
