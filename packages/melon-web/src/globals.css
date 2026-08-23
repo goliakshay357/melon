@@ -108,3 +108,22 @@ body,
 .md-body hr { border: none; border-top: 1px solid hsl(var(--border)); margin: 0.8em 0; }
 .md-body a { color: hsl(var(--accent)); text-decoration: underline; }
 .md-body strong { font-weight: 600; }
+
+/* Shimmer activity text */
+.shimmer-text {
+    background: linear-gradient(
+        90deg,
+        hsl(var(--muted-foreground)) 0%,
+        hsl(var(--foreground)) 50%,
+        hsl(var(--muted-foreground)) 100%
+    );
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: shimmer-slide 2s linear infinite;
+}
+@keyframes shimmer-slide {
+    from { background-position: 200% 0; }
+    to { background-position: -200% 0; }
+}

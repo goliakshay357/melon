@@ -89,6 +89,30 @@ function ToolRunBlock({ run }: { run: import('@/types/session-card').ToolRun }) 
     );
 }
 
+
+/** ✨ Activity line — shimmering status while the agent works on your fresh message. */
+const ACTIVITY_PHRASES = [
+    'Deep diving…',
+    'Reasoning…',
+    'Connecting the dots…',
+    'Reading context…',
+    'Crafting response…',
+];
+
+function ActivityLine() {
+    const [idx, setIdx] = useState(0);
+    useEffect(() => {
+        const t = setInterval(() => setIdx((i) => (i + 1) % ACTIVITY_PHRASES.length), 2200);
+        return () => clearInterval(t);
+    }, []);
+    return (
+        <div className="flex items-center gap-2 px-1 py-2">
+            <span className="inline-block size-2.5 animate-spin rounded-full border-2 border-muted-foreground/40 border-t-muted-foreground" />
+            <span className="shimmer-text text-xs font-medium">{ACTIVITY_PHRASES[idx]}</span>
+        </div>
+    );
+}
+
 function ChatCardNodeInner({
     id,
     selected,
@@ -270,6 +294,11 @@ function ChatCardNodeInner({
                     )}
                 </div>
             ))}
+            {card.status === 'streaming' &&
+                (card.messages.length === 0 ||
+                    card.messages[card.messages.length - 1]?.role === 'user') && (
+                <ActivityLine />
+            )}
         </div>
     );
 
