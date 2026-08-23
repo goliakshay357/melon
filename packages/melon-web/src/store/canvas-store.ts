@@ -35,6 +35,7 @@ interface CanvasState {
     canvases: CanvasMeta[]; // canvases within current folder
     viewport?: { x: number; y: number; zoom: number };
     setViewport: (v: { x: number; y: number; zoom: number }) => void;
+    restoreLast: () => Promise<void>;
     openFolder: (folder: string) => Promise<void>;
     switchCanvas: (id: string) => Promise<void>;
     createCanvas: (name: string) => Promise<void>;
@@ -81,6 +82,28 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
     setViewport(v) {
         set({ viewport: v });
+    },
+
+    // Reopen the last folder + canvas after a refresh.
+    async restoreLast() {
+        const folder = localStorage.getItem('melon:lastFolder');
+        if (!folder) return;
+        set({ folder });
+        try {
+            const res = await fetch(
+                `${MELON_API}/canvases?cwd=${encodeURIComponent(folder)}`,
+            );
+            if (!res.ok) return;
+            const canvases: CanvasMeta[] = (await res.json()).canvases ?? [];
+            set({ canvases });
+            if (canvases.length === 0) return;
+            const wanted = localStorage.getItem('melon:lastCanvas');
+            const target =
+                canvases.find((c) => c.id === wanted)?.id ?? canvases[0].id;
+            await get().switchCanvas(target);
+        } catch {
+            /* server not up yet */
+        }
     },
 
     async saveCanvas() {

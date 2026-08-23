@@ -46,6 +46,14 @@ export function Canvas() {
     const { screenToFlowPosition, fitView } = useReactFlow();
     const wrapperRef = useRef<HTMLDivElement>(null);
 
+    // Reopen last session of work on refresh.
+    const restoredRef = useRef(false);
+    useEffect(() => {
+        if (restoredRef.current) return;
+        restoredRef.current = true;
+        useCanvasStore.getState().restoreLast();
+    }, []);
+
     const nodeTypes = useMemo(() => ({ chatCard: ChatCardNode }), []);
     const edgeTypes = useMemo(() => ({ fork: ForkEdge }), []);
 
