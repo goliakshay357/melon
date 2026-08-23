@@ -1,4 +1,4 @@
-import { memo as ReactMemo, useState } from 'react';
+import { memo as ReactMemo, useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
     Handle,
@@ -32,6 +32,16 @@ function ChatCardNodeInner({
     const [draft, setDraft] = useState('');
     const [maximized, setMaximized] = useState(false);
 
+    // Escape exits full screen.
+    useEffect(() => {
+        if (!maximized) return;
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') setMaximized(false);
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [maximized]);
+
     if (!card) return null;
 
     // chartdb note-node pattern: interactive only when selected and not mid-drag.
@@ -44,7 +54,7 @@ function ChatCardNodeInner({
         sendMessage(id, text);
     };
 
-    const header = (compact: boolean) => (
+    const header = (compact: boolean, isMax = false) => (
         <div
             className={cn(
                 'flex shrink-0 items-center gap-2 border-b border-border px-3 py-2',
@@ -69,11 +79,11 @@ function ChatCardNodeInner({
                 className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
                 onClick={(e) => {
                     e.stopPropagation();
-                    setMaximized(true);
+                    setMaximized(!isMax);
                 }}
-                title="Full screen"
+                title={isMax ? 'Minimize' : 'Full screen'}
             >
-                <MaximizeIcon />
+                {isMax ? <Minimize2 className="size-4" /> : <MaximizeIcon />}
             </button>
             <button
                 className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-red-500"
@@ -210,7 +220,7 @@ function ChatCardNodeInner({
                             className="flex h-full max-h-[92vh] w-full max-w-[95vw] flex-col rounded-xl border border-border bg-card shadow-2xl"
                             onClick={(e) => e.stopPropagation()}
                         >
-                            {header(true)}
+                            {header(true, true)}
                             {bodyAndInput}
                             <div className="flex justify-end border-t border-border p-1.5">
                                 <button
