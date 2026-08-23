@@ -109,16 +109,18 @@ function ChatCardNodeInner({
             >
                 {isMax ? <Minimize2 className="size-4" /> : <MaximizeIcon />}
             </button>
-            <button
-                className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-red-500"
-                onClick={(e) => {
-                    e.stopPropagation();
-                    deleteCards([id]);
-                }}
-                title="Delete card"
-            >
-                <X className="size-4" />
-            </button>
+            {!isMax && (
+                <button
+                    className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-red-500"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        deleteCards([id]);
+                    }}
+                    title="Delete card"
+                >
+                    <X className="size-4" />
+                </button>
+            )}
         </div>
     );
 
