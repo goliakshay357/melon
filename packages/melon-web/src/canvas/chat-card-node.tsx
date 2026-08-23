@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { memo as ReactMemo, useState } from 'react';
 import {
     Handle,
     NodeResizer,
@@ -19,7 +19,7 @@ const statusDot: Record<string, string> = {
     error: 'bg-[#cf222e]',
 };
 
-export function ChatCardNode({
+function ChatCardNodeInner({
     id,
     selected,
     dragging,
@@ -56,7 +56,7 @@ export function ChatCardNode({
                 minWidth={320}
                 minHeight={260}
                 lineClassName="!border-primary/50"
-                handleClassName="!h-2 !w-2 !rounded-sm !border-primary/60 !bg-white"
+                handleClassName="!h-2 !w-2 !rounded-sm !border-primary/60 !bg-card"
                 onResizeEnd={(_e, params) =>
                     useCanvasStore
                         .getState()
@@ -167,7 +167,7 @@ export function ChatCardNode({
             {/* Footer input */}
             <div className="border-t border-border p-2">
                 <input
-                    className="nodrag w-full rounded-lg border border-input bg-background px-2.5 py-1.5 text-xs outline-none placeholder:text-muted-foreground focus:border-ring"
+                    className="nodrag w-full rounded-lg border border-input bg-background px-2.5 py-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground focus:border-ring"
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
                     onKeyDown={(e) => {
@@ -181,3 +181,5 @@ export function ChatCardNode({
         </div>
     );
 }
+
+export const ChatCardNode = ReactMemo(ChatCardNodeInner);

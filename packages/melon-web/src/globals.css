@@ -4,6 +4,7 @@
 
 @layer base {
     :root {
+        color-scheme: light;
         /* GitHub light default */
         --background: 210 29% 97%;   /* #f6f8fa */
         --foreground: 215 13% 14%;   /* #1f2328 */
@@ -24,6 +25,7 @@
     }
 
     .dark {
+        color-scheme: dark;
         --background: 216 28% 7%;    /* #0d1117 */
         --foreground: 212 19% 92%;   /* #e6edf3 */
         --card: 215 20% 11%;         /* #161b22 */
