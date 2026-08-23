@@ -10,7 +10,15 @@ import {
 const MELON_API = 'http://127.0.0.1:8788';
 
 // cardId → live SSE stream state
-const streams = new Map<string, { es: EventSource; buffer: string; thinkingBuffer: string }>();
+const streams = new Map<
+    string,
+    {
+        es: EventSource;
+        buffer: string;
+        thinkingBuffer: string;
+        flushTimer?: ReturnType<typeof setTimeout>;
+    }
+>();
 const attached = new Set<string>(); // cardIds with an existing server-side session
 
 // Undo stack: pre-mutation card snapshots (in-memory only).
@@ -425,26 +433,41 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                     | { type: 'status'; status: 'idle' | 'streaming' | 'error' }
                     | { type: 'error'; message: string };
 
-                // Mutate the last assistant message in place (create if needed).
+                // Mutate the last assistant message in place (create if needed),
+                // BATCHED — applying per-token caused full markdown re-parses
+                // dozens of times a second (screen flicker).
                 const patchLastAssistant = (
                     fn: (m: ChatMessage) => ChatMessage,
+                    immediate = false,
                 ) => {
-                    const cur = useCanvasStore
-                        .getState()
-                        .cards.find((c) => c.id === cardId);
-                    if (!cur) return;
-                    const msgs = [...cur.messages];
-                    const last = msgs[msgs.length - 1];
-                    if (last?.role === 'assistant') {
-                        msgs[msgs.length - 1] = fn(last);
-                    } else {
-                        msgs.push(fn({ role: 'assistant', text: '' }));
+                    const apply = () => {
+                        const cur = useCanvasStore
+                            .getState()
+                            .cards.find((c) => c.id === cardId);
+                        if (!cur) return;
+                        const msgs = [...cur.messages];
+                        const last = msgs[msgs.length - 1];
+                        if (last?.role === 'assistant') {
+                            msgs[msgs.length - 1] = fn(last);
+                        } else {
+                            msgs.push(fn({ role: 'assistant', text: '' }));
+                        }
+                        useCanvasStore.setState((s) => ({
+                            cards: s.cards.map((c) =>
+                                c.id === cardId ? { ...c, messages: msgs } : c,
+                            ),
+                        }));
+                    };
+                    if (immediate) {
+                        apply();
+                        return;
                     }
-                    useCanvasStore.setState((s) => ({
-                        cards: s.cards.map((c) =>
-                            c.id === cardId ? { ...c, messages: msgs } : c,
-                        ),
-                    }));
+                    if (!st!.flushTimer) {
+                        st!.flushTimer = setTimeout(() => {
+                            st!.flushTimer = undefined;
+                            apply();
+                        }, 130);
+                    }
                 };
                 const ensureTool = (run: Partial<ToolRun> & { callId: string; name?: string }) => {
                     patchLastAssistant((m) => {
