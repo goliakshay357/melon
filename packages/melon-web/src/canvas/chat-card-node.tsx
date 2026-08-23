@@ -20,6 +20,75 @@ const statusDot: Record<string, string> = {
     error: 'bg-[#cf222e]',
 };
 
+/** 💭 Thinking — auto-expands while reasoning streams, auto-collapses when the answer begins. */
+function ThinkingBlock({ text, active }: { text: string; active: boolean }) {
+    const [open, setOpen] = useState(active);
+    const prevActive = useRef(active);
+    useEffect(() => {
+        if (prevActive.current && !active) setOpen(false);
+        if (!prevActive.current && active) setOpen(true);
+        prevActive.current = active;
+    }, [active]);
+    return (
+        <details
+            className="mb-1.5 rounded-md border border-border/60 bg-background/60 px-2 py-1"
+            open={open}
+            onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+        >
+            <summary className="flex cursor-pointer select-none items-center gap-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                {active ? (
+                    <span className="inline-block size-2.5 animate-spin rounded-full border-2 border-muted-foreground/40 border-t-muted-foreground" />
+                ) : (
+                    '💭'
+                )}
+                {active ? 'Thinking…' : 'Thought process'}
+            </summary>
+            <div className="nowheel mt-1.5 max-h-56 overflow-y-auto whitespace-pre-wrap border-l-2 border-border pl-2 text-[10px] italic leading-relaxed text-muted-foreground">
+                {text || '…'}
+            </div>
+        </details>
+    );
+}
+
+/** ⚙ Tool run — auto-expands while executing, collapses to a ✓/✗ summary line. */
+function ToolRunBlock({ run }: { run: import('@/types/session-card').ToolRun }) {
+    const [open, setOpen] = useState(run.status === 'running');
+    const prevStatus = useRef(run.status);
+    useEffect(() => {
+        if (prevStatus.current === 'running' && run.status !== 'running') setOpen(false);
+        if (prevStatus.current !== 'running' && run.status === 'running') setOpen(true);
+        prevStatus.current = run.status;
+    }, [run.status]);
+    return (
+        <details
+            className="mb-1.5 overflow-hidden rounded-md border border-border/60 bg-[#0d1117]"
+            open={open}
+            onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
+        >
+            <summary className="flex cursor-pointer select-none items-center gap-1.5 px-2 py-1 font-mono text-[10px] text-muted-foreground">
+                {run.status === 'running' ? (
+                    <span className="inline-block size-2.5 animate-spin rounded-full border-2 border-muted-foreground/40 border-t-muted-foreground" />
+                ) : run.status === 'error' ? (
+                    <span className="text-[#f85149]">✗</span>
+                ) : (
+                    <span className="text-[#3fb950]">✓</span>
+                )}
+                <span className="font-semibold">{run.name}</span>
+                <span className="ml-auto opacity-60">
+                    {run.status === 'running'
+                        ? 'running…'
+                        : `${run.output.split('\n').length} lines`}
+                </span>
+            </summary>
+            {run.output && (
+                <pre className="nowheel m-0 max-h-48 overflow-auto whitespace-pre-wrap border-t border-border/60 px-2 py-1.5 text-[10px] leading-relaxed text-[#c9d1d9]">
+                    {run.output}
+                </pre>
+            )}
+        </details>
+    );
+}
+
 function ChatCardNodeInner({
     id,
     selected,
@@ -182,36 +251,12 @@ function ChatCardNodeInner({
                     )}
                 >
                     {m.role === 'assistant' &&
-                        m.tools?.map((t) => (
-                            <details
-                                key={t.callId}
-                                className="mb-1.5 rounded-md border border-border/60 bg-background/60 px-2 py-1"
-                                open={t.status === 'running'}
-                            >
-                                <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                                    ⚙ {t.name}{' '}
-                                    {t.status === 'running'
-                                        ? '…running'
-                                        : t.status === 'error'
-                                          ? '✗ error'
-                                          : '✓'}
-                                </summary>
-                                {t.output && (
-                                    <pre className="nowheel mt-1 max-h-40 overflow-auto whitespace-pre-wrap text-[10px] leading-relaxed text-muted-foreground">
-                                        {t.output}
-                                    </pre>
-                                )}
-                            </details>
-                        ))}
-                    {m.role === 'assistant' && m.thinking && (
-                        <details className="mb-1.5 rounded-md border border-border/60 bg-background/60 px-2 py-1">
-                            <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                                💭 Thinking
-                            </summary>
-                            <div className="nowheel mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap italic leading-relaxed text-muted-foreground">
-                                {m.thinking}
-                            </div>
-                        </details>
+                        m.tools?.map((t) => <ToolRunBlock key={t.callId} run={t} />)}
+                    {m.role === 'assistant' && m.thinking != null && (
+                        <ThinkingBlock
+                            text={m.thinking}
+                            active={!m.text && card.status === 'streaming'}
+                        />
                     )}
                     {m.role === 'assistant' ? (
                         <>
