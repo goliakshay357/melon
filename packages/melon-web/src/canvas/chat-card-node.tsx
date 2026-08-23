@@ -7,7 +7,7 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { Minimize2, Plus, X } from 'lucide-react';
+import { BarChart3, Minimize2, Plus, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { cn } from '@/lib/utils';
@@ -91,8 +91,10 @@ function ChatCardNodeInner({
             </span>
             <button
                 className={cn(
-                    'nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary',
-                    card.vizMode ? 'bg-primary/15 text-primary' : 'hover:text-foreground',
+                    'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
+                    card.vizMode
+                        ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/40'
+                        : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
                 )}
                 onClick={(e) => {
                     e.stopPropagation();
@@ -102,7 +104,8 @@ function ChatCardNodeInner({
                 }}
                 title={card.vizMode ? 'Visualization mode ON' : 'Visualization mode OFF'}
             >
-                🖼
+                <BarChart3 className="size-3.5" />
+                Viz
             </button>
             <button
                 className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
