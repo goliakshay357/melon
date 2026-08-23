@@ -112,6 +112,28 @@ function ChatCardNodeInner({
                                 : 'bg-secondary text-secondary-foreground',
                         )}
                     >
+                        {m.role === 'assistant' &&
+                            m.tools?.map((t) => (
+                                <details
+                                    key={t.callId}
+                                    className="mb-1.5 rounded-md border border-border/60 bg-background/60 px-2 py-1"
+                                    open={t.status === 'running'}
+                                >
+                                    <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                                        ⚙ {t.name}{' '}
+                                        {t.status === 'running'
+                                            ? '…running'
+                                            : t.status === 'error'
+                                              ? '✗ error'
+                                              : '✓'}
+                                    </summary>
+                                    {t.output && (
+                                        <pre className="nowheel mt-1 max-h-40 overflow-auto whitespace-pre-wrap text-[10px] leading-relaxed text-muted-foreground">
+                                            {t.output}
+                                        </pre>
+                                    )}
+                                </details>
+                            ))}
                         {m.role === 'assistant' && m.thinking && (
                             <details className="mb-1.5 rounded-md border border-border/60 bg-background/60 px-2 py-1">
                                 <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-muted-foreground">

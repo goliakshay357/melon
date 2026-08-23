@@ -2,11 +2,20 @@ import { nanoid } from 'nanoid';
 
 export type CardStatus = 'idle' | 'streaming' | 'error';
 
+export interface ToolRun {
+    callId: string;
+    name: string;
+    status: 'running' | 'ok' | 'error';
+    output: string;
+}
+
 export interface ChatMessage {
     role: 'user' | 'assistant';
     text: string;
     /** Model reasoning stream (thinking models only). */
     thinking?: string;
+    /** Tool executions that happened during this turn. */
+    tools?: ToolRun[];
 }
 
 /**

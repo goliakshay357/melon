@@ -1,6 +1,11 @@
 import { create } from 'zustand';
 import { nanoid } from 'nanoid';
-import { newCardId, type SessionCard } from '@/types/session-card';
+import {
+    newCardId,
+    type ChatMessage,
+    type SessionCard,
+    type ToolRun,
+} from '@/types/session-card';
 
 const MELON_API = 'http://127.0.0.1:8788';
 
@@ -383,8 +388,59 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                 const data = JSON.parse(ev.data as string) as
                     | { type: 'delta'; text: string }
                     | { type: 'thinking'; text: string }
+                    | {
+                          type: 'tool_start';
+                          callId: string;
+                          name: string;
+                          args?: string;
+                      }
+                    | { type: 'tool_update'; callId: string; output: string }
+                    | {
+                          type: 'tool_end';
+                          callId: string;
+                          isError: boolean;
+                          output: string;
+                      }
+                    | { type: 'raw'; text: string }
                     | { type: 'status'; status: 'idle' | 'streaming' | 'error' }
                     | { type: 'error'; message: string };
+
+                // Mutate the last assistant message in place (create if needed).
+                const patchLastAssistant = (
+                    fn: (m: ChatMessage) => ChatMessage,
+                ) => {
+                    const cur = useCanvasStore
+                        .getState()
+                        .cards.find((c) => c.id === cardId);
+                    if (!cur) return;
+                    const msgs = [...cur.messages];
+                    const last = msgs[msgs.length - 1];
+                    if (last?.role === 'assistant') {
+                        msgs[msgs.length - 1] = fn(last);
+                    } else {
+                        msgs.push(fn({ role: 'assistant', text: '' }));
+                    }
+                    useCanvasStore.setState((s) => ({
+                        cards: s.cards.map((c) =>
+                            c.id === cardId ? { ...c, messages: msgs } : c,
+                        ),
+                    }));
+                };
+                const ensureTool = (run: Partial<ToolRun> & { callId: string; name?: string }) => {
+                    patchLastAssistant((m) => {
+                        const tools = [...(m.tools ?? [])];
+                        const i = tools.findIndex((t) => t.callId === run.callId);
+                        if (i >= 0) tools[i] = { ...tools[i], ...run } as ToolRun;
+                        else
+                            tools.push({
+                                name: 'tool',
+                                status: 'running',
+                                output: '',
+                                ...run,
+                            } as ToolRun);
+                        return { ...m, tools };
+                    });
+                };
                 const appendToLastAssistant = (patch: {
                     text?: string;
                     thinking?: string;
@@ -409,7 +465,27 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                         ),
                     }));
                 };
-                if (data.type === 'thinking') {
+                if (data.type === 'tool_start') {
+                    ensureTool({ callId: data.callId, name: data.name, output: data.args ? `args: ${data.args}` : '' });
+                } else if (data.type === 'tool_update') {
+                    const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+                    const lastA = [...(cur?.messages ?? [])].reverse().find((m) => m.role === 'assistant');
+                    const run = lastA?.tools?.find((t) => t.callId === data.callId);
+                    ensureTool({
+                        callId: data.callId,
+                        output: `${run?.output ?? ''}${data.output}\n`,
+                    });
+                } else if (data.type === 'tool_end') {
+                    ensureTool({
+                        callId: data.callId,
+                        status: data.isError ? 'error' : 'ok',
+                        output: `${useCanvasStore
+                            .getState()
+                            .cards.find((c) => c.id === cardId)
+                            ?.messages.flatMap((m) => m.tools ?? [])
+                            .find((t) => t.callId === data.callId)?.output ?? ''}${data.output}`,
+                    });
+                } else if (data.type === 'thinking') {
                     st!.thinkingBuffer += data.text;
                     appendToLastAssistant({ thinking: st!.thinkingBuffer });
                 } else if (data.type === 'delta') {
@@ -425,6 +501,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                     useCanvasStore.getState().updateCard(cardId, {
                         status: data.status,
                     });
+                } else if (data.type === 'raw') {
+                    pushLog(cardId, `• ${data.text}`);
                 } else if ((data as { type: string }).type === 'error') {
                     pushLog(cardId, `✗ agent error`);
                     useCanvasStore.getState().updateCard(cardId, {

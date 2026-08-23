@@ -23,7 +23,7 @@ import {
 	createAgentSessionServices,
 	getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { expandHome, loadConfig, modelToString, type MelonConfig } from "./config.ts";
+import { expandHome, loadConfig, modelToString, preview, type MelonConfig } from "./config.ts";
 import { SessionRegistry } from "./session-registry.ts";
 
 let _modelRuntime: ModelRuntime | undefined;
@@ -92,6 +92,30 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				console.log(`[${cardId}] agent_start`);
 			} else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
 				deltaCount++;
+			} else if (
+				event.type === "message_start" ||
+				event.type === "message_end" ||
+				event.type === "turn_start"
+			) {
+				// too chatty to broadcast every one; lifecycle shows via agent_* 
+			} else if (event.type === "turn_end") {
+				registry.broadcast(cardId, {
+					type: "raw",
+					text: `turn_end (${(event.message as any)?.stopReason ?? "done"})`,
+				});
+			} else if (event.type === "auto_retry_start") {
+				registry.broadcast(cardId, { type: "raw", text: "provider error — auto-retrying…" });
+			} else if (event.type === "summarization_retry_scheduled") {
+				registry.broadcast(cardId, { type: "raw", text: "context overflow — summarizing and retrying…" });
+			} else if (event.type === "compaction_start") {
+				registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
+			} else if (event.type === "queue_update") {
+				const q = event as any;
+				if (q.steering || q.followUp)
+					registry.broadcast(cardId, {
+						type: "raw",
+						text: `queued: ${q.steering ?? ""}${q.followUp ?? ""}`,
+					});
 			} else if (event.type === "agent_end") {
 				const msgs = event.messages ?? [];
 				const last = msgs[msgs.length - 1];
@@ -117,10 +141,52 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				registry.broadcast(cardId, { type: "delta", text: event.assistantMessageEvent.delta });
 			} else if (event.type === "agent_start") {
 				registry.broadcast(cardId, { type: "status", status: "streaming" });
+			} else if (
+				event.type === "message_start" ||
+				event.type === "message_end" ||
+				event.type === "turn_start"
+			) {
+				// too chatty to broadcast every one; lifecycle shows via agent_* 
+			} else if (event.type === "turn_end") {
+				registry.broadcast(cardId, {
+					type: "raw",
+					text: `turn_end (${(event.message as any)?.stopReason ?? "done"})`,
+				});
+			} else if (event.type === "auto_retry_start") {
+				registry.broadcast(cardId, { type: "raw", text: "provider error — auto-retrying…" });
+			} else if (event.type === "summarization_retry_scheduled") {
+				registry.broadcast(cardId, { type: "raw", text: "context overflow — summarizing and retrying…" });
+			} else if (event.type === "compaction_start") {
+				registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
+			} else if (event.type === "queue_update") {
+				const q = event as any;
+				if (q.steering || q.followUp)
+					registry.broadcast(cardId, {
+						type: "raw",
+						text: `queued: ${q.steering ?? ""}${q.followUp ?? ""}`,
+					});
 			} else if (event.type === "agent_end") {
 				registry.broadcast(cardId, { type: "status", status: "idle" });
 			} else if (event.type === "tool_execution_start") {
-				registry.broadcast(cardId, { type: "tool", name: event.toolName });
+				registry.broadcast(cardId, {
+					type: "tool_start",
+					callId: event.toolCallId,
+					name: event.toolName,
+					args: preview(event.args),
+				});
+			} else if (event.type === "tool_execution_update") {
+				registry.broadcast(cardId, {
+					type: "tool_update",
+					callId: event.toolCallId,
+					output: preview(event.partialResult),
+				});
+			} else if (event.type === "tool_execution_end") {
+				registry.broadcast(cardId, {
+					type: "tool_end",
+					callId: event.toolCallId,
+					isError: event.isError,
+					output: preview(event.result),
+				});
 			}
 		});
 	}
