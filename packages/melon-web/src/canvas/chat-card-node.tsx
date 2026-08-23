@@ -1,4 +1,5 @@
 import { memo as ReactMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
     Handle,
     NodeResizer,
@@ -6,7 +7,7 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { Plus, X } from 'lucide-react';
+import { Minimize2, Plus, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { cn } from '@/lib/utils';
@@ -29,7 +30,7 @@ function ChatCardNodeInner({
     const deleteCards = useCanvasStore((s) => s.deleteCards);
     const sendMessage = useCanvasStore((s) => s.sendMessage);
     const [draft, setDraft] = useState('');
-    const [copied, setCopied] = useState(false);
+    const [maximized, setMaximized] = useState(false);
 
     if (!card) return null;
 
@@ -43,59 +44,53 @@ function ChatCardNodeInner({
         sendMessage(id, text);
     };
 
-    return (
+    const header = (compact: boolean) => (
         <div
             className={cn(
-                'flex h-full w-full flex-col rounded-xl border bg-card shadow-sm transition-shadow',
-                focused ? 'border-ring shadow-md ring-2 ring-ring/30' : 'border-border',
+                'flex shrink-0 items-center gap-2 border-b border-border px-3 py-2',
+                compact ? '' : 'rounded-t-xl',
             )}
         >
-            {/* Resize handles — visible when the card is selected */}
-            <NodeResizer
-                isVisible={selected}
-                minWidth={320}
-                minHeight={260}
-                lineClassName="!border-primary/50"
-                handleClassName="!h-2 !w-2 !rounded-sm !border-primary/60 !bg-card"
-                onResizeEnd={(_e, params) =>
-                    useCanvasStore
-                        .getState()
-                        .resizeCard(id, params.width, params.height)
-                }
-            />
+            <span className={cn('size-2 shrink-0 rounded-full', statusDot[card.status])} />
+            <span className="flex-1 truncate text-sm font-medium text-card-foreground">
+                {card.title}
+            </span>
+            <button
+                className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
+                onClick={(e) => {
+                    e.stopPropagation();
+                    forkCard(id);
+                }}
+                title="Fork this conversation"
+            >
+                <Plus className="size-4" />
+            </button>
+            <button
+                className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
+                onClick={(e) => {
+                    e.stopPropagation();
+                    setMaximized(true);
+                }}
+                title="Full screen"
+            >
+                <MaximizeIcon />
+            </button>
+            <button
+                className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-red-500"
+                onClick={(e) => {
+                    e.stopPropagation();
+                    deleteCards([id]);
+                }}
+                title="Delete card"
+            >
+                <X className="size-4" />
+            </button>
+        </div>
+    );
 
-            <Handle type="target" position={Position.Top} className="!opacity-0" />
-            <Handle type="source" position={Position.Bottom} className="!opacity-0" />
-
-            {/* Header — drag handle zone */}
-            <div className="flex items-center gap-2 rounded-t-xl border-b border-border px-3 py-2">
-                <span className={cn('size-2 shrink-0 rounded-full', statusDot[card.status])} />
-                <span className="flex-1 truncate text-sm font-medium text-card-foreground">
-                    {card.title}
-                </span>
-                <button
-                    className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        forkCard(id);
-                    }}
-                    title="Fork this conversation"
-                >
-                    <Plus className="size-4" />
-                </button>
-                <button
-                    className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-red-500"
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        deleteCards([id]);
-                    }}
-                    title="Delete card"
-                >
-                    <X className="size-4" />
-                </button>
-            </div>
-
-            {/* Body — flexes to whatever height the card is resized to */}
+    const bodyAndInput = (
+        <>
+            {/* Body */}
             <div className="nowheel min-h-0 flex-1 space-y-2 overflow-y-auto px-3 py-2">
                 {card.messages.length === 0 && (
                     <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
@@ -158,38 +153,10 @@ function ChatCardNodeInner({
                 ))}
             </div>
 
-            {/* Pipe trace — first-principles visibility */}
-            <details className="border-t border-border px-3 py-1 text-[10px]">
-                <summary className="flex cursor-pointer select-none items-center gap-2 text-muted-foreground">
-                    <span>
-                        log{card.model ? ` · ${card.model}` : ''}
-                    </span>
-                    <button
-                        className="nodrag ml-auto rounded px-1.5 py-0.5 hover:bg-secondary"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            e.preventDefault();
-                            navigator.clipboard
-                                .writeText((card.logs ?? []).join('\n'))
-                                .then(() => setCopied(true))
-                                .then(() => window.setTimeout(() => setCopied(false), 1200));
-                        }}
-                    >
-                        {copied ? 'copied ✓' : 'copy'}
-                    </button>
-                </summary>
-                <div className="nowheel mt-1 max-h-24 overflow-y-auto font-mono leading-relaxed text-muted-foreground">
-                    {(card.logs ?? []).length === 0 && <div>(no activity yet)</div>}
-                    {(card.logs ?? []).map((l, i) => (
-                        <div key={i} className="whitespace-pre-wrap">{l}</div>
-                    ))}
-                </div>
-            </details>
-
             {/* Footer input */}
-            <div className="border-t border-border p-2">
+            <div className="shrink-0 border-t border-border p-2">
                 <input
-                    className="nodrag w-full rounded-lg border border-input bg-background px-2.5 py-1.5 text-xs text-foreground outline-none placeholder:text-muted-foreground focus:border-ring"
+                    className="nodrag w-full rounded-lg border border-input bg-background px-2.5 py-1.5 text-xs outline-none placeholder:text-muted-foreground focus:border-ring"
                     value={draft}
                     onChange={(e) => setDraft(e.target.value)}
                     onKeyDown={(e) => {
@@ -200,7 +167,74 @@ function ChatCardNodeInner({
                     placeholder="Ask anything…"
                 />
             </div>
-        </div>
+        </>
+    );
+
+    return (
+        <>
+            <div
+                className={cn(
+                    'flex h-full w-full flex-col rounded-xl border bg-card shadow-sm transition-shadow',
+                    focused ? 'border-ring shadow-md ring-2 ring-ring/30' : 'border-border',
+                )}
+            >
+                {/* Resize handles — visible when the card is selected */}
+                <NodeResizer
+                    isVisible={selected}
+                    minWidth={320}
+                    minHeight={260}
+                    lineClassName="!border-primary/50"
+                    handleClassName="!h-2 !w-2 !rounded-sm !border-primary/60 !bg-white"
+                    onResizeEnd={(_e, params) =>
+                        useCanvasStore
+                            .getState()
+                            .resizeCard(id, params.width, params.height)
+                    }
+                />
+
+                <Handle type="target" position={Position.Top} className="!opacity-0" />
+                <Handle type="source" position={Position.Bottom} className="!opacity-0" />
+
+                {header(false)}
+                {bodyAndInput}
+            </div>
+
+            {/* Full-screen mode — portal so it escapes React Flow's transformed canvas */}
+            {maximized &&
+                createPortal(
+                    <div
+                        className="fixed inset-0 z-[999] flex items-center justify-center bg-black/70 p-6"
+                        onClick={() => setMaximized(false)}
+                    >
+                        <div
+                            className="flex h-full max-h-[92vh] w-full max-w-[95vw] flex-col rounded-xl border border-border bg-card shadow-2xl"
+                            onClick={(e) => e.stopPropagation()}
+                        >
+                            {header(true)}
+                            {bodyAndInput}
+                            <div className="flex justify-end border-t border-border p-1.5">
+                                <button
+                                    className="nodrag flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-secondary hover:text-foreground"
+                                    onClick={() => setMaximized(false)}
+                                    title="Minimize (back to canvas)"
+                                >
+                                    <Minimize2 className="size-3.5" /> minimize
+                                </button>
+                            </div>
+                        </div>
+                    </div>,
+                    document.body,
+                )}
+        </>
+    );
+}
+
+function MaximizeIcon() {
+    return (
+        <svg viewBox="0 0 16 16" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.5">
+            <path d="M2 6V2h4M14 10v4h-4" strokeLinecap="round" />
+            <rect x="2" y="2" width="12" height="12" rx="2" opacity="0.35" />
+        </svg>
     );
 }
 

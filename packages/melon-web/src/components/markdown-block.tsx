@@ -1,6 +1,5 @@
 import ReactMarkdown from 'react-markdown';
 import { IframeViz } from './iframe-viz';
-import { MermaidBlock } from './mermaid-block';
 import remarkGfm from 'remark-gfm';
 
 /**
@@ -11,20 +10,16 @@ import remarkGfm from 'remark-gfm';
 
 type Part =
     | { kind: 'markdown'; content: string }
-    | { kind: 'viz-html'; content: string }
-    | { kind: 'mermaid'; content: string };
+    | { kind: 'viz-html'; content: string };
 
 function splitBlocks(raw: string): Part[] {
     const parts: Part[] = [];
-    const re = /```(viz-html|mermaid)\s*\n([\s\S]*?)```/g;
+    const re = /```viz-html\s*\n([\s\S]*?)```/g;
     let last = 0;
     for (const match of raw.matchAll(re)) {
         const before = raw.slice(last, match.index);
         if (before.trim()) parts.push({ kind: 'markdown', content: before });
-        parts.push({
-            kind: match[1] as 'viz-html' | 'mermaid',
-            content: match[2],
-        });
+        parts.push({ kind: 'viz-html', content: match[1] });
         last = match.index + match[0].length;
     }
     const rest = raw.slice(last);
@@ -38,8 +33,6 @@ export function MarkdownBlock({ content }: { content: string }) {
             {splitBlocks(content).map((part, i) =>
                 part.kind === 'viz-html' ? (
                     <IframeViz key={i} code={part.content} />
-                ) : part.kind === 'mermaid' ? (
-                    <MermaidBlock key={i} code={part.content} />
                 ) : (
                     <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>
                         {part.content}
