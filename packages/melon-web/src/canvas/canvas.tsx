@@ -28,7 +28,6 @@ export function Canvas() {
     const scrollAction = useCanvasStore((s) => s.scrollAction);
     const folder = useCanvasStore((s) => s.folder);
     const canvasId = useCanvasStore((s) => s.canvasId);
-    const openFolder = useCanvasStore((s) => s.openFolder);
     const saveCanvas = useCanvasStore((s) => s.saveCanvas);
     const storedViewport = useCanvasStore((s) => s.viewport);
 
@@ -46,21 +45,9 @@ export function Canvas() {
     const shiftPressed = useKeyPress('Shift');
     const { screenToFlowPosition, fitView } = useReactFlow();
     const wrapperRef = useRef<HTMLDivElement>(null);
-    const heroFormRef = useRef<HTMLFormElement>(null);
 
     const nodeTypes = useMemo(() => ({ chatCard: ChatCardNode }), []);
     const edgeTypes = useMemo(() => ({ fork: ForkEdge }), []);
-
-	// Restore last location (folder + workspace) on first mount.
-	const restoredRef = useRef(false);
-	useEffect(() => {
-		if (restoredRef.current) return;
-		const f = localStorage.getItem('melon:lastFolder');
-		if (f && !folder) {
-			restoredRef.current = true;
-			openFolder(f);
-		}
-	}, [folder, openFolder]);
 
 	// Autosave workspace (debounced).
 	useEffect(() => {
@@ -150,17 +137,6 @@ export function Canvas() {
     }, [menu, addCard, screenToFlowPosition]);
 
     // Hero input when the canvas is empty — the "what do you want to understand?" moment.
-    const onHeroSubmit = (text: string, cwd?: string) => {
-        const el = wrapperRef.current;
-        if (!el) return;
-        const center = screenToFlowPosition({
-            x: el.clientWidth / 2 - 190,
-            y: el.clientHeight / 2 - 160,
-        });
-        const id = addCard(center);
-        useCanvasStore.getState().sendMessage(id, text, cwd ? { cwd } : undefined);
-    };
-
     return (
         <div className="relative h-full w-full" ref={wrapperRef}>
             <ReactFlow
@@ -229,86 +205,6 @@ export function Canvas() {
                 </div>
             )}
 
-            {/* Folder chooser — very first screen */}
-            {!folder ? (
-                <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
-                    <form
-                        ref={heroFormRef}
-                        className="pointer-events-auto w-[420px] rounded-2xl border border-border bg-card/95 p-6 shadow-lg backdrop-blur"
-                        onSubmit={(e) => {
-                            e.preventDefault();
-                            const cwd = new FormData(e.currentTarget).get('cwd');
-                            if (typeof cwd === 'string' && cwd.trim()) openFolder(cwd.trim());
-                        }}
-                    >
-                        <h1 className="mb-1 text-center text-base font-semibold text-card-foreground">
-                            🍉 Melon Canvas
-                        </h1>
-                        <p className="mb-4 text-center text-xs text-muted-foreground">
-                            Choose a project folder. Canvases & sessions live here.
-                        </p>
-                        <input
-                            name="canvasName"
-                            defaultValue="Canvas 1"
-                            placeholder="Name this canvas"
-                            className="mb-2 w-full rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
-                        />
-                        <input
-                            name="cwd"
-                            defaultValue="~/Desktop/workspace/melon"
-                            placeholder="/path/to/project or ~/path — where the agent works"
-                            className="w-full rounded-lg border border-input bg-background px-3 py-2 text-xs outline-none focus:border-ring"
-                        />
-                        <div className="mt-3">
-                            <button
-                                type="submit"
-                                className="flex-1 rounded-lg bg-primary py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
-                            >
-                                Open folder
-                            </button>
-                        </div>
-                    </form>
-                </div>
-            ) : cards.length === 0 && (
-                <div className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center">
-                    <form
-                        className="pointer-events-auto w-[420px] rounded-2xl border border-border bg-card/95 p-6 shadow-lg backdrop-blur"
-                        onSubmit={(e) => {
-                            e.preventDefault();
-                            const fd = new FormData(e.currentTarget);
-                            const input = fd.get('q');
-                            const cwd = fd.get('cwd');
-                            const name = fd.get('canvasName');
-                            if (typeof input === 'string' && input.trim()) {
-                                if (typeof name === 'string' && name.trim()) {
-                                    useCanvasStore.setState({ canvasName: name.trim() });
-                                    saveCanvas();
-                                }
-                                onHeroSubmit(
-                                    input.trim(),
-                                    typeof cwd === 'string' && cwd.trim() ? cwd.trim() : undefined,
-                                );
-                            }
-                        }}
-                    >
-                        <h1 className="mb-3 text-center text-base font-semibold text-card-foreground">
-                            What do you want to understand?
-                        </h1>
-                        <input
-                            name="q"
-                            autoFocus
-                            placeholder="Ask anything…"
-                            className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
-                        />
-                        <input
-                            name="cwd"
-                            defaultValue="~/Desktop/workspace/melon"
-                            placeholder="/path/to/project — where the agent works"
-                            className="mt-2 w-full rounded-lg border border-input bg-background px-3 py-1.5 text-xs outline-none focus:border-ring"
-                        />
-                    </form>
-                </div>
-            )}
         </div>
     );
 }
