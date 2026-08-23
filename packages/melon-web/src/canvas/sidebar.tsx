@@ -26,7 +26,10 @@ export function Sidebar() {
             if (res.ok) {
                 const { path } = await res.json();
                 if (path) {
-                    openFolder(path);
+                    await openFolder(path);
+                    if (!useCanvasStore.getState().canvasId) {
+                        await createCanvas('Canvas 1');
+                    }
                     loadTree();
                 }
             }

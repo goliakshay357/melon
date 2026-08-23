@@ -140,11 +140,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         ).catch(() => null);
         let canvases: CanvasMeta[] = [];
         if (res?.ok) canvases = (await res.json()).canvases ?? [];
+        set({ canvases });
         if (canvases.length > 0) {
-            set({ canvases });
             await get().switchCanvas(canvases[0].id);
-        } else {
-            await get().createCanvas('Canvas 1');
         }
     },
     scrollAction:
@@ -295,7 +293,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                     body: JSON.stringify(
                         sessionFile
                             ? { cardId, sessionFile }
-                            : { cardId, cwd: opts?.cwd ?? '~/Desktop/workspace/melon' },
+                            : { cardId, cwd: opts?.cwd ?? get().folder ?? undefined },
                     ),
                 });
                 if (!res.ok) throw new Error(`attach ${res.status}: ${await res.text()}`);
