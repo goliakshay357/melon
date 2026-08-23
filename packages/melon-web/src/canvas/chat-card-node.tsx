@@ -7,7 +7,7 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { BarChart3, Minimize2, Plus, X } from 'lucide-react';
+import { ArrowUp, BarChart3, Minimize2, Plus, Square, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { cn } from '@/lib/utils';
