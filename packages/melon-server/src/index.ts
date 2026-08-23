@@ -38,7 +38,21 @@ export interface MelonServerDeps {
 
 export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInstance> {
 	const config = loadConfig(deps.config);
-	const app = Fastify({ logger: false });
+	const PROTOCOL = [
+	"",
+	"[VISUALIZATION PROTOCOL - melon canvas]",
+	"You explain on a visual canvas. When a visual genuinely aids understanding, include:",
+	'1. ```mermaid fenced blocks for flowcharts / sequence / state diagrams.',
+	"2. ```viz-html fenced blocks for interactive 3D/animated scenes.",
+	"viz-html contract (STRICT):",
+	"- ONE complete self-contained HTML document per block.",
+	'- Load three.js via <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js"}}</script> then import * as THREE from \'three\'.',
+	"- Inline all CSS/JS. Dark theme: background #161b22, readable colors.",
+	"- Animation via requestAnimationFrame; canvas fills window; no external files.",
+	"Keep prose explanation around the blocks.",
+].join("\n");
+
+const app = Fastify({ logger: false });
 	await app.register(cors, { origin: true });
 
 	const registry = new SessionRegistry();
@@ -576,7 +590,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const started = Date.now();
 		console.log(`[${cardId}] prompt:start "${String((req.body as any)?.text).slice(0, 60)}"`);
 		try {
-			await s.runtime.session.prompt((req.body as any)?.text ?? "");
+			let text = (req.body as any)?.text ?? "";
+			if (!s.vizProtocolSent) {
+				s.vizProtocolSent = true;
+				text = text + "\n" + PROTOCOL;
+			}
+			await s.runtime.session.prompt(text);
 			console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
 		} catch (e) {
 			console.error(`[${cardId}] prompt:THREW ${(e as Error).stack}`);

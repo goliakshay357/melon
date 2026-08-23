@@ -4,6 +4,7 @@ export interface AttachedSession {
 	runtime: any; // AgentSessionRuntime — typed loosely: internals shift across pi versions
 	clients: Set<FastifyReply>;
 	busy: boolean;
+	vizProtocolSent?: boolean;
 }
 
 export class SessionRegistry {

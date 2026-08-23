@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown';
+import { IframeViz } from './iframe-viz';
 import remarkGfm from 'remark-gfm';
 
 /**
@@ -31,12 +32,7 @@ export function MarkdownBlock({ content }: { content: string }) {
         <div className="md-body">
             {splitBlocks(content).map((part, i) =>
                 part.kind === 'viz-html' ? (
-                    <div
-                        key={i}
-                        className="my-2 rounded-lg border border-dashed border-primary/50 bg-primary/5 px-3 py-4 text-center text-[11px] text-muted-foreground"
-                    >
-                        🖼 visualization block ({part.content.split('\n').length} lines) — iframe rendering arrives with VIZ-GOAL M1
-                    </div>
+                    <IframeViz key={i} code={part.content} />
                 ) : (
                     <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>
                         {part.content}
