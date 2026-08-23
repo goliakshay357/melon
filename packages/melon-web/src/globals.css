@@ -24,24 +24,25 @@
     }
 
     .dark {
-        /* DSH dark — pure neutrals */
-        --background: 0 0% 12%;
-        --foreground: 0 0% 98.5%;
-        --card: 0 0% 17%;
-        --card-foreground: 0 0% 98.5%;
-        --primary: 0 0% 92.2%;
-        --primary-foreground: 0 0% 20.5%;
-        --secondary: 0 0% 26.9%;
-        --secondary-foreground: 0 0% 98.5%;
-        --muted: 0 0% 26.9%;
-        --muted-foreground: 0 0% 70.8%;
-        --accent: 214 100% 60%;         /* functional link/blue */
-        --accent-foreground: 0 0% 20.5%;
-        --border: 0 0% 100% / 10%;
-        --input: 0 0% 100% / 15%;
-        --ring: 0 0% 70.8%;
+        /* Dracula */
+        --background: 232 15% 18%;      /* #282a36 */
+        --foreground: 60 30% 96%;       /* #f8f8f2 */
+        --card: 233 14% 21%;            /* #2e303e */
+        --card-foreground: 60 30% 96%;
+        --primary: 265 89% 78%;         /* #bd93f9 */
+        --primary-foreground: 232 15% 18%;
+        --secondary: 234 13% 31%;       /* #44475a */
+        --secondary-foreground: 60 30% 96%;
+        --muted: 234 13% 26%;
+        --muted-foreground: 231 24% 72%;
+        --accent: 191 97% 77%;          /* #8be9fd */
+        --accent-foreground: 232 15% 18%;
+        --border: 233 14% 30%;
+        --input: 233 14% 30%;
+        --ring: 265 89% 78%;
     }
 }
+
 
 html,
 body,

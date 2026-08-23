@@ -7,7 +7,7 @@ import { useMemo } from 'react';
 export function IframeViz({ code }: { code: string }) {
     const srcDoc = useMemo(() => {
         // Ensure dark baseline even if the agent forgets body styling.
-        const dark = `<style>html,body{margin:0;background:#161b22;color:#e6edf3;overflow:hidden}</style>`;
+        const dark = `<style>html,body{margin:0;background:#282a36;color:#e6edf3;overflow:hidden}</style>`;
         if (/<html|<body/i.test(code)) {
             // inject after <head> if present, else prepend
             return code.includes('<head>')
@@ -23,7 +23,7 @@ export function IframeViz({ code }: { code: string }) {
                 title="visualization"
                 sandbox="allow-scripts"
                 srcDoc={srcDoc}
-                className="block w-full border-0 bg-[#161b22]"
+                className="block w-full border-0 bg-[#282a36]"
                 style={{ height: 320 }}
             />
         </div>

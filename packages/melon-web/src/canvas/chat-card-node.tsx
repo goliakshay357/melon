@@ -15,9 +15,9 @@ import { cn } from '@/lib/utils';
 export type ChatCardNodeType = Node<{ cardId: string }, 'chatCard'>;
 
 const statusDot: Record<string, string> = {
-    idle: 'bg-[#3fb950]',
-    streaming: 'bg-[#d29922] animate-pulse',
-    error: 'bg-[#f85149]',
+    idle: 'bg-[#50fa7b]',
+    streaming: 'bg-[#f1fa8c] animate-pulse',
+    error: 'bg-[#ff5555]',
 };
 
 /** 💭 Thinking — auto-expands while reasoning streams, auto-collapses when the answer begins. */
@@ -61,7 +61,7 @@ function ToolRunBlock({ run }: { run: import('@/types/session-card').ToolRun }) 
     }, [run.status]);
     return (
         <details
-            className="mb-1.5 overflow-hidden rounded-md border border-border/60 bg-[#0d1117]"
+            className="mb-1.5 overflow-hidden rounded-md border border-border/60 bg-[#21222c]"
             open={open}
             onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
         >
@@ -81,7 +81,7 @@ function ToolRunBlock({ run }: { run: import('@/types/session-card').ToolRun }) 
                 </span>
             </summary>
             {run.output && (
-                <pre className="nowheel m-0 max-h-48 overflow-auto whitespace-pre-wrap border-t border-border/60 px-2 py-1.5 text-[10px] leading-relaxed text-[#c9d1d9]">
+                <pre className="nowheel m-0 max-h-48 overflow-auto whitespace-pre-wrap border-t border-border/60 px-2 py-1.5 text-[10px] leading-relaxed text-[#f8f8f2]">
                     {run.output}
                 </pre>
             )}

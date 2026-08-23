@@ -13,7 +13,7 @@ export function ForkEdge(props: EdgeProps) {
     return (
         <BaseEdge
             path={path}
-            style={{ stroke: '#8b8b8bcc', strokeWidth: 2 }}
+            style={{ stroke: '#bd93f999', strokeWidth: 2 }}
         />
     );
 }
