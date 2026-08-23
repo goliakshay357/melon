@@ -4,43 +4,42 @@
 
 @layer base {
     :root {
-        color-scheme: light;
-        /* GitHub light default */
-        --background: 210 29% 97%;   /* #f6f8fa */
-        --foreground: 215 13% 14%;   /* #1f2328 */
-        --card: 0 0% 100%;           /* #ffffff */
-        --card-foreground: 215 13% 14%;
-        --primary: 137 64% 32%;      /* #1f883d */
-        --primary-foreground: 0 0% 100%;
-        --secondary: 210 13% 95%;    /* #eff2f5 */
-        --secondary-foreground: 215 13% 20%;
-        --muted: 210 13% 95%;
-        --muted-foreground: 213 9% 43%;  /* #656d76 */
-        --accent: 212 92% 45%;       /* #0969da */
+        /* DSH palette — shadcn neutral, converted from oklch */
+        --background: 0 0% 100%;
+        --foreground: 0 0% 15%;
+        --card: 0 0% 100%;
+        --card-foreground: 0 0% 15%;
+        --primary: 0 0% 17%;
+        --primary-foreground: 0 0% 98.5%;
+        --secondary: 0 0% 97%;
+        --secondary-foreground: 0 0% 20.5%;
+        --muted: 0 0% 97%;
+        --muted-foreground: 0 0% 55.6%;
+        --accent: 212 92% 45%;          /* functional link/blue */
         --accent-foreground: 0 0% 100%;
-        --border: 210 18% 84%;       /* #d0d7de */
-        --input: 210 18% 84%;
-        --ring: 212 92% 45%;
-        --radius: 6px;
+        --border: 0 0% 92.2%;
+        --input: 0 0% 92.2%;
+        --ring: 0 0% 70.8%;
+        --radius: 0.625rem;
     }
 
     .dark {
-        color-scheme: dark;
-        --background: 216 28% 7%;    /* #0d1117 */
-        --foreground: 212 19% 92%;   /* #e6edf3 */
-        --card: 215 20% 11%;         /* #161b22 */
-        --card-foreground: 212 19% 92%;
-        --primary: 138 61% 38%;      /* #2ea043 */
-        --primary-foreground: 0 0% 100%;
-        --secondary: 215 17% 17%;
-        --secondary-foreground: 212 19% 88%;
-        --muted: 215 17% 17%;
-        --muted-foreground: 213 10% 58%; /* #8b949e */
-        --accent: 214 100% 60%;      /* #388bfd */
-        --accent-foreground: 0 0% 100%;
-        --border: 214 12% 22%;       /* #30363d */
-        --input: 214 12% 22%;
-        --ring: 214 100% 60%;
+        /* DSH dark — pure neutrals */
+        --background: 0 0% 12%;
+        --foreground: 0 0% 98.5%;
+        --card: 0 0% 17%;
+        --card-foreground: 0 0% 98.5%;
+        --primary: 0 0% 92.2%;
+        --primary-foreground: 0 0% 20.5%;
+        --secondary: 0 0% 26.9%;
+        --secondary-foreground: 0 0% 98.5%;
+        --muted: 0 0% 26.9%;
+        --muted-foreground: 0 0% 70.8%;
+        --accent: 214 100% 60%;         /* functional link/blue */
+        --accent-foreground: 0 0% 20.5%;
+        --border: 0 0% 100% / 10%;
+        --input: 0 0% 100% / 15%;
+        --ring: 0 0% 70.8%;
     }
 }
 
@@ -49,81 +48,6 @@ body,
 #root {
     height: 100%;
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans",
-        Helvetica, Arial, sans-serif;
-}
-
-/* ── Markdown body (assistant blocks) — GitHub-ish spacing ─────────── */
-.md-body {
-    font-size: 12px;
-    line-height: 1.6;
-    color: var(--card-foreground);
-    overflow-wrap: break-word;
-}
-.md-body > *:first-child { margin-top: 0; }
-.md-body > *:last-child { margin-bottom: 0; }
-.md-body p { margin: 0.5em 0; }
-.md-body h1, .md-body h2, .md-body h3, .md-body h4 {
-    margin: 1em 0 0.4em;
-    font-weight: 600;
-    line-height: 1.25;
-}
-.md-body h1 { font-size: 1.35em; border-bottom: 1px solid hsl(var(--border)); padding-bottom: 0.25em; }
-.md-body h2 { font-size: 1.2em; }
-.md-body h3 { font-size: 1.05em; }
-.md-body ul, .md-body ol { margin: 0.5em 0; padding-left: 1.5em; }
-.md-body ul { list-style: disc; }
-.md-body ol { list-style: decimal; }
-.md-body li { margin: 0.2em 0; }
-.md-body li > p { margin: 0.15em 0; }
-.md-body code {
-    background: hsl(var(--secondary));
-    border-radius: 4px;
-    padding: 0.15em 0.35em;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.9em;
-}
-.md-body pre {
-    background: hsl(var(--secondary));
-    border: 1px solid hsl(var(--border));
-    border-radius: 6px;
-    padding: 0.7em 0.9em;
-    margin: 0.6em 0;
-    overflow-x: auto;
-}
-.md-body pre code { background: none; padding: 0; font-size: 11px; }
-.md-body blockquote {
-    margin: 0.6em 0;
-    padding: 0.1em 1em;
-    border-left: 3px solid hsl(var(--primary));
-    color: hsl(var(--muted-foreground));
-}
-.md-body table { border-collapse: collapse; margin: 0.6em 0; width: 100%; }
-.md-body th, .md-body td {
-    border: 1px solid hsl(var(--border));
-    padding: 0.3em 0.6em;
-    text-align: left;
-}
-.md-body th { background: hsl(var(--secondary)); font-weight: 600; }
-.md-body hr { border: none; border-top: 1px solid hsl(var(--border)); margin: 0.8em 0; }
-.md-body a { color: hsl(var(--accent)); text-decoration: underline; }
-.md-body strong { font-weight: 600; }
-
-/* Shimmer activity text */
-.shimmer-text {
-    background: linear-gradient(
-        90deg,
-        hsl(var(--muted-foreground)) 0%,
-        hsl(var(--foreground)) 50%,
-        hsl(var(--muted-foreground)) 100%
-    );
-    background-size: 200% 100%;
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
-    animation: shimmer-slide 2s linear infinite;
-}
-@keyframes shimmer-slide {
-    from { background-position: 200% 0; }
-    to { background-position: -200% 0; }
+    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
+        "Noto Sans", Helvetica, Arial, sans-serif;
 }

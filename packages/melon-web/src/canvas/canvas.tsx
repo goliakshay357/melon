@@ -192,12 +192,12 @@ export function Canvas() {
                 colorMode={theme}
                 proOptions={{ hideAttribution: true }}
             >
-                <Background variant={BackgroundVariant.Dots} gap={16} size={1} color={theme === "dark" ? "#30363d" : "#d0d7de"} />
+                <Background variant={BackgroundVariant.Dots} gap={16} size={1} color={theme === "dark" ? "#333333" : "#d4d4d4"} />
                 <MiniMap
                     pannable
                     zoomable
                     className="!bottom-14"
-                    nodeColor={() => 'hsl(152 32% 42% / 0.35)'}
+                    nodeColor={() => (theme === 'dark' ? '#5a5a5a' : '#a3a3a3')}
                 />
             </ReactFlow>
 

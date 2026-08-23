@@ -15,9 +15,9 @@ import { cn } from '@/lib/utils';
 export type ChatCardNodeType = Node<{ cardId: string }, 'chatCard'>;
 
 const statusDot: Record<string, string> = {
-    idle: 'bg-[#1f883d]',
-    streaming: 'bg-[#bf8700] animate-pulse',
-    error: 'bg-[#cf222e]',
+    idle: 'bg-[#3fb950]',
+    streaming: 'bg-[#d29922] animate-pulse',
+    error: 'bg-[#f85149]',
 };
 
 /** 💭 Thinking — auto-expands while reasoning streams, auto-collapses when the answer begins. */
