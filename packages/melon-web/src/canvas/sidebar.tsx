@@ -22,7 +22,6 @@ export function Sidebar() {
     const [tree, setTree] = useState<Record<string, { canvases: any[]; loose: any[] }>>({});
     const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
     const [openCanvasSessions, setOpenCanvasSessions] = useState<Set<string>>(new Set());
-    const [pickerOpen, setPickerOpen] = useState(false);
     const [pickingNative, setPickingNative] = useState(false);
 
     const folder = useCanvasStore((s) => s.folder);
