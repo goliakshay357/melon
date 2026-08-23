@@ -54,11 +54,11 @@ function ChatCardNodeInner({
         sendMessage(id, text);
     };
 
-    const header = (compact: boolean, isMax = false) => (
+    const header = (isMax: boolean) => (
         <div
             className={cn(
                 'flex shrink-0 items-center gap-2 border-b border-border px-3 py-2',
-                compact ? '' : 'rounded-t-xl',
+                isMax ? '' : 'rounded-t-xl',
             )}
         >
             <span className={cn('size-2 shrink-0 rounded-full', statusDot[card.status])} />
@@ -98,97 +98,95 @@ function ChatCardNodeInner({
         </div>
     );
 
-    const bodyAndInput = (
-        <>
-            {/* Body */}
-            <div className="nowheel min-h-0 flex-1 space-y-2 overflow-y-auto px-3 py-2">
-                {card.messages.length === 0 && (
-                    <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                        Ask something to start this thread.
-                    </p>
-                )}
-                {card.messages.map((m, i) => (
-                    <div
-                        key={i}
-                        className={cn(
-                            'max-w-[90%] rounded-lg px-2.5 py-1.5 text-xs leading-relaxed',
-                            m.role === 'user'
-                                ? 'ml-auto bg-primary/10 text-primary'
-                                : 'bg-secondary text-secondary-foreground',
-                        )}
-                    >
-                        {m.role === 'assistant' &&
-                            m.tools?.map((t) => (
-                                <details
-                                    key={t.callId}
-                                    className="mb-1.5 rounded-md border border-border/60 bg-background/60 px-2 py-1"
-                                    open={t.status === 'running'}
-                                >
-                                    <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                                        ⚙ {t.name}{' '}
-                                        {t.status === 'running'
-                                            ? '…running'
-                                            : t.status === 'error'
-                                              ? '✗ error'
-                                              : '✓'}
-                                    </summary>
-                                    {t.output && (
-                                        <pre className="nowheel mt-1 max-h-40 overflow-auto whitespace-pre-wrap text-[10px] leading-relaxed text-muted-foreground">
-                                            {t.output}
-                                        </pre>
-                                    )}
-                                </details>
-                            ))}
-                        {m.role === 'assistant' && m.thinking && (
-                            <details className="mb-1.5 rounded-md border border-border/60 bg-background/60 px-2 py-1">
+    const messagesBody = (
+        <div className="nowheel min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3">
+            {card.messages.length === 0 && (
+                <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                    Ask something to start this thread.
+                </p>
+            )}
+            {card.messages.map((m, i) => (
+                <div
+                    key={i}
+                    className={cn(
+                        'max-w-[90%] rounded-lg px-2.5 py-1.5 text-xs leading-relaxed',
+                        m.role === 'user'
+                            ? 'ml-auto bg-primary/10 text-primary'
+                            : 'bg-secondary text-secondary-foreground',
+                    )}
+                >
+                    {m.role === 'assistant' &&
+                        m.tools?.map((t) => (
+                            <details
+                                key={t.callId}
+                                className="mb-1.5 rounded-md border border-border/60 bg-background/60 px-2 py-1"
+                                open={t.status === 'running'}
+                            >
                                 <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                                    💭 Thinking
+                                    ⚙ {t.name}{' '}
+                                    {t.status === 'running'
+                                        ? '…running'
+                                        : t.status === 'error'
+                                          ? '✗ error'
+                                          : '✓'}
                                 </summary>
-                                <div className="nowheel mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap italic leading-relaxed text-muted-foreground">
-                                    {m.thinking}
-                                </div>
-                            </details>
-                        )}
-                        {m.role === 'assistant' ? (
-                            <>
-                                <MarkdownBlock content={m.text} />
-                                {!m.text && m.thinking && (
-                                    <span className="text-[10px] text-muted-foreground">…</span>
+                                {t.output && (
+                                    <pre className="nowheel mt-1 max-h-40 overflow-auto whitespace-pre-wrap text-[10px] leading-relaxed text-muted-foreground">
+                                        {t.output}
+                                    </pre>
                                 )}
-                            </>
-                        ) : (
-                            m.text
-                        )}
-                    </div>
-                ))}
-            </div>
+                            </details>
+                        ))}
+                    {m.role === 'assistant' && m.thinking && (
+                        <details className="mb-1.5 rounded-md border border-border/60 bg-background/60 px-2 py-1">
+                            <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                                💭 Thinking
+                            </summary>
+                            <div className="nowheel mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap italic leading-relaxed text-muted-foreground">
+                                {m.thinking}
+                            </div>
+                        </details>
+                    )}
+                    {m.role === 'assistant' ? (
+                        <>
+                            <MarkdownBlock content={m.text} />
+                            {!m.text && m.thinking && (
+                                <span className="text-[10px] text-muted-foreground">…</span>
+                            )}
+                        </>
+                    ) : (
+                        m.text
+                    )}
+                </div>
+            ))}
+        </div>
+    );
 
-            {/* Footer input */}
-            <div className="shrink-0 border-t border-border p-2">
-                <input
-                    className="nodrag w-full rounded-lg border border-input bg-background px-2.5 py-1.5 text-xs outline-none placeholder:text-muted-foreground focus:border-ring"
-                    value={draft}
-                    onChange={(e) => setDraft(e.target.value)}
-                    onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === 'Enter') submit();
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                    placeholder="Ask anything…"
-                />
-            </div>
-        </>
+    const footerInput = (
+        <div className={cn('shrink-0 border-t border-border p-2', maximized && 'px-4')}>
+            <input
+                className="nodrag w-full rounded-lg border border-input bg-background px-2.5 py-1.5 text-xs outline-none placeholder:text-muted-foreground focus:border-ring"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === 'Enter') submit();
+                }}
+                onClick={(e) => e.stopPropagation()}
+                placeholder="Ask anything…"
+            />
+        </div>
     );
 
     return (
         <>
+            {/* Normal canvas card */}
             <div
                 className={cn(
                     'flex h-full w-full flex-col rounded-xl border bg-card shadow-sm transition-shadow',
                     focused ? 'border-ring shadow-md ring-2 ring-ring/30' : 'border-border',
                 )}
             >
-                {/* Resize handles — visible when the card is selected */}
                 <NodeResizer
                     isVisible={selected}
                     minWidth={320}
@@ -206,10 +204,11 @@ function ChatCardNodeInner({
                 <Handle type="source" position={Position.Bottom} className="!opacity-0" />
 
                 {header(false)}
-                {bodyAndInput}
+                {messagesBody}
+                {footerInput}
             </div>
 
-            {/* Full-screen mode — portal so it escapes React Flow's transformed canvas */}
+            {/* Full-screen mode — portal escapes React Flow's transformed canvas */}
             {maximized &&
                 createPortal(
                     <div
@@ -220,9 +219,13 @@ function ChatCardNodeInner({
                             className="flex h-full max-h-[92vh] w-full max-w-[95vw] flex-col rounded-xl border border-border bg-card shadow-2xl"
                             onClick={(e) => e.stopPropagation()}
                         >
-                            {header(true, true)}
-                            {bodyAndInput}
-                            <div className="flex justify-end border-t border-border p-1.5">
+                            {header(true)}
+                            {/* Centered reading column — no full-width stretch */}
+                            <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col">
+                                {messagesBody}
+                                {footerInput}
+                            </div>
+                            <div className="flex shrink-0 justify-end border-t border-border p-1.5">
                                 <button
                                     className="nodrag flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-secondary hover:text-foreground"
                                     onClick={() => setMaximized(false)}
