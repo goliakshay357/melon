@@ -96,7 +96,7 @@ function ChatCardNodeInner({
             </div>
 
             {/* Body — flexes to whatever height the card is resized to */}
-            <div className="min-h-0 flex-1 space-y-2 overflow-y-auto px-3 py-2">
+            <div className="nowheel min-h-0 flex-1 space-y-2 overflow-y-auto px-3 py-2">
                 {card.messages.length === 0 && (
                     <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
                         Ask something to start this thread.
@@ -117,7 +117,7 @@ function ChatCardNodeInner({
                                 <summary className="cursor-pointer select-none text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                                     💭 Thinking
                                 </summary>
-                                <div className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap italic leading-relaxed text-muted-foreground">
+                                <div className="nowheel mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap italic leading-relaxed text-muted-foreground">
                                     {m.thinking}
                                 </div>
                             </details>
@@ -156,7 +156,7 @@ function ChatCardNodeInner({
                         {copied ? 'copied ✓' : 'copy'}
                     </button>
                 </summary>
-                <div className="mt-1 max-h-24 overflow-y-auto font-mono leading-relaxed text-muted-foreground">
+                <div className="nowheel mt-1 max-h-24 overflow-y-auto font-mono leading-relaxed text-muted-foreground">
                     {(card.logs ?? []).length === 0 && <div>(no activity yet)</div>}
                     {(card.logs ?? []).map((l, i) => (
                         <div key={i} className="whitespace-pre-wrap">{l}</div>
