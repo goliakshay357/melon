@@ -431,6 +431,21 @@ const app = Fastify({ logger: false });
 		touchFolder(dir);
 		const ws = body?.canvas ?? body?.workspace; // accept legacy key
 		if (!ws?.id) return reply.code(400).send({ error: "canvas.id required" });
+		// DATA GUARD: refuse to overwrite a populated canvas with an empty one.
+		const existingFile = join(canvasesDir(dir), `${ws.id}.json`);
+		try {
+			const existing = JSON.parse(readFileSync(existingFile, "utf8"));
+			if (
+				(!Array.isArray(ws.cards) || ws.cards.length === 0) &&
+				Array.isArray(existing.cards) &&
+				existing.cards.length > 0
+			) {
+				return reply.code(409).send({
+					error: "refusing to overwrite populated canvas with empty state",
+					existingCards: existing.cards.length,
+				});
+			}
+		} catch { /* no existing file — fine */ }
 		const cvDir2 = canvasesDir(dir);
 		const { mkdirSync, writeFileSync } = await import("node:fs");
 		mkdirSync(cvDir2, { recursive: true });

@@ -97,6 +97,9 @@ interface CanvasState {
     folder: string | null; // real directory this canvas belongs to
     canvasId: string | null;
     canvasName: string;
+    /** true once the initial restore from disk succeeded — autosave armed. */
+    hydrated: boolean;
+    serverOffline: boolean;
     canvases: CanvasMeta[]; // canvases within current folder
     canvasTreeRev: number; // bumped on every canvas mutation — navigator listens
     viewport?: { x: number; y: number; zoom: number };
@@ -148,30 +151,51 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     canvasName: '',
     canvases: [],
     canvasTreeRev: 0,
+    hydrated: false,
+    serverOffline: false,
     setViewport(v) {
         set({ viewport: v });
     },
 
     // Reopen the last folder + canvas after a refresh.
+    // Retries while the desktop/server is restarting — never silently blank.
     async restoreLast() {
         const folder = localStorage.getItem('melon:lastFolder');
-        if (!folder) return;
-        set({ folder });
-        try {
-            const res = await fetch(
-                `${MELON_API}/canvases?cwd=${encodeURIComponent(folder)}`,
-            );
-            if (!res.ok) return;
-            const canvases: CanvasMeta[] = (await res.json()).canvases ?? [];
-            set({ canvases });
-            if (canvases.length === 0) return;
-            const wanted = localStorage.getItem('melon:lastCanvas');
-            const target =
-                canvases.find((c) => c.id === wanted)?.id ?? canvases[0].id;
-            await get().switchCanvas(target);
-        } catch {
-            /* server not up yet */
+        if (!folder) {
+            set({ hydrated: true });
+            return;
         }
+        set({ folder });
+        let canvases: CanvasMeta[] | null = null;
+        for (let attempt = 0; attempt < 5; attempt++) {
+            try {
+                const res = await fetch(
+                    `${MELON_API}/canvases?cwd=${encodeURIComponent(folder)}`,
+                );
+                if (res.ok) {
+                    canvases = (await res.json()).canvases ?? [];
+                    break;
+                }
+            } catch {
+                /* retry */
+            }
+            set({ serverOffline: true });
+            await new Promise((r) => setTimeout(r, 1200));
+        }
+        if (!canvases) {
+            set({ serverOffline: true, hydrated: false });
+            return;
+        }
+        set({ canvases, serverOffline: false });
+        if (canvases.length === 0) {
+            set({ hydrated: true });
+            return;
+        }
+        const wanted = localStorage.getItem('melon:lastCanvas');
+        const target =
+            canvases.find((c) => c.id === wanted)?.id ?? canvases[0].id;
+        await get().switchCanvas(target);
+        set({ hydrated: true });
     },
 
     // Single rename path — active-canvas name, disk, and navigator stay in sync.
@@ -202,8 +226,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
     },
 
     async saveCanvas() {
-        const { folder, canvasId, canvasName, cards, viewport } = get();
-        if (!folder || !canvasId) return;
+        const { folder, canvasId, canvasName, cards, viewport, hydrated } = get();
+        if (!folder || !canvasId || !hydrated) return;
+        try {
+            localStorage.setItem(
+                `melon:backup:${canvasId}`,
+                JSON.stringify({ name: canvasName, viewport, cards }),
+            );
+        } catch { /* quota — non-fatal */ }
         await fetch(`${MELON_API}/canvases/${canvasId}`, {
             method: 'PUT',
             headers: { 'content-type': 'application/json' },

@@ -7,6 +7,7 @@ export function TopBar() {
     const canvasName = useCanvasStore((s) => s.canvasName);
     const canvasId = useCanvasStore((s) => s.canvasId);
     const folder = useCanvasStore((s) => s.folder);
+    const serverOffline = useCanvasStore((s) => s.serverOffline);
     const [renaming, setRenaming] = useState(false);
     const [draft, setDraft] = useState('');
 
@@ -45,6 +46,11 @@ export function TopBar() {
                     }}
                 >
                     {canvasName || 'Untitled'}
+                </span>
+            )}
+            {serverOffline && (
+                <span className="animate-pulse rounded-md bg-[#ff5555]/15 px-2 py-0.5 text-[10px] font-medium text-[#ff5555]">
+                  ⚠ reconnecting to server…
                 </span>
             )}
             {folder && (
