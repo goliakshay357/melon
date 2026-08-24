@@ -6,6 +6,9 @@ export interface ToolRun {
     callId: string;
     name: string;
     status: 'running' | 'ok' | 'error';
+    /** Invocation arguments (stable for the whole run). */
+    args?: string;
+    /** Latest known output — pi sends cumulative snapshots, so this REPLACES. */
     output: string;
 }
 

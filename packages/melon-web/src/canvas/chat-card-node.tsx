@@ -81,9 +81,14 @@ function ToolRunBlock({ run }: { run: import('@/types/session-card').ToolRun }) 
                         : `${run.output.split('\n').length} lines`}
                 </span>
             </summary>
+            {run.args && (
+                <pre className="m-0 whitespace-pre-wrap border-t border-border/60 px-2 py-1.5 text-[10px] leading-relaxed text-muted-foreground">
+                    $ {run.args}
+                </pre>
+            )}
             {run.output && (
                 <pre className="nowheel m-0 max-h-48 overflow-auto whitespace-pre-wrap border-t border-border/60 px-2 py-1.5 text-[10px] leading-relaxed text-[#f8f8f2]">
-                    {run.output}
+                    {run.output || '(no output)'}
                 </pre>
             )}
         </details>

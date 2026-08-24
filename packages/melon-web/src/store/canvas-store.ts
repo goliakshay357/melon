@@ -469,20 +469,26 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                         }, 130);
                     }
                 };
-                const ensureTool = (run: Partial<ToolRun> & { callId: string; name?: string }) => {
-                    patchLastAssistant((m) => {
-                        const tools = [...(m.tools ?? [])];
-                        const i = tools.findIndex((t) => t.callId === run.callId);
-                        if (i >= 0) tools[i] = { ...tools[i], ...run } as ToolRun;
-                        else
-                            tools.push({
-                                name: 'tool',
-                                status: 'running',
-                                output: '',
-                                ...run,
-                            } as ToolRun);
-                        return { ...m, tools };
-                    });
+                const ensureTool = (
+                    run: Partial<ToolRun> & { callId: string; name?: string },
+                    immediate = false,
+                ) => {
+                    patchLastAssistant(
+                        (m) => {
+                            const tools = [...(m.tools ?? [])];
+                            const i = tools.findIndex((t) => t.callId === run.callId);
+                            if (i >= 0) tools[i] = { ...tools[i], ...run } as ToolRun;
+                            else
+                                tools.push({
+                                    name: 'tool',
+                                    status: 'running',
+                                    output: '',
+                                    ...run,
+                                } as ToolRun);
+                            return { ...m, tools };
+                        },
+                        immediate,
+                    );
                 };
                 const appendToLastAssistant = (patch: {
                     text?: string;
@@ -509,25 +515,29 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                     }));
                 };
                 if (data.type === 'tool_start') {
-                    ensureTool({ callId: data.callId, name: data.name, output: data.args ? `args: ${data.args}` : '' });
+                    // Immediate: the ⚙ block must appear the moment a tool starts.
+                    ensureTool(
+                        {
+                            callId: data.callId,
+                            name: data.name,
+                            args: data.args,
+                            output: '',
+                        },
+                        true,
+                    );
                 } else if (data.type === 'tool_update') {
-                    const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
-                    const lastA = [...(cur?.messages ?? [])].reverse().find((m) => m.role === 'assistant');
-                    const run = lastA?.tools?.find((t) => t.callId === data.callId);
-                    ensureTool({
-                        callId: data.callId,
-                        output: `${run?.output ?? ''}${data.output}\n`,
-                    });
+                    // partialResult is a SNAPSHOT — replace, never append.
+                    ensureTool({ callId: data.callId, output: data.output });
                 } else if (data.type === 'tool_end') {
-                    ensureTool({
-                        callId: data.callId,
-                        status: data.isError ? 'error' : 'ok',
-                        output: `${useCanvasStore
-                            .getState()
-                            .cards.find((c) => c.id === cardId)
-                            ?.messages.flatMap((m) => m.tools ?? [])
-                            .find((t) => t.callId === data.callId)?.output ?? ''}${data.output}`,
-                    });
+                    // Final result — replace + lock the terminal state.
+                    ensureTool(
+                        {
+                            callId: data.callId,
+                            status: data.isError ? 'error' : 'ok',
+                            output: data.output,
+                        },
+                        true,
+                    );
                 } else if (data.type === 'thinking') {
                     st!.thinkingBuffer += data.text;
                     appendToLastAssistant({ thinking: st!.thinkingBuffer });
