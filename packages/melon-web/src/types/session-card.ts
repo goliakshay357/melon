@@ -45,6 +45,9 @@ export interface SessionCard {
     permission?: 'full' | 'readonly';
     /** Messages queued while the agent was busy (DSH-style). */
     queue?: string[];
+    /** Full trajectory trace — meta + every lifecycle event (for debugging). */
+    sessionId?: string;
+    trace?: string[];
 }
 
 export const newCardId = () => `card_${nanoid(8)}`;

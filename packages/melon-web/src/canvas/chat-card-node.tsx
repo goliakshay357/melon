@@ -7,7 +7,7 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { ArrowUp, BarChart3, Minimize2, Plus, Square, X } from 'lucide-react';
+import { ArrowUp, BarChart3, Copy, Check, Minimize2, Plus, Square, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { confirmAction } from '@/components/dialogs';
 import { MarkdownBlock } from '@/components/markdown-block';
@@ -119,6 +119,49 @@ function ActivityLine() {
     );
 }
 
+
+function buildTraceDump(card: NonNullable<ReturnType<typeof useCanvasStore.getState>['cards'][number]>): string {
+    const lines: string[] = [
+        `melon trajectory dump`,
+        `time: ${new Date().toISOString()}`,
+        `card: ${card.id}  canvas name: ${card.title}`,
+        `model: ${card.model ?? 'unknown'}`,
+        card.sessionFile ? `session file: ${card.sessionFile}` : `session file: (not attached yet)`,
+        `permission: ${card.permission ?? 'full'}  vizMode: ${card.vizMode ? 'on' : 'off'}`,
+        ``,
+        ...card.trace ?? [],
+        ``,
+        ...card.messages.map((m) => {
+            const role = m.role.toUpperCase();
+            const tools = (m.tools ?? [])
+                .map((t) => `  [tool ${t.name}] ${t.status} ${t.output.slice(0, 300).replace(/\n/g, '\n  ')}`)
+                .join('\n');
+            const think = m.thinking ? `  [thinking] ${m.thinking.slice(0, 400)}…` : '';
+            return `[${role}] ${m.text}\n${tools}${think}`;
+        }),
+    ];
+    return lines.filter(Boolean).join('\n');
+}
+
+function CopyButton({ getText }: { getText: () => string }) {
+    const [copied, setCopied] = useState(false);
+    return (
+        <button
+            className="nodrag flex items-center gap-1 rounded-md border border-input px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+            onClick={(e) => {
+                e.stopPropagation();
+                navigator.clipboard.writeText(getText()).then(() => {
+                    setCopied(true);
+                    window.setTimeout(() => setCopied(false), 1500);
+                });
+            }}
+        >
+            {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
+            {copied ? 'copied ✓' : 'copy all'}
+        </button>
+    );
+}
+
 function ChatCardNodeInner({
     id,
     selected,
@@ -131,6 +174,7 @@ function ChatCardNodeInner({
     const folder = useCanvasStore((s) => s.folder);
     const [draft, setDraft] = useState('');
     const [maximized, setMaximized] = useState(false);
+    const [view, setView] = useState<'chat' | 'trajectory'>('chat');
     const [models, setModels] = useState<Array<{ label: string }>>([]);
 
     useEffect(() => {
@@ -214,6 +258,21 @@ function ChatCardNodeInner({
             <button
                 className={cn(
                     'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
+                    view === 'trajectory'
+                        ? 'bg-accent/15 text-accent ring-1 ring-inset ring-accent/40'
+                        : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                )}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    setView(view === 'trajectory' ? 'chat' : 'trajectory');
+                }}
+                title="Trajectory debugger"
+            >
+                🧭
+            </button>
+            <button
+                className={cn(
+                    'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
                     card.vizMode
                         ? 'bg-primary/15 text-primary ring-1 ring-inset ring-primary/40'
                         : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
@@ -266,6 +325,20 @@ function ChatCardNodeInner({
                     <X className="size-4" />
                 </button>
             )}
+        </div>
+    );
+
+    const trajectoryBody = (
+        <div className="nowheel min-h-0 flex-1 overflow-hidden px-3 py-2">
+            <div className="mb-2 flex items-center justify-between">
+                <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    Trajectory
+                </span>
+                <CopyButton getText={() => buildTraceDump(card)} />
+            </div>
+            <pre className="nowheel h-full max-h-full overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-muted-foreground">
+                {buildTraceDump(card)}
+            </pre>
         </div>
     );
 
@@ -459,7 +532,7 @@ function ChatCardNodeInner({
                 <Handle type="source" position={Position.Bottom} className="!opacity-0" />
 
                 {header(false)}
-                {messagesBody}
+                {view === 'trajectory' ? trajectoryBody : messagesBody}
                 {footerInput}
             </div>
 
@@ -475,10 +548,15 @@ function ChatCardNodeInner({
                             onClick={(e) => e.stopPropagation()}
                         >
                             {header(true)}
-                            {/* Centered reading column — no full-width stretch */}
-                            <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col">
-                                {messagesBody}
-                                {footerInput}
+                            <div className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col">
+                                {view === 'trajectory' ? (
+                                    trajectoryBody
+                                ) : (
+                                    <>
+                                        {messagesBody}
+                                        {footerInput}
+                                    </>
+                                )}
                             </div>
                             <div className="flex shrink-0 justify-end border-t border-border p-1.5">
                                 <button

@@ -28,12 +28,27 @@ function pushUndo(cards: SessionCard[]) {
     if (undoStack.length > 25) undoStack.shift();
 }
 
+function pushTrace(cardId: string, line: string) {
+    const t = new Date().toISOString();
+    useCanvasStore.setState((s) => ({
+        cards: s.cards.map((c) =>
+            c.id === cardId
+                ? { ...c, trace: [...(c.trace ?? []), `[${t}] ${line}`].slice(-500) }
+                : c,
+        ),
+    }));
+}
+
 function pushLog(cardId: string, line: string) {
     const t = new Date().toLocaleTimeString([], { hour12: false });
     useCanvasStore.setState((s) => ({
         cards: s.cards.map((c) =>
             c.id === cardId
-                ? { ...c, logs: [...(c.logs ?? []), `${t}  ${line}`].slice(-40) }
+                ? {
+                      ...c,
+                      logs: [...(c.logs ?? []), `${t}  ${line}`].slice(-60),
+                      trace: [...(c.trace ?? []), `${new Date().toISOString()}  ${line}`].slice(-500),
+                  }
                 : c,
         ),
     }));
@@ -360,7 +375,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
             messages: [...card.messages, { role: 'user', text }],
         });
         const rollback = (why: string) => {
-            pushLog(cardId, `✗ ${why} — input restored`);
+            pushTrace(cardId, `✗ ${why} — input restored`);
             get().updateCard(cardId, {
                 status: 'idle',
                 messages: messagesBefore,
@@ -399,32 +414,46 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                     model: info.model,
                 });
                 attached.add(cardId);
-                pushLog(cardId, `✓ ATTACHED session=${info.sessionId?.slice(0, 8)} model=${info.model}`);
+                pushTrace(cardId, `✓ ATTACHED model=${info.model}`);
+                pushTrace(cardId, `session id: ${info.sessionId}`);
+                pushTrace(cardId, `session file: ${info.sessionFile}`);
             } catch (e) {
-                pushLog(cardId, `✗ ATTACH FAILED: ${e instanceof Error ? e.message : e}`);
+                pushTrace(cardId, `✗ ATTACH FAILED: ${e instanceof Error ? e.message : e}`);
                 rollback('could not reach melon server');
                 return false;
             }
         } else {
-            pushLog(cardId, '• already attached');
+            pushTrace(cardId, '• already attached');
         }
 
         // ── 2. SSE subscription (once per card) ──
         let st = streams.get(cardId);
         if (!st) {
-            pushLog(cardId, `→ SSE connect /sessions/${cardId}/events`);
+            pushTrace(cardId, `→ SSE connect /sessions/${cardId}/events`);
             const es = new EventSource(`${MELON_API}/sessions/${cardId}/events`);
             st = { es, buffer: '', thinkingBuffer: '' };
             streams.set(cardId, st);
-            es.onopen = () => pushLog(cardId, '✓ SSE open');
+            es.onopen = () => pushTrace(cardId, '✓ SSE open');
             es.onmessage = (ev) => {
                 const data = JSON.parse(ev.data as string) as
                     | { type: 'delta'; text: string }
                     | { type: 'thinking'; text: string }
                     | { type: 'tool_start'; callId: string; name: string; args?: string }
                     | { type: 'tool_update'; callId: string; output: string }
-                    | { type: 'tool_end'; callId: string; isError: boolean; output: string }
+                    | {
+                          type: 'tool_end';
+                          callId: string;
+                          isError: boolean;
+                          output: string;
+                          durationMs?: number;
+                      }
                     | { type: 'raw'; text: string }
+                    | {
+                          type: 'agent_meta';
+                          stopReason: string;
+                          inputTokens: number | null;
+                          outputTokens: number | null;
+                      }
                     | { type: 'status'; status: 'idle' | 'streaming' | 'error' }
                     | { type: 'error'; message: string };
 
@@ -516,6 +545,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                         },
                         true,
                     );
+                    pushTrace(
+                        cardId,
+                        `tool ${data.callId.slice(0, 8)} ${data.isError ? 'ERROR' : 'ok'}${data.durationMs ? ` (${data.durationMs}ms)` : ''}`,
+                    );
+                } else if (data.type === 'agent_meta') {
+                    pushTrace(
+                        cardId,
+                        `agent_end stopReason=${data.stopReason} tokens in:${data.inputTokens ?? '?'} out:${data.outputTokens ?? '?'}`,
+                    );
                 } else if (data.type === 'thinking') {
                     st!.thinkingBuffer += data.text;
                     appendToLastAssistant({ thinking: st!.thinkingBuffer });
@@ -537,9 +575,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                         status: data.status,
                     });
                 } else if (data.type === 'raw') {
-                    pushLog(cardId, `• ${data.text}`);
+                    pushTrace(cardId, `• ${data.text}`);
                 } else if ((data as { type: string }).type === 'error') {
-                    pushLog(cardId, '✗ agent error');
+                    pushTrace(cardId, '✗ agent error');
                     useCanvasStore.getState().updateCard(cardId, {
                         status: 'error',
                         queue: [],
@@ -547,7 +585,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                 }
             };
             es.onerror = () => {
-                pushLog(cardId, '✗ SSE dropped — will re-attach on next message');
+                pushTrace(cardId, '✗ SSE dropped — will re-attach on next message');
                 st!.es.close();
                 streams.delete(cardId);
                 attached.delete(cardId);
@@ -558,7 +596,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         }
 
         // ── 3. send ──
-        pushLog(cardId, `→ PROMPT "${text.slice(0, 40)}"`);
+        pushTrace(cardId, `→ PROMPT "${text.slice(0, 40)}"`);
         let pres: Response;
         try {
             pres = await fetch(`${MELON_API}/sessions/${cardId}/prompt`, {
@@ -580,7 +618,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         }
         const pj = (await pres.json().catch(() => ({}))) as { queued?: boolean };
         if (pj.queued) {
-            pushLog(cardId, '⏳ agent busy — message queued');
+            pushTrace(cardId, '⏳ agent busy — message queued');
             const cur = get().cards.find((c) => c.id === cardId);
             get().updateCard(cardId, { queue: [...(cur?.queue ?? []), text] });
         }

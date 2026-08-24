@@ -101,6 +101,7 @@ const app = Fastify({ logger: false });
 
 	function wireEvents(cardId: string, runtime: any): void {
 		let deltaCount = 0;
+		const toolTimers = new Map<string, number>();
 		runtime.session.subscribe((event: any) => {
 			if (event.type === "agent_start") {
 				console.log(`[${cardId}] agent_start`);
@@ -182,6 +183,7 @@ const app = Fastify({ logger: false });
 			} else if (event.type === "agent_end") {
 				registry.broadcast(cardId, { type: "status", status: "idle" });
 			} else if (event.type === "tool_execution_start") {
+				toolTimers.set(event.toolCallId, Date.now());
 				registry.broadcast(cardId, {
 					type: "tool_start",
 					callId: event.toolCallId,
