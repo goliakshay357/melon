@@ -120,27 +120,48 @@ function ActivityLine() {
 }
 
 
-function buildTraceDump(card: NonNullable<ReturnType<typeof useCanvasStore.getState>['cards'][number]>): string {
+function buildTraceDump(card: {
+    id: string;
+    title?: string;
+    model?: string;
+    sessionFile?: string;
+    sessionId?: string;
+    permission?: string;
+    vizMode?: boolean;
+    events?: Array<{
+        ts: number;
+        durMs?: number;
+        kind: string;
+        name: string;
+        detail?: string;
+        status?: string;
+    }>;
+    messages: Array<{ role: string; text: string; thinking?: string; tools?: Array<{ name: string; status: string; output: string }> }>;
+}): string {
     const lines: string[] = [
-        `melon trajectory dump`,
+        'melon trajectory dump',
         `time: ${new Date().toISOString()}`,
-        `card: ${card.id}  canvas name: ${card.title}`,
+        `card: ${card.id}  canvas name: ${card.title ?? ''}`,
         `model: ${card.model ?? 'unknown'}`,
-        card.sessionFile ? `session file: ${card.sessionFile}` : `session file: (not attached yet)`,
+        `session file: ${card.sessionFile ?? '(not attached)'}`,
         `permission: ${card.permission ?? 'full'}  vizMode: ${card.vizMode ? 'on' : 'off'}`,
-        ``,
-        ...card.trace ?? [],
-        ``,
+        '',
+        ...(card.events ?? []).map(
+            (e) =>
+                `[${new Date(e.ts).toISOString()}] ${e.kind.toUpperCase()} ${e.name}` +
+                (e.durMs != null ? ` (${e.durMs}ms)` : '') +
+                (e.detail ? `\n  ${e.detail.replace(/\n/g, '\n  ')}` : ''),
+        ),
+        '',
         ...card.messages.map((m) => {
-            const role = m.role.toUpperCase();
             const tools = (m.tools ?? [])
-                .map((t) => `  [tool ${t.name}] ${t.status} ${t.output.slice(0, 300).replace(/\n/g, '\n  ')}`)
+                .map((t) => `  [tool ${t.name}] ${t.status}\n${t.output.split('\n').map((l) => '    ' + l).join('\n')}`)
                 .join('\n');
-            const think = m.thinking ? `  [thinking] ${m.thinking.slice(0, 400)}…` : '';
-            return `[${role}] ${m.text}\n${tools}${think}`;
+            const think = m.thinking ? `  [thinking]\n${m.thinking.split('\n').map((l) => '    ' + l).join('\n')}` : '';
+            return `[${m.role.toUpperCase()}]\n${m.text}${tools ? '\n' + tools : ''}${think}`;
         }),
     ];
-    return lines.filter(Boolean).join('\n');
+    return lines.join('\n');
 }
 
 function CopyButton({ getText }: { getText: () => string }) {
@@ -159,6 +180,190 @@ function CopyButton({ getText }: { getText: () => string }) {
             {copied ? <Check className="size-3" /> : <Copy className="size-3" />}
             {copied ? 'copied ✓' : 'copy all'}
         </button>
+    );
+}
+
+
+// ── Trajectory waterfall (DSH-style) ────────────────────────────────────
+interface Turn {
+    startTs: number;
+    endTs: number;
+    label: string;
+    events: TraceEvent2[];
+}
+type TraceEvent2 = import('@/types/session-card').TraceEvent;
+
+function buildTurns(events: TraceEvent2[]): Turn[] {
+    const turns: Turn[] = [];
+    let cur: Turn | null = null;
+    for (const e of events) {
+        if (e.kind === 'prompt') {
+            cur = { startTs: e.ts, endTs: e.ts, label: e.name, events: [] };
+            turns.push(cur);
+        }
+        if (!cur) {
+            cur = { startTs: e.ts, endTs: e.ts, label: '(before first prompt)', events: [] };
+            turns.push(cur);
+        }
+        cur.events.push(e);
+        const eEnd = e.ts + (e.durMs ?? 0);
+        if (eEnd > cur.endTs) cur.endTs = eEnd;
+    }
+    return turns;
+}
+
+function TrajectoryView({ card }: { card: NonNullable<ReturnType<typeof useCanvasStore.getState>['cards'][number]> }) {
+    const [query, setQuery] = useState('');
+    const [actualDuration, setActualDuration] = useState(true);
+    const [showThinking, setShowThinking] = useState(true);
+    const [collapsedTurns, setCollapsedTurns] = useState<Set<string>>(new Set());
+    const [selected, setSelected] = useState<TraceEvent2 | null>(null);
+
+    const allEvents = card.events ?? [];
+    const filtered = allEvents.filter((e) => {
+        if (!showThinking && e.kind === 'thinking') return false;
+        if (!query) return true;
+        const hay = `${e.name} ${e.detail ?? ''}`.toLowerCase();
+        return hay.includes(query.toLowerCase());
+    });
+    const turns = buildTurns(filtered);
+
+    return (
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden px-3 py-2">
+            {/* Toolbar */}
+            <div className="mb-2 flex shrink-0 flex-wrap items-center gap-1.5">
+                <input
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="🔍 search trajectory"
+                    className="w-40 rounded-md border border-input bg-background px-2 py-1 text-[10px] outline-none focus:border-ring"
+                />
+                <button
+                    className={cn('rounded-md px-2 py-1 text-[10px] transition-colors', actualDuration ? 'bg-secondary text-primary' : 'text-muted-foreground hover:bg-secondary')}
+                    onClick={() => setActualDuration(!actualDuration)}
+                >
+                    {actualDuration ? '⏱ actual duration' : '▤ equal-width'}
+                </button>
+                <button
+                    className="rounded-md px-2 py-1 text-[10px] text-muted-foreground hover:bg-secondary"
+                    onClick={() =>
+                        setCollapsedTurns(
+                            collapsedTurns.size > 0 ? new Set() : new Set(turns.map((_, i) => String(i))),
+                        )
+                    }
+                >
+                    {collapsedTurns.size > 0 ? 'Expand turns' : 'Collapse turns'}
+                </button>
+                <button
+                    className={cn('rounded-md px-2 py-1 text-[10px]', showThinking ? 'text-primary' : 'text-muted-foreground hover:bg-secondary')}
+                    onClick={() => setShowThinking(!showThinking)}
+                >
+                    Thinking
+                </button>
+                <CopyButton getText={() => buildTraceDump(card)} />
+            </div>
+
+            {/* Waterfall */}
+            <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto font-mono text-[10px]">
+                {turns.length === 0 && (
+                    <p className="py-4 text-center text-muted-foreground">No activity yet.</p>
+                )}
+                {turns.map((turn, ti) => {
+                    const span = Math.max(turn.endTs - turn.startTs, 1);
+                    const key = `${card.id}:${ti}`;
+                    const collapsed = collapsedTurns.has(key) || query.length > 0;
+                    return (
+                        <div key={key}>
+                            <div
+                                className="flex cursor-pointer items-center justify-between rounded-md bg-secondary/60 px-2 py-1"
+                                onClick={() => {
+                                    const next = new Set(collapsedTurns);
+                                    next.has(key) ? next.delete(key) : next.add(key);
+                                    setCollapsedTurns(next);
+                                }}
+                            >
+                                <span className="truncate font-semibold text-card-foreground">
+                                    {collapsedTurns.has(key) ? '▸' : '▾'} TURN {ti + 1}: "{turn.label}"
+                                </span>
+                                <span className="tabular-nums text-muted-foreground">
+                                    {(turn.endTs - turn.startTs) / 1000}s · {turn.events.length} ops
+                                </span>
+                            </div>
+                            {!collapsed && (
+                                <div className="ml-3 border-l border-border pl-2">
+                                    {turn.events.map((ev) => {
+                                        if (ev.id === selected?.id && selected) {
+                                            /* row rendered below */
+                                        }
+                                        const offset = actualDuration
+                                            ? ((ev.ts - turn.startTs) / span) * 100
+                                            : 0;
+                                        const width = actualDuration
+                                            ? Math.max(((ev.durMs ?? 80) / span) * 100, 1.5)
+                                            : 60;
+                                        const color =
+                                            ev.kind === 'prompt' ? '#8be9fd' :
+                                            ev.kind === 'thinking' ? '#bd93f9' :
+                                            ev.kind === 'tool' ? (ev.status === 'error' ? '#ff5555' : '#50fa7b') :
+                                            '#6272a4';
+                                        const matches =
+                                            selected !== null &&
+                                            selected.ts === ev.ts &&
+                                            selected.name === ev.name;
+                                        return (
+                                            <div
+                                                key={ev.id}
+                                                className={cn(
+                                                    'group/row cursor-pointer rounded px-1 py-0.5 hover:bg-secondary/40',
+                                                    matches && 'bg-secondary',
+                                                )}
+                                                onClick={() => setSelected(matches ? null : ev)}
+                                            >
+                                                <div className="flex items-center gap-2">
+                                                    <span className="w-24 shrink-0 truncate text-muted-foreground">
+                                                        {ev.kind === 'prompt' ? '▶ prompt' : ev.kind === 'tool' ? `⚙ ${ev.name}` : ev.kind}
+                                                    </span>
+                                                    <div className="relative h-2.5 flex-1 rounded-sm bg-secondary/40">
+                                                        <div
+                                                            className="absolute top-0 h-full rounded-sm opacity-70"
+                                                            style={{
+                                                                left: `${offset}%`,
+                                                                width: `${width}%`,
+                                                                background: color,
+                                                            }}
+                                                        />
+                                                    </div>
+                                                    <span className="w-14 shrink-0 text-right tabular-nums text-muted-foreground">
+                                                        {ev.durMs != null ? `${(ev.durMs / 1000).toFixed(2)}s` : '…'}
+                                                    </span>
+                                                </div>
+                                                {selected && matches && (
+                                                    <pre className="mt-1 max-h-32 overflow-auto whitespace-pre-wrap break-words rounded bg-background px-2 py-1 text-[9px] leading-relaxed">
+                                                        {`${ev.name}\n${ev.detail ?? '(no detail)'}`}
+                                                    </pre>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                    );
+                })}
+            </div>
+
+            {/* Inspect panel */}
+            {selected && (
+                <div className="mt-2 max-h-40 shrink-0 overflow-auto rounded-md border border-border bg-background p-2">
+                    <p className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-primary">
+                        inspect: {selected.kind} — {selected.name}
+                    </p>
+                    <pre className="whitespace-pre-wrap break-words text-[10px] leading-relaxed text-muted-foreground">
+                        {selected.detail ?? '(no detail captured)'}
+                    </pre>
+                </div>
+            )}
+        </div>
     );
 }
 
@@ -328,19 +533,7 @@ function ChatCardNodeInner({
         </div>
     );
 
-    const trajectoryBody = (
-        <div className="nowheel min-h-0 flex-1 overflow-hidden px-3 py-2">
-            <div className="mb-2 flex items-center justify-between">
-                <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
-                    Trajectory
-                </span>
-                <CopyButton getText={() => buildTraceDump(card)} />
-            </div>
-            <pre className="nowheel h-full max-h-full overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-muted-foreground">
-                {buildTraceDump(card)}
-            </pre>
-        </div>
-    );
+    const trajectoryBody = <TrajectoryView card={card} />;
 
     const messagesBody = (
         <div

@@ -2,6 +2,20 @@ import { nanoid } from 'nanoid';
 
 export type CardStatus = 'idle' | 'streaming' | 'error';
 
+export type TraceKind = 'prompt' | 'thinking' | 'tool' | 'agent' | 'system';
+
+export interface TraceEvent {
+    id: string;
+    /** start timestamp (ms epoch) */
+    ts: number;
+    /** duration once finished */
+    durMs?: number;
+    kind: TraceKind;
+    name: string;
+    detail?: string;
+    status?: 'running' | 'ok' | 'error';
+}
+
 export interface ToolRun {
     callId: string;
     name: string;
@@ -47,7 +61,7 @@ export interface SessionCard {
     queue?: string[];
     /** Full trajectory trace — meta + every lifecycle event (for debugging). */
     sessionId?: string;
-    trace?: string[];
+    events?: TraceEvent[];
 }
 
 export const newCardId = () => `card_${nanoid(8)}`;

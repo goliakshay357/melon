@@ -17,6 +17,8 @@ const streams = new Map<
         buffer: string;
         thinkingBuffer: string;
         flushTimer?: ReturnType<typeof setTimeout>;
+        thinkingEventId?: string;
+        thinkingStartTs?: number;
     }
 >();
 const attached = new Set<string>(); // cardIds with an existing server-side session
@@ -28,12 +30,41 @@ function pushUndo(cards: SessionCard[]) {
     if (undoStack.length > 25) undoStack.shift();
 }
 
-function pushTrace(cardId: string, line: string) {
-    const t = new Date().toISOString();
+let eventIdCounter = 0;
+
+/** Structured trajectory event — feeds the waterfall view. */
+function pushEvent(
+    cardId: string,
+    ev: { kind: import('@/types/session-card').TraceKind; name: string; detail?: string },
+): string {
+    const id = `ev_${++eventIdCounter}`;
     useCanvasStore.setState((s) => ({
         cards: s.cards.map((c) =>
             c.id === cardId
-                ? { ...c, trace: [...(c.trace ?? []), `[${t}] ${line}`].slice(-500) }
+                ? {
+                      ...c,
+                      events: [
+                          ...(c.events ?? []),
+                          { id, ts: Date.now(), kind: ev.kind, name: ev.name, detail: ev.detail },
+                      ].slice(-400),
+                  }
+                : c,
+        ),
+    }));
+    return id;
+}
+
+/** Update the latest event of a card (duration/status/detail). */
+function patchEvent(cardId: string, id: string, patch: Partial<import('@/types/session-card').TraceEvent>) {
+    useCanvasStore.setState((s) => ({
+        cards: s.cards.map((c) =>
+            c.id === cardId
+                ? {
+                      ...c,
+                      events: (c.events ?? []).map((e) =>
+                          e.id === id ? { ...e, ...patch } : e,
+                      ),
+                  }
                 : c,
         ),
     }));
@@ -47,7 +78,6 @@ function pushLog(cardId: string, line: string) {
                 ? {
                       ...c,
                       logs: [...(c.logs ?? []), `${t}  ${line}`].slice(-60),
-                      trace: [...(c.trace ?? []), `${new Date().toISOString()}  ${line}`].slice(-500),
                   }
                 : c,
         ),
@@ -375,7 +405,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
             messages: [...card.messages, { role: 'user', text }],
         });
         const rollback = (why: string) => {
-            pushTrace(cardId, `✗ ${why} — input restored`);
+            pushLog(cardId, `✗ ${why} — input restored`);
             get().updateCard(cardId, {
                 status: 'idle',
                 messages: messagesBefore,
@@ -414,26 +444,24 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                     model: info.model,
                 });
                 attached.add(cardId);
-                pushTrace(cardId, `✓ ATTACHED model=${info.model}`);
-                pushTrace(cardId, `session id: ${info.sessionId}`);
-                pushTrace(cardId, `session file: ${info.sessionFile}`);
+                // structured attach event emitted below via pushEvent
             } catch (e) {
-                pushTrace(cardId, `✗ ATTACH FAILED: ${e instanceof Error ? e.message : e}`);
+                pushLog(cardId, `✗ ATTACH FAILED: ${e instanceof Error ? e.message : e}`);
                 rollback('could not reach melon server');
                 return false;
             }
         } else {
-            pushTrace(cardId, '• already attached');
+            pushLog(cardId, '• already attached');
         }
 
         // ── 2. SSE subscription (once per card) ──
         let st = streams.get(cardId);
         if (!st) {
-            pushTrace(cardId, `→ SSE connect /sessions/${cardId}/events`);
+            pushLog(cardId, `→ SSE connect`);
             const es = new EventSource(`${MELON_API}/sessions/${cardId}/events`);
-            st = { es, buffer: '', thinkingBuffer: '' };
+            st = { es, buffer: '', thinkingBuffer: '', thinkingStartTs: Date.now() };
             streams.set(cardId, st);
-            es.onopen = () => pushTrace(cardId, '✓ SSE open');
+            es.onopen = () => pushLog(cardId, '✓ SSE open');
             es.onmessage = (ev) => {
                 const data = JSON.parse(ev.data as string) as
                     | { type: 'delta'; text: string }
@@ -521,7 +549,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                     patchLastAssistant((m) => ({ ...m, ...patch }));
                 };
 
+                let __toolEvId = '';
                 if (data.type === 'tool_start') {
+                    __toolEvId = pushEvent(cardId, {
+                        kind: 'tool',
+                        name: data.name,
+                        detail: data.args,
+                    });
                     // Immediate — the ⚙ block must appear instantly.
                     ensureTool(
                         {
@@ -545,19 +579,47 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                         },
                         true,
                     );
-                    pushTrace(
-                        cardId,
-                        `tool ${data.callId.slice(0, 8)} ${data.isError ? 'ERROR' : 'ok'}${data.durationMs ? ` (${data.durationMs}ms)` : ''}`,
-                    );
+                    patchEvent(cardId, __toolEvId, {
+                        durMs: data.durationMs,
+                        detail: data.output.slice(0, 2000),
+                        status: data.isError ? 'error' : 'ok',
+                    });
+                    pushLog(cardId, `⚙ ${data.callId.slice(0, 8)} ${data.isError ? '✗' : '✓'}${data.durationMs ? ` ${data.durationMs}ms` : ''}`);
                 } else if (data.type === 'agent_meta') {
-                    pushTrace(
-                        cardId,
-                        `agent_end stopReason=${data.stopReason} tokens in:${data.inputTokens ?? '?'} out:${data.outputTokens ?? '?'}`,
-                    );
+                    const meta = `stopReason=${data.stopReason} tokens in:${data.inputTokens ?? '?'} out:${data.outputTokens ?? '?'}`;
+                    // Close the prompt event with total duration.
+                    const evs = useCanvasStore.getState()
+                        .cards.find((c) => c.id === cardId)?.events ?? [];
+                    const pe = [...evs].reverse().find((e) => e.id === promptEventId);
+                    if (pe) {
+                        patchEvent(cardId, pe.id, {
+                            durMs: Date.now() - pe.ts,
+                            status: data.stopReason === 'aborted' ? 'error' : 'ok',
+                            detail: meta,
+                        });
+                    }
+                    pushLog(cardId, `← agent_end ${meta}`);
+                } else if (data.type === 'raw') {
+                    pushEvent(cardId, { kind: 'system', name: 'note', detail: data.text });
+                    pushLog(cardId, `• ${data.text}`);
                 } else if (data.type === 'thinking') {
+                    if (!st!.thinkingEventId) {
+                        st!.thinkingEventId = pushEvent(cardId, {
+                            kind: 'thinking',
+                            name: 'reasoning',
+                        });
+                    }
                     st!.thinkingBuffer += data.text;
                     appendToLastAssistant({ thinking: st!.thinkingBuffer });
                 } else if (data.type === 'delta') {
+                    if (st!.thinkingEventId) {
+                        patchEvent(
+                            cardId,
+                            st!.thinkingEventId,
+                            { durMs: Date.now() - (st!.thinkingStartTs ?? Date.now()) },
+                        );
+                        st!.thinkingEventId = undefined;
+                    }
                     st!.buffer += data.text;
                     appendToLastAssistant({ text: st!.buffer });
                 } else if (data.type === 'status') {
@@ -574,10 +636,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                     useCanvasStore.getState().updateCard(cardId, {
                         status: data.status,
                     });
-                } else if (data.type === 'raw') {
-                    pushTrace(cardId, `• ${data.text}`);
                 } else if ((data as { type: string }).type === 'error') {
-                    pushTrace(cardId, '✗ agent error');
+                    pushLog(cardId, '✗ agent error');
                     useCanvasStore.getState().updateCard(cardId, {
                         status: 'error',
                         queue: [],
@@ -585,7 +645,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                 }
             };
             es.onerror = () => {
-                pushTrace(cardId, '✗ SSE dropped — will re-attach on next message');
+                pushLog(cardId, '✗ SSE dropped — will re-attach on next message');
                 st!.es.close();
                 streams.delete(cardId);
                 attached.delete(cardId);
@@ -593,10 +653,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         } else {
             st.buffer = '';
             st.thinkingBuffer = '';
+            st.thinkingStartTs = Date.now();
         }
 
         // ── 3. send ──
-        pushTrace(cardId, `→ PROMPT "${text.slice(0, 40)}"`);
+        const promptEventId = pushEvent(cardId, {
+            kind: 'prompt',
+            name: text.slice(0, 60),
+        });
+        pushLog(cardId, `→ PROMPT "${text.slice(0, 40)}"`);
         let pres: Response;
         try {
             pres = await fetch(`${MELON_API}/sessions/${cardId}/prompt`, {
@@ -618,7 +683,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         }
         const pj = (await pres.json().catch(() => ({}))) as { queued?: boolean };
         if (pj.queued) {
-            pushTrace(cardId, '⏳ agent busy — message queued');
+            pushLog(cardId, '⏳ agent busy — message queued');
             const cur = get().cards.find((c) => c.id === cardId);
             get().updateCard(cardId, { queue: [...(cur?.queue ?? []), text] });
         }
