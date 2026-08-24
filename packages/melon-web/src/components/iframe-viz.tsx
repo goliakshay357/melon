@@ -48,7 +48,7 @@ export function IframeViz({ code }: { code: string }) {
                 sandbox="allow-scripts"
                 srcDoc={srcDoc}
                 style={{ height, width: '100%' }}
-                className="block border-0 bg-[#282a36]"
+                className="block max-w-full border-0 bg-[#282a36]"
             />
         </div>
     );
