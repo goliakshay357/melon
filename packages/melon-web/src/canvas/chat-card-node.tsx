@@ -9,6 +9,7 @@ import {
 } from '@xyflow/react';
 import { ArrowUp, BarChart3, Minimize2, Plus, Square, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
+import { confirmAction } from '@/components/dialogs';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { cn } from '@/lib/utils';
 
@@ -245,9 +246,14 @@ function ChatCardNodeInner({
             {!isMax && (
                 <button
                     className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-red-500"
-                    onClick={(e) => {
+                    onClick={async (e) => {
                         e.stopPropagation();
-                        deleteCards([id]);
+                        const ok = await confirmAction({
+                            title: 'Delete this card?',
+                            description: 'You can restore it with Cmd/Ctrl+Z.',
+                            confirmLabel: 'Delete',
+                        });
+                        if (ok) deleteCards([id]);
                     }}
                     title="Delete card"
                 >
