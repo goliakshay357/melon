@@ -43,6 +43,8 @@ export interface SessionCard {
     vizMode?: boolean;
     /** Workspace permission for the agent. */
     permission?: 'full' | 'readonly';
+    /** Messages queued while the agent was busy (DSH-style). */
+    queue?: string[];
 }
 
 export const newCardId = () => `card_${nanoid(8)}`;

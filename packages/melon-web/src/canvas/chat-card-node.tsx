@@ -192,11 +192,12 @@ function ChatCardNodeInner({
     // chartdb note-node pattern: interactive only when selected and not mid-drag.
     const focused = !!selected && !dragging;
 
-    const submit = () => {
+    const submit = async () => {
         const text = draft.trim();
         if (!text) return;
         setDraft('');
-        sendMessage(id, text);
+        const ok = await sendMessage(id, text);
+        if (!ok) setDraft(text); // failed — give the text back for retry
     };
 
     const header = (isMax: boolean) => (
@@ -329,6 +330,21 @@ function ChatCardNodeInner({
 
     const footerInput = (
         <div className={cn('shrink-0 border-t border-border p-2', maximized && 'px-4')}>
+            {(card.queue?.length ?? 0) > 0 && (
+                <div className="mb-1.5 space-y-0.5">
+                    <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        ⏳ queued ({card.queue!.length}) — sends when current run finishes
+                    </p>
+                    {card.queue!.map((q, qi) => (
+                        <div
+                            key={qi}
+                            className="truncate rounded-md bg-secondary/70 px-2 py-1 text-[10px] text-muted-foreground"
+                        >
+                            {q}
+                        </div>
+                    ))}
+                </div>
+            )}
             <div className="rounded-xl border border-input bg-background focus-within:border-ring">
                 <textarea
                     rows={1}

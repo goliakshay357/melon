@@ -612,11 +612,21 @@ const app = Fastify({ logger: false });
 	app.post("/sessions/:cardId/prompt", async (req, reply) => {
 		const s = registry.get((req.params as any).cardId);
 		if (!s) return reply.code(404).send({ error: "unknown card" });
-		if (s.busy) return reply.code(409).send({ error: "card is streaming" });
-		s.busy = true;
-		reply.send({ ok: true });
 		const cardId = (req.params as any).cardId;
 		const started = Date.now();
+		// Busy? Queue via pi's followUp — runs automatically when current work ends.
+		if (s.busy) {
+			try {
+				await s.runtime.session.followUp((req.body as any)?.text ?? "");
+				reply.send({ ok: true, queued: true });
+			} catch (e) {
+				reply.code(500).send({ error: (e as Error).message });
+			}
+			return;
+		}
+		s.busy = true;
+		reply.send({ ok: true });
+
 		console.log(`[${cardId}] prompt:start "${String((req.body as any)?.text).slice(0, 60)}"`);
 		try {
 			let text = (req.body as any)?.text ?? "";

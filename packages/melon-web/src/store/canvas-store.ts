@@ -79,7 +79,7 @@ interface CanvasState {
         cardId: string,
         text: string,
         opts?: { cwd?: string; sessionFile?: string },
-    ) => void;
+    ) => Promise<boolean>;
     resumeSession: (sessionFile: string) => Promise<string | null>;
 }
 
@@ -351,18 +351,25 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
     async sendMessage(cardId, text, opts) {
         const card = get().cards.find((c) => c.id === cardId);
-        if (!card || !text.trim()) return;
-        if (!card || !text.trim()) return;
+        if (!card || !text.trim()) return false;
+        // Snapshot for rollback — the user's text is never lost.
+        const messagesBefore = [...card.messages];
         get().updateCard(cardId, {
             status: 'streaming',
             title: card.messages.length === 0 ? text.slice(0, 40) : card.title,
             messages: [...card.messages, { role: 'user', text }],
         });
+        const rollback = (why: string) => {
+            pushLog(cardId, `✗ ${why} — input restored`);
+            get().updateCard(cardId, {
+                status: 'idle',
+                messages: messagesBefore,
+                queue: [],
+            });
+        };
 
-        // Ensure a pi session exists for this card (idempotent).
+        // ── 1. attach (idempotent, resume-first) ──
         if (!attached.has(cardId)) {
-            // RESUME-FIRST: if this card ever had a session file, always resume it —
-            // server restarts and page refreshes must never cost us the conversation.
             const sessionFile = opts?.sessionFile ?? card.sessionFile;
             const url = sessionFile
                 ? `${MELON_API}/sessions/resume`
@@ -382,7 +389,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                     ),
                 });
                 if (!res.ok) throw new Error(`attach ${res.status}: ${await res.text()}`);
-                const info = (await res.json()) as { sessionFile?: string; sessionId?: string; model?: string };
+                const info = (await res.json()) as {
+                    sessionFile?: string;
+                    sessionId?: string;
+                    model?: string;
+                };
                 get().updateCard(cardId, {
                     sessionFile: info.sessionFile,
                     model: info.model,
@@ -391,51 +402,33 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                 pushLog(cardId, `✓ ATTACHED session=${info.sessionId?.slice(0, 8)} model=${info.model}`);
             } catch (e) {
                 pushLog(cardId, `✗ ATTACH FAILED: ${e instanceof Error ? e.message : e}`);
-                get().updateCard(cardId, {
-                    status: 'error',
-                    messages: [
-                        ...card.messages,
-                        { role: 'assistant', text: `⚠️ Could not reach melon server (127.0.0.1:8788): ${e instanceof Error ? e.message : e}` },
-                    ],
-                });
-                return;
+                rollback('could not reach melon server');
+                return false;
             }
         } else {
             pushLog(cardId, '• already attached');
         }
 
-        // Subscribe once per card; deltas append into the live assistant message.
+        // ── 2. SSE subscription (once per card) ──
         let st = streams.get(cardId);
         if (!st) {
             pushLog(cardId, `→ SSE connect /sessions/${cardId}/events`);
             const es = new EventSource(`${MELON_API}/sessions/${cardId}/events`);
             st = { es, buffer: '', thinkingBuffer: '' };
             streams.set(cardId, st);
-            es.onopen = () => pushLog(cardId, '✓ SSE open — listening for deltas');
+            es.onopen = () => pushLog(cardId, '✓ SSE open');
             es.onmessage = (ev) => {
                 const data = JSON.parse(ev.data as string) as
                     | { type: 'delta'; text: string }
                     | { type: 'thinking'; text: string }
-                    | {
-                          type: 'tool_start';
-                          callId: string;
-                          name: string;
-                          args?: string;
-                      }
+                    | { type: 'tool_start'; callId: string; name: string; args?: string }
                     | { type: 'tool_update'; callId: string; output: string }
-                    | {
-                          type: 'tool_end';
-                          callId: string;
-                          isError: boolean;
-                          output: string;
-                      }
+                    | { type: 'tool_end'; callId: string; isError: boolean; output: string }
                     | { type: 'raw'; text: string }
                     | { type: 'status'; status: 'idle' | 'streaming' | 'error' }
                     | { type: 'error'; message: string };
 
-                // Mutate the last assistant message in place (create if needed),
-                // BATCHED — applying per-token caused full markdown re-parses
-                // dozens of times a second (screen flicker).
+                // Batched mutation of last assistant message (~8fps, anti-flicker).
                 const patchLastAssistant = (
                     fn: (m: ChatMessage) => ChatMessage,
                     immediate = false,
@@ -469,6 +462,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                         }, 130);
                     }
                 };
+
                 const ensureTool = (
                     run: Partial<ToolRun> & { callId: string; name?: string },
                     immediate = false,
@@ -490,32 +484,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                         immediate,
                     );
                 };
+
                 const appendToLastAssistant = (patch: {
                     text?: string;
                     thinking?: string;
                 }) => {
-                    const cur = useCanvasStore
-                        .getState()
-                        .cards.find((c) => c.id === cardId);
-                    if (!cur) return;
-                    const msgs = [...cur.messages];
-                    const last = msgs[msgs.length - 1];
-                    if (last?.role === 'assistant')
-                        msgs[msgs.length - 1] = { ...last, ...patch };
-                    else
-                        msgs.push({
-                            role: 'assistant',
-                            text: patch.text ?? '',
-                            thinking: patch.thinking,
-                        });
-                    useCanvasStore.setState((s) => ({
-                        cards: s.cards.map((c) =>
-                            c.id === cardId ? { ...c, messages: msgs } : c,
-                        ),
-                    }));
+                    patchLastAssistant((m) => ({ ...m, ...patch }));
                 };
+
                 if (data.type === 'tool_start') {
-                    // Immediate: the ⚙ block must appear the moment a tool starts.
+                    // Immediate — the ⚙ block must appear instantly.
                     ensureTool(
                         {
                             callId: data.callId,
@@ -526,10 +504,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                         true,
                     );
                 } else if (data.type === 'tool_update') {
-                    // partialResult is a SNAPSHOT — replace, never append.
+                    // Snapshot — REPLACE, never append.
                     ensureTool({ callId: data.callId, output: data.output });
                 } else if (data.type === 'tool_end') {
-                    // Final result — replace + lock the terminal state.
+                    // Final result — replace + lock terminal state.
                     ensureTool(
                         {
                             callId: data.callId,
@@ -545,11 +523,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                     st!.buffer += data.text;
                     appendToLastAssistant({ text: st!.buffer });
                 } else if (data.type === 'status') {
-                    if (data.status === 'idle')
-                        pushLog(cardId, `← agent_end (${st!.buffer.length} chars received)`);
                     if (data.status === 'idle') {
                         st!.buffer = '';
                         st!.thinkingBuffer = '';
+                        // Run finished → queued messages have been consumed.
+                        useCanvasStore.getState().updateCard(cardId, {
+                            status: 'idle',
+                            queue: [],
+                        });
+                        return;
                     }
                     useCanvasStore.getState().updateCard(cardId, {
                         status: data.status,
@@ -557,47 +539,54 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                 } else if (data.type === 'raw') {
                     pushLog(cardId, `• ${data.text}`);
                 } else if ((data as { type: string }).type === 'error') {
-                    pushLog(cardId, `✗ agent error`);
+                    pushLog(cardId, '✗ agent error');
                     useCanvasStore.getState().updateCard(cardId, {
                         status: 'error',
-                        messages: [
-                            ...(useCanvasStore.getState().cards.find((c) => c.id === cardId)?.messages ?? []),
-                            { role: 'assistant', text: `⚠️ ${(data as { message: string }).message}` },
-                        ],
+                        queue: [],
                     });
                 }
+            };
+            es.onerror = () => {
+                pushLog(cardId, '✗ SSE dropped — will re-attach on next message');
+                st!.es.close();
+                streams.delete(cardId);
+                attached.delete(cardId);
             };
         } else {
             st.buffer = '';
             st.thinkingBuffer = '';
         }
-        st.es.onerror = () => {
-            // Server restarted or connection dropped: force re-attach next send.
-            pushLog(cardId, '✗ SSE dropped — will re-attach on next message');
-            st!.es.close();
-            streams.delete(cardId);
-            attached.delete(cardId);
-        };
 
+        // ── 3. send ──
         pushLog(cardId, `→ PROMPT "${text.slice(0, 40)}"`);
-        const pres = await fetch(`${MELON_API}/sessions/${cardId}/prompt`, {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({
-                text,
-                viz: card.vizMode === true,
-                readonly: card.permission === 'readonly',
-            }),
-        });
-        if (!pres.ok) {
-            pushLog(cardId, `✗ PROMPT rejected HTTP ${pres.status}`);
-            get().updateCard(cardId, {
-                status: 'error',
-                messages: [
-                    ...card.messages,
-                    { role: 'assistant', text: `⚠️ Prompt rejected (${pres.status}). Try again.` },
-                ],
+        let pres: Response;
+        try {
+            pres = await fetch(`${MELON_API}/sessions/${cardId}/prompt`, {
+                method: 'POST',
+                headers: { 'content-type': 'application/json' },
+                body: JSON.stringify({
+                    text,
+                    viz: card.vizMode === true,
+                    readonly: card.permission === 'readonly',
+                }),
             });
+        } catch (e) {
+            rollback(`send failed: ${e instanceof Error ? e.message : e}`);
+            return false;
         }
+        if (!pres.ok) {
+            rollback(`prompt rejected HTTP ${pres.status}`);
+            return false;
+        }
+        const pj = (await pres.json().catch(() => ({}))) as { queued?: boolean };
+        if (pj.queued) {
+            pushLog(cardId, '⏳ agent busy — message queued');
+            const cur = get().cards.find((c) => c.id === cardId);
+            get().updateCard(cardId, { queue: [...(cur?.queue ?? []), text] });
+        }
+        return true;
     },
+
+
+
 }));
