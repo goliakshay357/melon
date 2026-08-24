@@ -179,6 +179,8 @@ function ChatCardNodeInner({
     }, [maximized]);
 
     if (!card) return null;
+    // Defensive: older persisted workspaces may lack newer fields.
+    const messages = card.messages ?? [];
 
     // chartdb note-node pattern: interactive only when selected and not mid-drag.
     const focused = !!selected && !dragging;
@@ -259,12 +261,12 @@ function ChatCardNodeInner({
             ref={bodyRef}
             onScroll={handleBodyScroll}
             className="nowheel min-h-0 flex-1 space-y-2 overflow-y-auto px-4 py-3">
-            {card.messages.length === 0 && (
+            {messages.length === 0 && (
                 <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
                     Ask something to start this thread.
                 </p>
             )}
-            {card.messages.map((m, i) => (
+            {messages.map((m: import('@/types/session-card').ChatMessage, i: number) => (
                 <div
                     key={i}
                     className={cn(
@@ -275,7 +277,7 @@ function ChatCardNodeInner({
                     )}
                 >
                     {m.role === 'assistant' &&
-                        m.tools?.map((t) => <ToolRunBlock key={t.callId} run={t} />)}
+                        (m.tools ?? []).map((t) => <ToolRunBlock key={t.callId} run={t} />)}
                     {m.role === 'assistant' && m.thinking != null && (
                         <ThinkingBlock
                             text={m.thinking}

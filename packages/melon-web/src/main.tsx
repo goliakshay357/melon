@@ -5,10 +5,34 @@ import { Canvas } from '@/canvas/canvas';
 import '@xyflow/react/dist/style.css';
 import '@/globals.css';
 
+
+class Boundary extends React.Component<
+    { children: React.ReactNode },
+    { error: Error | null }
+> {
+    state = { error: null as Error | null };
+    static getDerivedStateFromError(error: Error) {
+        return { error };
+    }
+    render() {
+        if (this.state.error) {
+            return (
+                <div style={{ padding: 40, color: '#f85149', fontFamily: 'monospace' }}>
+                    <h2>melon crashed — this is the bug, not you:</h2>
+                    <pre>{this.state.error.stack}</pre>
+                </div>
+            );
+        }
+        return this.props.children;
+    }
+}
+
 ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
-        <ReactFlowProvider>
+        <Boundary>
+            <ReactFlowProvider>
             <Canvas />
         </ReactFlowProvider>
+            </Boundary>
     </React.StrictMode>
 );
