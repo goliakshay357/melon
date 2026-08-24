@@ -42,7 +42,6 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	"",
 	"[VISUALIZATION PROTOCOL - melon canvas]",
 	"You explain on a visual canvas. When a visual genuinely aids understanding, include:",
-	'1. ```mermaid fenced blocks for flowcharts / sequence / state diagrams.',
 	"2. ```viz-html fenced blocks for interactive 3D/animated scenes.",
 	"viz-html contract (STRICT):",
 	"- ONE complete self-contained HTML document per block.",
