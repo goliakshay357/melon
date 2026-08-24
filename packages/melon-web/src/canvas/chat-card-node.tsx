@@ -9,6 +9,7 @@ import {
 } from '@xyflow/react';
 import { ArrowUp, BarChart3, Copy, Check, Minimize2, Plus, Square, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
+import { useActiveTheme } from '@/theme/theme-store';
 import { confirmAction } from '@/components/dialogs';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { cn } from '@/lib/utils';
@@ -16,9 +17,9 @@ import { cn } from '@/lib/utils';
 export type ChatCardNodeType = Node<{ cardId: string }, 'chatCard'>;
 
 const statusDot: Record<string, string> = {
-    idle: 'bg-[#50fa7b]',
-    streaming: 'bg-[#f1fa8c] animate-pulse',
-    error: 'bg-[#ff5555]',
+    idle: 'bg-success',
+    streaming: 'bg-warning animate-pulse',
+    error: 'bg-danger',
 };
 
 /** 💭 Thinking — auto-expands while reasoning streams, auto-collapses when the answer begins. */
@@ -62,7 +63,7 @@ function ToolRunBlock({ run }: { run: import('@/types/session-card').ToolRun }) 
     }, [run.status]);
     return (
         <details
-            className="mb-1.5 overflow-hidden rounded-md border border-border/60 bg-[#21222c]"
+            className="mb-1.5 overflow-hidden rounded-md border border-border/60 bg-surface"
             open={open}
             onToggle={(e) => setOpen((e.target as HTMLDetailsElement).open)}
         >
@@ -70,9 +71,9 @@ function ToolRunBlock({ run }: { run: import('@/types/session-card').ToolRun }) 
                 {run.status === 'running' ? (
                     <span className="inline-block size-2.5 animate-spin rounded-full border-2 border-muted-foreground/40 border-t-muted-foreground" />
                 ) : run.status === 'error' ? (
-                    <span className="text-[#f85149]">✗</span>
+                    <span className="text-danger">✗</span>
                 ) : (
-                    <span className="text-[#3fb950]">✓</span>
+                    <span className="text-success">✓</span>
                 )}
                 <span className="font-semibold">{run.name}</span>
                 <span className="ml-auto opacity-60">
@@ -87,7 +88,7 @@ function ToolRunBlock({ run }: { run: import('@/types/session-card').ToolRun }) 
                 </pre>
             )}
             {run.output && (
-                <pre className="nowheel m-0 max-h-48 overflow-auto whitespace-pre-wrap border-t border-border/60 px-2 py-1.5 text-[10px] leading-relaxed text-[#f8f8f2]">
+                <pre className="nowheel m-0 max-h-48 overflow-auto whitespace-pre-wrap border-t border-border/60 px-2 py-1.5 text-[10px] leading-relaxed text-surface-foreground">
                     {run.output || '(no output)'}
                 </pre>
             )}
@@ -272,7 +273,7 @@ function StageStrip({
                 className={cn(
                     'flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px]',
                     state === 'active'
-                        ? 'bg-[#bd93f9]/20 text-[#bd93f9]'
+                        ? 'bg-primary/20 text-primary'
                         : state === 'done'
                           ? 'bg-secondary text-muted-foreground line-through opacity-70'
                           : 'text-muted-foreground/40',
@@ -311,7 +312,7 @@ function StageStrip({
                 </span>
             </div>
             {stuck && (
-                <p className="mt-1 rounded-md bg-[#ff5555]/10 px-2 py-1 text-[10px] text-[#ff5555]">
+                <p className="mt-1 rounded-md bg-danger/10 px-2 py-1 text-[10px] text-danger">
                     ⚠ no activity for {(sinceLast / 1000).toFixed(0)}s — the flow may be stuck
                     here (rate limit? provider hang?). Copy the trajectory and check the server.
                 </p>
@@ -321,6 +322,7 @@ function StageStrip({
 }
 
 function TrajectoryView({ card }: { card: NonNullable<ReturnType<typeof useCanvasStore.getState>['cards'][number]> }) {
+    const theme = useActiveTheme();
     const [query, setQuery] = useState('');
     const [actualDuration, setActualDuration] = useState(true);
     const [showThinking, setShowThinking] = useState(true);
@@ -413,10 +415,10 @@ function TrajectoryView({ card }: { card: NonNullable<ReturnType<typeof useCanva
                                             ? Math.max(((ev.durMs ?? 80) / span) * 100, 1.5)
                                             : 60;
                                         const color =
-                                            ev.kind === 'prompt' ? '#8be9fd' :
-                                            ev.kind === 'thinking' ? '#bd93f9' :
-                                            ev.kind === 'tool' ? (ev.status === 'error' ? '#ff5555' : '#50fa7b') :
-                                            '#6272a4';
+                                            ev.kind === 'prompt' ? theme.tokens.info :
+                                            ev.kind === 'thinking' ? theme.tokens.purple :
+                                            ev.kind === 'tool' ? (ev.status === 'error' ? theme.tokens.danger : theme.tokens.success) :
+                                            theme.tokens.comment;
                                         const matches =
                                             selected !== null &&
                                             selected.ts === ev.ts &&

@@ -76,9 +76,15 @@ describe.skipIf(!process.env.MELON_E2E)("integration (MELON_E2E=1)", () => {
 		let text = "";
 		const events: any[] = [];
 		const controller = new AbortController();
-		const stream = fetch(`http://127.0.0.1:${app.server?.address()}/sessions/${cardId}/events`.replace("http://127.0.0.1:", "http://127.0.0.1:"), {
-			signal: controller.signal,
-		}).then(async (r) => {
+		const stream = fetch(
+			`http://127.0.0.1:${app.server?.address()}/sessions/${cardId}/events`.replace(
+				"http://127.0.0.1:",
+				"http://127.0.0.1:",
+			),
+			{
+				signal: controller.signal,
+			},
+		).then(async (r) => {
 			const reader = (r.body as ReadableStream).getReader();
 			const decoder = new TextDecoder();
 			for (;;) {

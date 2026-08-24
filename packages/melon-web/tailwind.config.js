@@ -20,6 +20,11 @@ export default {
                 muted: { DEFAULT: 'hsl(var(--muted))', foreground: 'hsl(var(--muted-foreground))' },
                 accent: { DEFAULT: 'hsl(var(--accent))', foreground: 'hsl(var(--accent-foreground))' },
                 card: { DEFAULT: 'hsl(var(--card))', foreground: 'hsl(var(--card-foreground))' },
+                success: 'hsl(var(--success))',
+                warning: 'hsl(var(--warning))',
+                danger: { DEFAULT: 'hsl(var(--danger))', foreground: 'hsl(var(--background))' },
+                destructive: 'hsl(var(--danger))',
+                surface: { DEFAULT: 'hsl(var(--surface))', foreground: 'hsl(var(--surface-foreground))' },
             },
             borderRadius: {
                 lg: 'var(--radius)',

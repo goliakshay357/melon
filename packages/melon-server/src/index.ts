@@ -9,21 +9,22 @@
 //   GET  /sessions/:cardId/events     SSE                   → delta | status | tool | error
 //   POST /sessions/:cardId/prompt     {text}                → {ok}
 //   POST /sessions/:cardId/abort
-import cors from "@fastify/cors";
-import Fastify, { type FastifyInstance } from "fastify";
+
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import {
-	ModelRuntime,
-	SessionManager,
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
 	getAgentDir,
+	ModelRuntime,
+	SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import { expandHome, loadConfig, modelToString, preview, type MelonConfig } from "./config.ts";
+import cors from "@fastify/cors";
+import Fastify, { type FastifyInstance } from "fastify";
+import { expandHome, loadConfig, type MelonConfig, modelToString, preview } from "./config.ts";
 import { SessionRegistry } from "./session-registry.ts";
 
 let _modelRuntime: ModelRuntime | undefined;
@@ -39,20 +40,20 @@ export interface MelonServerDeps {
 export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInstance> {
 	const config = loadConfig(deps.config);
 	const PROTOCOL = [
-	"",
-	"[VISUALIZATION PROTOCOL - melon canvas]",
-	"You explain on a visual canvas. When a visual genuinely aids understanding, include:",
-	"2. ```viz-html fenced blocks for interactive 3D/animated scenes.",
-	"viz-html contract (STRICT):",
-	"- ONE complete self-contained HTML document per block.",
-	'- Load three.js via <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js"}}</script> then import * as THREE from \'three\'.',
-	"- Inline all CSS/JS. Dark theme: background #161b22, readable colors.",
-	"- Animation via requestAnimationFrame; no external files.",
-	"- VIEWPORT: your HTML renders in a frame ~380px wide x 320px tall (auto-height up to 700px). Design for that: vertical stacking, nothing critical below 300px height. ABSOLUTELY NO horizontal overflow — set body { overflow-x: hidden } and keep all elements within 100% width.",
-	"Keep prose explanation around the blocks.",
-].join("\n");
+		"",
+		"[VISUALIZATION PROTOCOL - melon canvas]",
+		"You explain on a visual canvas. When a visual genuinely aids understanding, include:",
+		"2. ```viz-html fenced blocks for interactive 3D/animated scenes.",
+		"viz-html contract (STRICT):",
+		"- ONE complete self-contained HTML document per block.",
+		'- Load three.js via <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js"}}</script> then import * as THREE from \'three\'.',
+		"- Inline all CSS/JS. Dark theme: background #161b22, readable colors.",
+		"- Animation via requestAnimationFrame; no external files.",
+		"- VIEWPORT: your HTML renders in a frame ~380px wide x 320px tall (auto-height up to 700px). Design for that: vertical stacking, nothing critical below 300px height. ABSOLUTELY NO horizontal overflow — set body { overflow-x: hidden } and keep all elements within 100% width.",
+		"Keep prose explanation around the blocks.",
+	].join("\n");
 
-const app = Fastify({ logger: false });
+	const app = Fastify({ logger: false });
 	await app.register(cors, { origin: true });
 
 	const registry = new SessionRegistry();
@@ -107,12 +108,8 @@ const app = Fastify({ logger: false });
 				console.log(`[${cardId}] agent_start`);
 			} else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
 				deltaCount++;
-			} else if (
-				event.type === "message_start" ||
-				event.type === "message_end" ||
-				event.type === "turn_start"
-			) {
-				// too chatty to broadcast every one; lifecycle shows via agent_* 
+			} else if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_start") {
+				// too chatty to broadcast every one; lifecycle shows via agent_*
 			} else if (event.type === "turn_end") {
 				registry.broadcast(cardId, {
 					type: "raw",
@@ -156,17 +153,15 @@ const app = Fastify({ logger: false });
 				registry.broadcast(cardId, { type: "delta", text: event.assistantMessageEvent.delta });
 			} else if (event.type === "agent_start") {
 				registry.broadcast(cardId, { type: "status", status: "streaming" });
-			} else if (
-				event.type === "message_start" ||
-				event.type === "message_end" ||
-				event.type === "turn_start"
-			) {
-				// too chatty to broadcast every one; lifecycle shows via agent_* 
+			} else if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_start") {
+				// too chatty to broadcast every one; lifecycle shows via agent_*
 			} else if (event.type === "turn_end") {
 				registry.broadcast(cardId, {
 					type: "raw",
 					text: `turn_end (${(event.message as any)?.stopReason ?? "done"})`,
 				});
+				// Structured boundary — clients close the current output segment.
+				registry.broadcast(cardId, { type: "turn_end", stopReason: (event.message as any)?.stopReason });
 			} else if (event.type === "auto_retry_start") {
 				registry.broadcast(cardId, { type: "raw", text: "provider error — auto-retrying…" });
 			} else if (event.type === "summarization_retry_scheduled") {
@@ -207,7 +202,7 @@ const app = Fastify({ logger: false });
 		});
 	}
 
-		// ── Melon-owned folder history (independent of pi's session store) ──
+	// ── Melon-owned folder history (independent of pi's session store) ──
 	interface FolderEntry {
 		cwd: string;
 		addedAt: string;
@@ -331,7 +326,11 @@ const app = Fastify({ logger: false });
 
 		// Card not live (e.g. server restarted)? Re-open it from disk.
 		if (!s && body?.sessionFile) {
-			s = { runtime: await createRuntimeFor(SessionManager.open(body.sessionFile)), clients: new Set(), busy: false };
+			s = {
+				runtime: await createRuntimeFor(SessionManager.open(body.sessionFile)),
+				clients: new Set(),
+				busy: false,
+			};
 		}
 		if (!s) return reply.code(404).send({ error: "unknown card" });
 		if (s.busy) return reply.code(409).send({ error: "card is streaming" });
@@ -360,7 +359,6 @@ const app = Fastify({ logger: false });
 		};
 	});
 
-
 	// ── Canvas persistence: <folder>/.melon/canvases/<id>.json ──
 	function canvasesDir(cwd: string): string {
 		return join(expandHome(cwd), ".melon", "canvases");
@@ -382,10 +380,18 @@ const app = Fastify({ logger: false });
 				if (!f.endsWith(".json")) continue;
 				try {
 					const raw = JSON.parse(readFileSync(join(cvDir2, f), "utf8"));
-					out.push({ id: raw.id ?? f.replace(/\.json$/, ""), name: raw.name ?? "Untitled", modified: raw.modified ?? "" });
-				} catch { /* skip corrupt */ }
+					out.push({
+						id: raw.id ?? f.replace(/\.json$/, ""),
+						name: raw.name ?? "Untitled",
+						modified: raw.modified ?? "",
+					});
+				} catch {
+					/* skip corrupt */
+				}
 			}
-		} catch { /* no workspaces yet */ }
+		} catch {
+			/* no workspaces yet */
+		}
 		return { canvases: out };
 	});
 
@@ -445,7 +451,9 @@ const app = Fastify({ logger: false });
 					existingCards: existing.cards.length,
 				});
 			}
-		} catch { /* no existing file — fine */ }
+		} catch {
+			/* no existing file — fine */
+		}
 		const cvDir2 = canvasesDir(dir);
 		const { mkdirSync, writeFileSync } = await import("node:fs");
 		mkdirSync(cvDir2, { recursive: true });
@@ -453,7 +461,6 @@ const app = Fastify({ logger: false });
 		writeFileSync(join(cvDir2, `${ws.id}.json`), JSON.stringify(ws));
 		return { ok: true };
 	});
-
 
 	// Folder navigator: list subdirectories of a path for the in-app picker.
 	app.get("/browse", async (req, reply) => {
@@ -478,7 +485,6 @@ const app = Fastify({ logger: false });
 		}
 		return { path: dir, parent: join(dir, ".."), dirs };
 	});
-
 
 	// Navigator tree: folder → canvases → their bound sessions (+ loose ones).
 	app.get("/tree", async (req, reply) => {
@@ -508,9 +514,13 @@ const app = Fastify({ logger: false });
 							return { file: c.sessionFile, title: c.title };
 						});
 					canvases.push({ id: cv.id, name: cv.name ?? "Untitled", sessions });
-				} catch { /* skip corrupt */ }
+				} catch {
+					/* skip corrupt */
+				}
 			}
-		} catch { /* no canvases dir */ }
+		} catch {
+			/* no canvases dir */
+		}
 
 		const all = (await SessionManager.list(dir)) as any[];
 		const loose = all
@@ -540,7 +550,6 @@ const app = Fastify({ logger: false });
 		return { ok: true };
 	});
 
-
 	// Native OS folder picker — runs locally, so the dialog appears on the
 	// user's screen and we receive the real absolute path.
 	app.post("/pick-folder", async (_req, reply) => {
@@ -562,9 +571,7 @@ const app = Fastify({ logger: false });
 		const [cmd, ...args] = commands[process.platform] ?? commands.linux;
 		try {
 			const stdout = await new Promise<string>((resolve, reject) => {
-				execFile(cmd, args, { timeout: 120000 }, (err, out) =>
-					err ? reject(err) : resolve(String(out)),
-				);
+				execFile(cmd, args, { timeout: 120000 }, (err, out) => (err ? reject(err) : resolve(String(out))));
 			});
 			const path = stdout.trim().replace(/\/$/, "");
 			if (!path) return reply.code(409).send({ cancelled: true });
@@ -581,7 +588,6 @@ const app = Fastify({ logger: false });
 			return reply.code(500).send({ error: msg });
 		}
 	});
-
 
 	// Available models for the picker.
 	app.get("/models", async () => {
@@ -606,6 +612,73 @@ const app = Fastify({ logger: false });
 			if (!m) return reply.code(400).send({ error: `unknown model: ${model}` });
 			await s.runtime.session.setModel(m);
 			return { ok: true, model };
+		} catch (e) {
+			return reply.code(500).send({ error: (e as Error).message });
+		}
+	});
+
+
+	// Transcript from ground truth: pi session .jsonl (context-aware, compaction-safe).
+	app.get("/transcript", async (req, reply) => {
+		const q = req.query as any;
+		const file = q.sessionFile ? expandHome(q.sessionFile) : undefined;
+		if (!file || statSync(file, { throwIfNoEntry: false })?.isFile() !== true) {
+			return reply.code(400).send({ error: "valid sessionFile required" });
+		}
+		try {
+			const sm = SessionManager.open(file);
+			const ctx = sm.buildContextEntries() as any[];
+			const clean = (t: string) =>
+				t
+					.split("\n[VISUALIZATION PROTOCOL")[0]
+					.split("\n[VIZ MODE IS ON")[0]
+					.split("\n[READ-ONLY MODE")[0]
+					.trim();
+			const textOf = (content: any): string =>
+				(Array.isArray(content) ? content : [])
+					.filter((b: any) => b.type === "text")
+					.map((b: any) => b.text)
+					.join("");
+			const messages: any[] = [];
+			for (const e of ctx) {
+				if (e.type !== "message") continue;
+				const m: any = e.message;
+				if (m.role === "user") {
+					const text = clean(textOf(m.content));
+					if (text) messages.push({ role: "user", text });
+				} else if (m.role === "assistant") {
+					let text = "";
+					let thinking = "";
+					for (const b of m.content ?? []) {
+						if (b.type === "text") text += b.text;
+						else if (b.type === "thinking") thinking += b.thinking ?? "";
+					}
+					if (text.trim() || thinking.trim())
+						messages.push({
+							role: "assistant",
+							text: text.trim(),
+							thinking: thinking.trim() || undefined,
+						});
+				} else if (m.role === "toolResult") {
+					const lastA = [...messages].reverse().find((x) => x.role === "assistant");
+					if (lastA) {
+						lastA.tools = lastA.tools ?? [];
+						if (!lastA.tools.some((t: any) => t.callId === m.toolCallId)) {
+							lastA.tools.push({
+								callId: m.toolCallId,
+								name: m.toolName ?? "tool",
+								status: m.isError ? "error" : "ok",
+								output: textOf(m.content).slice(0, 4000),
+							});
+						}
+					}
+				}
+			}
+			return {
+				sessionId: sm.getSessionId(),
+				cwd: sm.getCwd(),
+				messages,
+			};
 		} catch (e) {
 			return reply.code(500).send({ error: (e as Error).message });
 		}

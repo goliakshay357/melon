@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { useActiveTheme } from '@/theme/theme-store';
 
 /**
  * Renders an agent-authored, self-contained HTML visualization inline in chat.
@@ -8,6 +9,7 @@ import { useEffect, useRef, useState } from 'react';
 export function IframeViz({ code }: { code: string }) {
     const frameRef = useRef<HTMLIFrameElement | null>(null);
     const [height, setHeight] = useState(320);
+    const theme = useActiveTheme();
 
     useEffect(() => {
         const onMessage = (e: MessageEvent) => {
@@ -22,7 +24,7 @@ export function IframeViz({ code }: { code: string }) {
     }, []);
 
     const srcDoc = useMemo(() => {
-        const dark = `<style>html,body{margin:0;background:#282a36;color:#f8f8f2;overflow:hidden}</style>`;
+        const dark = `<style>html,body{margin:0;background:${theme.tokens.vizBackground};color:${theme.tokens.vizForeground};overflow:hidden}</style>`;
         const reporter = `<script>
             const report = () => parent.postMessage({ type: 'melon-viz-height', height: Math.ceil(document.documentElement.scrollHeight) }, '*');
             window.addEventListener('load', report);
@@ -38,7 +40,7 @@ export function IframeViz({ code }: { code: string }) {
             doc = `${dark}${reporter}${doc}`;
         }
         return doc;
-    }, [code]);
+    }, [code, theme]);
 
     return (
         <div className="my-2 overflow-hidden rounded-lg border border-primary/40">
@@ -47,11 +49,9 @@ export function IframeViz({ code }: { code: string }) {
                 title="visualization"
                 sandbox="allow-scripts"
                 srcDoc={srcDoc}
-                style={{ height, width: '100%' }}
-                className="block max-w-full border-0 bg-[#282a36]"
+                style={{ height, width: '100%', backgroundColor: theme.tokens.vizBackground }}
+                className="block max-w-full border-0"
             />
         </div>
     );
 }
-
-import { useMemo } from 'react';

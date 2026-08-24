@@ -18,6 +18,7 @@ import { Toolbar } from './toolbar';
 import { Sidebar } from './sidebar';
 import { TopBar } from './topbar';
 import { useCanvasStore } from '@/store/canvas-store';
+import { useActiveTheme } from '@/theme/theme-store';
 
 type AppNode = ChatCardNodeType;
 
@@ -33,15 +34,7 @@ export function Canvas() {
     const storedViewport = useCanvasStore((s) => s.viewport);
 
     const [nodes, setNodes] = useState<AppNode[]>([]);
-    const [theme, setTheme] = useState<'light' | 'dark'>(() =>
-        (localStorage.getItem('melon:theme') as 'light' | 'dark') || 'dark',
-    );
-    useEffect(() => {
-        const onTheme = (e: Event) =>
-            setTheme((e as CustomEvent<'light' | 'dark'>).detail);
-        window.addEventListener('melon:theme', onTheme);
-        return () => window.removeEventListener('melon:theme', onTheme);
-    }, []);
+    const theme = useActiveTheme();
     const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
     const shiftPressed = useKeyPress('Shift');
     const { screenToFlowPosition, fitView } = useReactFlow();
@@ -87,6 +80,16 @@ export function Canvas() {
 		};
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
+	}, []);
+
+	// Flush stream batches + save on tab close/refresh — no tail loss.
+	useEffect(() => {
+		const onLeave = () => {
+			useCanvasStore.getState().flushPending();
+			useCanvasStore.getState().saveCanvas();
+		};
+		window.addEventListener('pagehide', onLeave);
+		return () => window.removeEventListener('pagehide', onLeave);
 	}, []);
 
 	// Capture viewport on move end for persistence.
@@ -210,15 +213,15 @@ export function Canvas() {
                 onPaneClick={closeMenu}
                 onMoveStart={closeMenu}
                 onMoveEnd={onMoveEnd}
-                colorMode={theme}
+                colorMode={theme.appearance}
                 proOptions={{ hideAttribution: true }}
             >
-                <Background variant={BackgroundVariant.Dots} gap={16} size={1} color={theme === "dark" ? "#44475a" : "#d4d4d4"} />
+                <Background variant={BackgroundVariant.Dots} gap={16} size={1} color={theme.tokens.canvasDot} />
                 <MiniMap
                     pannable
                     zoomable
                     className="!bottom-14"
-                    nodeColor={() => (theme === 'dark' ? '#44475a' : '#a3a3a3')}
+                    nodeColor={() => theme.tokens.minimapNode}
                 />
             </ReactFlow>
 

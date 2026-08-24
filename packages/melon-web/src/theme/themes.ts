@@ -1,0 +1,175 @@
+/**
+ * Single source of truth for every melon theme.
+ *
+ * Adding or changing a theme = editing this file only. Entries automatically
+ * show up in Settings → Appearance, the toolbar quick-toggle, Tailwind
+ * utilities (via CSS vars applied to :root), the canvas dots/minimap,
+ * trajectory waterfall colors, and sandboxed viz iframes.
+ */
+
+/** Hex colors for consumers that cannot read CSS vars (canvas, iframes). */
+export interface ThemeTokens {
+	/** status + semantic colors */
+	success: string;
+	warning: string;
+	danger: string;
+	/** trajectory waterfall accents */
+	info: string;
+	purple: string;
+	comment: string;
+	/** react-flow canvas */
+	canvasDot: string;
+	minimapNode: string;
+	/** sandboxed viz iframe defaults */
+	vizBackground: string;
+	vizForeground: string;
+}
+
+export interface Theme {
+	id: string;
+	label: string;
+	appearance: "light" | "dark";
+	/**
+	 * CSS custom properties (HSL triplets, shadcn convention) written onto
+	 * :root. Tailwind maps them to utilities in tailwind.config.js.
+	 */
+	vars: Record<string, string>;
+	tokens: ThemeTokens;
+}
+
+/** Vars shared by every theme. */
+const BASE_VARS: Record<string, string> = {
+	"--radius": "0.625rem",
+};
+
+const LIGHT: Theme = {
+	id: "light",
+	label: "Day",
+	appearance: "light",
+	vars: {
+		...BASE_VARS,
+		"--background": "0 0% 100%",
+		"--foreground": "0 0% 15%",
+		"--card": "0 0% 100%",
+		"--card-foreground": "0 0% 15%",
+		"--primary": "0 0% 17%",
+		"--primary-foreground": "0 0% 98.5%",
+		"--secondary": "0 0% 97%",
+		"--secondary-foreground": "0 0% 20.5%",
+		"--muted": "0 0% 97%",
+		"--muted-foreground": "0 0% 55.6%",
+		"--accent": "212 92% 45%" /* functional link/blue */,
+		"--accent-foreground": "0 0% 100%",
+		"--border": "0 0% 92.2%",
+		"--input": "0 0% 92.2%",
+		"--ring": "0 0% 70.8%",
+		"--success": "137 66% 30%",
+		"--warning": "40 100% 30%",
+		"--danger": "356 72% 47%",
+		"--surface": "210 29% 97%",
+		"--surface-foreground": "214 13% 14%",
+	},
+	tokens: {
+		success: "#1a7f37",
+		warning: "#9a6700",
+		danger: "#cf222e",
+		info: "#0969da",
+		purple: "#8250df",
+		comment: "#6e7781",
+		canvasDot: "#d4d4d4",
+		minimapNode: "#a3a3a3",
+		vizBackground: "#ffffff",
+		vizForeground: "#171717",
+	},
+};
+
+const DRACULA: Theme = {
+	id: "dracula",
+	label: "Night",
+	appearance: "dark",
+	vars: {
+		...BASE_VARS,
+		"--background": "232 15% 18%" /* #282a36 */,
+		"--foreground": "60 30% 96%" /* #f8f8f2 */,
+		"--card": "233 14% 21%" /* #2e303e */,
+		"--card-foreground": "60 30% 96%",
+		"--primary": "265 89% 78%" /* #bd93f9 */,
+		"--primary-foreground": "232 15% 18%",
+		"--secondary": "234 13% 31%" /* #44475a */,
+		"--secondary-foreground": "60 30% 96%",
+		"--muted": "234 13% 26%",
+		"--muted-foreground": "231 24% 72%",
+		"--accent": "191 97% 77%" /* #8be9fd */,
+		"--accent-foreground": "232 15% 18%",
+		"--border": "233 14% 30%",
+		"--input": "233 14% 30%",
+		"--ring": "265 89% 78%",
+		"--success": "135 94% 65%" /* #50fa7b */,
+		"--warning": "65 92% 76%" /* #f1fa8c */,
+		"--danger": "0 100% 67%" /* #ff5555 */,
+		"--surface": "235 14% 15%" /* #21222c */,
+		"--surface-foreground": "60 30% 96%",
+	},
+	tokens: {
+		success: "#50fa7b",
+		warning: "#f1fa8c",
+		danger: "#ff5555",
+		info: "#8be9fd",
+		purple: "#bd93f9",
+		comment: "#6272a4",
+		canvasDot: "#44475a",
+		minimapNode: "#44475a",
+		vizBackground: "#282a36",
+		vizForeground: "#f8f8f2",
+	},
+};
+
+const DIMMED: Theme = {
+	id: "dimmed",
+	label: "Dusk",
+	appearance: "dark",
+	vars: {
+		...BASE_VARS,
+		"--background": "213 15% 16%" /* #22272e */,
+		"--foreground": "212 26% 85%" /* #cdd9e5 */,
+		"--card": "214 13% 20%" /* #2d333b */,
+		"--card-foreground": "212 26% 85%",
+		"--primary": "213 89% 64%" /* #539bf5 */,
+		"--primary-foreground": "213 15% 16%",
+		"--secondary": "214 12% 25%" /* #373e47 */,
+		"--secondary-foreground": "212 26% 85%",
+		"--muted": "214 13% 20%",
+		"--muted-foreground": "210 11% 51%" /* #768390 */,
+		"--accent": "213 89% 64%",
+		"--accent-foreground": "213 15% 16%",
+		"--border": "214 10% 30%" /* #444c56 */,
+		"--input": "214 10% 30%",
+		"--ring": "213 89% 64%",
+		"--success": "122 33% 51%" /* #57ab5a */,
+		"--warning": "40 58% 46%" /* #c69026 */,
+		"--danger": "3 75% 60%" /* #e5534b */,
+		"--surface": "214 13% 20%",
+		"--surface-foreground": "212 26% 85%",
+	},
+	tokens: {
+		success: "#57ab5a",
+		warning: "#c69026",
+		danger: "#e5534b",
+		info: "#539bf5",
+		purple: "#986ee2",
+		comment: "#768390",
+		canvasDot: "#444c56",
+		minimapNode: "#444c56",
+		vizBackground: "#22272e",
+		vizForeground: "#cdd9e5",
+	},
+};
+
+/** Registry order = order shown in Settings and cycled by the toolbar toggle. */
+export const THEMES: Theme[] = [DRACULA, LIGHT, DIMMED];
+
+export const DEFAULT_THEME_ID = DRACULA.id;
+
+export function getTheme(id: string): Theme {
+	return THEMES.find((t) => t.id === id) ?? THEMES[0];
+}

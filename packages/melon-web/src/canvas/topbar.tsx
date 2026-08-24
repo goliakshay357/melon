@@ -49,7 +49,7 @@ export function TopBar() {
                 </span>
             )}
             {serverOffline && (
-                <span className="animate-pulse rounded-md bg-[#ff5555]/15 px-2 py-0.5 text-[10px] font-medium text-[#ff5555]">
+                <span className="animate-pulse rounded-md bg-danger/15 px-2 py-0.5 text-[10px] font-medium text-danger">
                   ⚠ reconnecting to server…
                 </span>
             )}

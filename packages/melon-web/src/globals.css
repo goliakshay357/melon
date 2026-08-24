@@ -2,55 +2,19 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Palette CSS vars (--background, --card, --success, …) are owned by
+   src/theme/themes.ts and applied to :root at runtime by src/theme/theme-store.ts.
+   Edit themes there — not here. */
+
 @layer base {
-    :root {
-        /* DSH palette — shadcn neutral, converted from oklch */
-        --background: 0 0% 100%;
-        --foreground: 0 0% 15%;
-        --card: 0 0% 100%;
-        --card-foreground: 0 0% 15%;
-        --primary: 0 0% 17%;
-        --primary-foreground: 0 0% 98.5%;
-        --secondary: 0 0% 97%;
-        --secondary-foreground: 0 0% 20.5%;
-        --muted: 0 0% 97%;
-        --muted-foreground: 0 0% 55.6%;
-        --accent: 212 92% 45%;          /* functional link/blue */
-        --accent-foreground: 0 0% 100%;
-        --border: 0 0% 92.2%;
-        --input: 0 0% 92.2%;
-        --ring: 0 0% 70.8%;
-        --radius: 0.625rem;
+    html,
+    body,
+    #root {
+        height: 100%;
+        margin: 0;
+        background: hsl(var(--background));
+        color: hsl(var(--foreground));
+        font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
+            "Noto Sans", Helvetica, Arial, sans-serif;
     }
-
-    .dark {
-        /* Dracula */
-        --background: 232 15% 18%;      /* #282a36 */
-        --foreground: 60 30% 96%;       /* #f8f8f2 */
-        --card: 233 14% 21%;            /* #2e303e */
-        --card-foreground: 60 30% 96%;
-        --primary: 265 89% 78%;         /* #bd93f9 */
-        --primary-foreground: 232 15% 18%;
-        --secondary: 234 13% 31%;       /* #44475a */
-        --secondary-foreground: 60 30% 96%;
-        --muted: 234 13% 26%;
-        --muted-foreground: 231 24% 72%;
-        --accent: 191 97% 77%;          /* #8be9fd */
-        --accent-foreground: 232 15% 18%;
-        --border: 233 14% 30%;
-        --input: 233 14% 30%;
-        --ring: 265 89% 78%;
-    }
-}
-
-
-html,
-body,
-#root {
-    height: 100%;
-    margin: 0;
-    background: hsl(var(--background));
-    color-scheme: dark;
-    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
-        "Noto Sans", Helvetica, Arial, sans-serif;
 }

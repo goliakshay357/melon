@@ -8,10 +8,12 @@ import {
     PanelLeftClose,
     PanelLeftOpen,
     Plus,
+    Settings,
     X,
 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { askText, confirmAction } from '@/components/dialogs';
+import { SettingsDialog } from '@/components/settings-dialog';
 import { cn } from '@/lib/utils';
 
 const MELON_API = 'http://127.0.0.1:8788';
@@ -24,6 +26,7 @@ export function Sidebar() {
     const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
     const [openCanvasSessions, setOpenCanvasSessions] = useState<Set<string>>(new Set());
     const [pickingNative, setPickingNative] = useState(false);
+    const [settingsOpen, setSettingsOpen] = useState(false);
 
     const folder = useCanvasStore((s) => s.folder);
     const canvasId = useCanvasStore((s) => s.canvasId);
@@ -144,12 +147,21 @@ export function Sidebar() {
             )}
         >
             {collapsed ? (
-                <button
-                    className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                    onClick={() => setCollapsed(false)}
-                >
-                    <PanelLeftOpen className="size-4" />
-                </button>
+                <>
+                    <button
+                        className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                        onClick={() => setCollapsed(false)}
+                    >
+                        <PanelLeftOpen className="size-4" />
+                    </button>
+                    <button
+                        className="mt-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                        title="Settings"
+                        onClick={() => setSettingsOpen(true)}
+                    >
+                        <Settings className="size-4" />
+                    </button>
+                </>
             ) : (
                 <>
                     {/* Brand header */}
@@ -374,16 +386,23 @@ export function Sidebar() {
                         })}
                     </div>
 
-                    {/* Footer */}
-                    {folder && (
-                        <div className="shrink-0 border-t border-border px-3 py-2 text-[10px] text-muted-foreground">
-                            <span className="truncate">📁 …{folder.split('/').slice(-2).join('/')}</span>
-                        </div>
-                    )}
+                    {/* Footer: workspace breadcrumb + settings */}
+                    <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border px-3 py-2">
+                        <span className="min-w-0 truncate text-[10px] text-muted-foreground">
+                            {folder && `📁 …${folder.split('/').slice(-2).join('/')}`}
+                        </span>
+                        <button
+                            className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                            title="Settings"
+                            onClick={() => setSettingsOpen(true)}
+                        >
+                            <Settings className="size-3.5" />
+                        </button>
+                    </div>
                 </>
             )}
 
-
+            <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
         </div>
     );
 }

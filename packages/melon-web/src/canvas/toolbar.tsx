@@ -1,24 +1,21 @@
 import { useState } from 'react';
 import { useOnViewportChange, useReactFlow } from '@xyflow/react';
 import { Maximize, Moon, Sun, ZoomIn, ZoomOut } from 'lucide-react';
-import { useEffect as useReactEffect } from 'react';
 import { useCanvasStore } from '@/store/canvas-store';
+import { getTheme, THEMES } from '@/theme/themes';
+import { useThemeStore } from '@/theme/theme-store';
 
 export function Toolbar() {
     const { zoomIn, zoomOut, fitView, getZoom } = useReactFlow();
     const [zoom, setZoom] = useState(Math.round(getZoom() * 100));
     const scrollAction = useCanvasStore((s) => s.scrollAction);
     const setScrollAction = useCanvasStore((s) => s.setScrollAction);
-    const [theme, setTheme] = useState<'light' | 'dark'>(() =>
-        (localStorage.getItem('melon:theme') as 'light' | 'dark') || 'dark',
-    );
+    const theme = getTheme(useThemeStore((s) => s.themeId));
 
-    // Apply + persist theme (GitHub light/dark palettes via .dark class)
-    useReactEffect(() => {
-        document.documentElement.classList.toggle('dark', theme === 'dark');
-        localStorage.setItem('melon:theme', theme);
-        window.dispatchEvent(new CustomEvent('melon:theme', { detail: theme }));
-    }, [theme]);
+    const cycleTheme = () => {
+        const idx = THEMES.findIndex((t) => t.id === theme.id);
+        useThemeStore.getState().setTheme(THEMES[(idx + 1) % THEMES.length].id);
+    };
 
     useOnViewportChange({
         onChange: (v) => setZoom(Math.round(v.zoom * 100)),
@@ -46,12 +43,8 @@ export function Toolbar() {
                 <Maximize className="size-4" />
             </button>
             <div className="mx-1 h-5 w-px bg-border" />
-            <button
-                className={btn}
-                onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}
-                title={theme === 'light' ? 'Night mode' : 'Day mode'}
-            >
-                {theme === 'light' ? <Moon className="size-4" /> : <Sun className="size-4" />}
+            <button className={btn} onClick={cycleTheme} title={`Theme: ${theme.label}`}>
+                {theme.appearance === 'dark' ? <Moon className="size-4" /> : <Sun className="size-4" />}
             </button>
             <div className="mx-1 h-5 w-px bg-border" />
             <select
