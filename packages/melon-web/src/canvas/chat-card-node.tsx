@@ -122,6 +122,7 @@ function ChatCardNodeInner({
     const forkCard = useCanvasStore((s) => s.forkCard);
     const deleteCards = useCanvasStore((s) => s.deleteCards);
     const sendMessage = useCanvasStore((s) => s.sendMessage);
+    const folder = useCanvasStore((s) => s.folder);
     const [draft, setDraft] = useState('');
     const [maximized, setMaximized] = useState(false);
     const [models, setModels] = useState<Array<{ label: string }>>([]);
@@ -303,8 +304,6 @@ function ChatCardNodeInner({
             )}
         </div>
     );
-
-    const folder = useCanvasStore((s) => s.folder);
 
     const footerInput = (
         <div className={cn('shrink-0 border-t border-border p-2', maximized && 'px-4')}>
