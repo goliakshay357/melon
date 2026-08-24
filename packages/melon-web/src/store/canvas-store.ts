@@ -587,6 +587,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                     pushLog(cardId, `⚙ ${data.callId.slice(0, 8)} ${data.isError ? '✗' : '✓'}${data.durationMs ? ` ${data.durationMs}ms` : ''}`);
                 } else if (data.type === 'agent_meta') {
                     const meta = `stopReason=${data.stopReason} tokens in:${data.inputTokens ?? '?'} out:${data.outputTokens ?? '?'}`;
+                    // Clock out any still-open thinking run.
+                    if (st!.thinkingEventId) {
+                        patchEvent(cardId, st!.thinkingEventId, {
+                            durMs: Date.now() - (st!.thinkingStartTs ?? Date.now()),
+                            status: 'ok',
+                            detail: st!.thinkingBuffer.slice(-8000),
+                        });
+                        st!.thinkingEventId = undefined;
+                    }
                     // Close the prompt event with total duration.
                     const evs = useCanvasStore.getState()
                         .cards.find((c) => c.id === cardId)?.events ?? [];
@@ -607,17 +616,24 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
                         st!.thinkingEventId = pushEvent(cardId, {
                             kind: 'thinking',
                             name: 'reasoning',
+                            detail: '',
                         });
+                        st!.thinkingStartTs = Date.now();
                     }
                     st!.thinkingBuffer += data.text;
                     appendToLastAssistant({ thinking: st!.thinkingBuffer });
+                    // Thought process lives IN the event — inspect shows it anytime.
+                    patchEvent(cardId, st!.thinkingEventId, {
+                        detail: st!.thinkingBuffer.slice(-6000),
+                    });
                 } else if (data.type === 'delta') {
                     if (st!.thinkingEventId) {
-                        patchEvent(
-                            cardId,
-                            st!.thinkingEventId,
-                            { durMs: Date.now() - (st!.thinkingStartTs ?? Date.now()) },
-                        );
+                        // CLOCK OUT — duration + full thought process captured.
+                        patchEvent(cardId, st!.thinkingEventId, {
+                            durMs: Date.now() - (st!.thinkingStartTs ?? Date.now()),
+                            status: 'ok',
+                            detail: st!.thinkingBuffer.slice(-8000),
+                        });
                         st!.thinkingEventId = undefined;
                     }
                     st!.buffer += data.text;

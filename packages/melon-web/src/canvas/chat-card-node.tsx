@@ -212,6 +212,114 @@ function buildTurns(events: TraceEvent2[]): Turn[] {
     return turns;
 }
 
+const STAGES = ['sent', 'llm', 'streaming', 'done'] as const;
+
+/** Where is this prompt right now? Derived from events — no black box. */
+function computeStage(card: {
+    status: string;
+    events?: TraceEvent2[];
+}) {
+    const events = card.events ?? [];
+    const lastPrompt = [...events].reverse().find((e) => e.kind === 'prompt');
+    if (!lastPrompt) return null;
+    const post = events.filter((e) => e.ts >= lastPrompt.ts);
+    const hasThinking = post.some((e) => e.kind === 'thinking');
+    const hasText = (card as any).messages?.some(
+        (m: any) => m.role === 'assistant' && m.text && m.text.length > 0,
+    );
+    const done = card.status !== 'streaming';
+    const runningTool = post.find((e) => e.kind === 'tool' && e.durMs == null);
+
+    let stage: string;
+    if (done) stage = 'done';
+    else if (runningTool) stage = 'tool';
+    else if (hasThinking && !hasText) stage = 'llm'; // still reasoning
+    else if (post.length > 1) stage = 'streaming';
+    else stage = 'llm';
+
+    return { stage, done, lastPrompt, events: post, runningTool };
+}
+
+
+function StageStrip({
+    card,
+}: {
+    card: NonNullable<ReturnType<typeof useCanvasStore.getState>['cards'][number]>;
+}) {
+    const [, setTick] = useState(0);
+    const streaming = card.status === 'streaming';
+    useEffect(() => {
+        if (!streaming) return;
+        const t = setInterval(() => setTick((x) => x + 1), 1000);
+        return () => clearInterval(t);
+    }, [streaming]);
+
+    const info = computeStage(card as any);
+    if (!info) return null;
+
+    const now = Date.now();
+    const lastEv = [...(card.events ?? [])].reverse().find((e) => e.kind !== 'system');
+    const sinceLast = streaming && lastEv ? now - (lastEv.ts + (lastEv.durMs ?? 0)) : 0;
+    const stuck = streaming && sinceLast > 15000;
+
+    const stageIdx =
+        info.stage === 'done' ? STAGES.length - 1 : STAGES.indexOf(info.stage as never);
+    const elapsed = info.lastPrompt ? ((now - info.lastPrompt.ts) / 1000).toFixed(1) : '0';
+
+    const pill = (label: string, state: 'done' | 'active' | 'pending') =>
+        (
+            <span
+                className={cn(
+                    'flex items-center gap-1 rounded-full px-2 py-0.5 text-[10px]',
+                    state === 'active'
+                        ? 'bg-[#bd93f9]/20 text-[#bd93f9]'
+                        : state === 'done'
+                          ? 'bg-secondary text-muted-foreground line-through opacity-70'
+                          : 'text-muted-foreground/40',
+                )}
+            >
+                {state === 'active' && (
+                    <span className="inline-block size-2 animate-spin rounded-full border border-muted-foreground/40 border-t-muted-foreground" />
+                )}
+                {state === 'done' && '✓'}
+                {label}
+            </span>
+        ) as React.ReactNode;
+
+    const stagesWithState = STAGES.map((sName, i) => ({
+        label:
+            sName === 'llm' && i === stageIdx
+                ? 'LLM processing'
+                : sName === 'streaming' && i === stageIdx
+                  ? 'streaming answer'
+                  : sName,
+        state:
+            i < stageIdx ? ('done' as const) : i === stageIdx ? ('active' as const) : ('pending' as const),
+    }));
+
+    return (
+        <div className="mb-2 shrink-0">
+            <div className="flex items-center gap-1.5">
+                {stagesWithState.map((st, i) => (
+                    <span key={st.label} className="flex items-center gap-1.5">
+                        {i > 0 && <span className="text-muted-foreground/40">→</span>}
+                        {pill(st.label, st.state)}
+                    </span>
+                ))}
+                <span className="ml-auto text-[10px] tabular-nums text-muted-foreground">
+                    total {elapsed}s
+                </span>
+            </div>
+            {stuck && (
+                <p className="mt-1 rounded-md bg-[#ff5555]/10 px-2 py-1 text-[10px] text-[#ff5555]">
+                    ⚠ no activity for {(sinceLast / 1000).toFixed(0)}s — the flow may be stuck
+                    here (rate limit? provider hang?). Copy the trajectory and check the server.
+                </p>
+            )}
+        </div>
+    );
+}
+
 function TrajectoryView({ card }: { card: NonNullable<ReturnType<typeof useCanvasStore.getState>['cards'][number]> }) {
     const [query, setQuery] = useState('');
     const [actualDuration, setActualDuration] = useState(true);
@@ -262,6 +370,9 @@ function TrajectoryView({ card }: { card: NonNullable<ReturnType<typeof useCanva
                 </button>
                 <CopyButton getText={() => buildTraceDump(card)} />
             </div>
+
+            {/* Pipeline flow tracker */}
+            <StageStrip card={card} />
 
             {/* Waterfall */}
             <div className="min-h-0 flex-1 space-y-1.5 overflow-y-auto font-mono text-[10px]">
