@@ -297,12 +297,23 @@ function ChatCardNodeInner({
                         />
                     )}
                     {m.role === 'assistant' ? (
-                        <>
-                            <MarkdownBlock content={m.text} />
-                            {!m.text && m.thinking && (
-                                <span className="text-[10px] text-muted-foreground">…</span>
-                            )}
-                        </>
+                        // PERF: streaming tail renders as plain text — full
+                        // markdown parsing per flush starved the main thread.
+                        card.status === 'streaming' &&
+                        i === messages.length - 1 ? (
+                            <>
+                                <div className="whitespace-pre-wrap break-words">
+                                    {m.text}
+                                </div>
+                                {!m.text && m.thinking && (
+                                    <span className="text-[10px] text-muted-foreground">…</span>
+                                )}
+                            </>
+                        ) : (
+                            <>
+                                <MarkdownBlock content={m.text} />
+                            </>
+                        )
                     ) : (
                         m.text
                     )}

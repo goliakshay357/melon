@@ -96,23 +96,44 @@ export function Canvas() {
 		[],
 	);
 
-    // Sync store → RF nodes (preserving selection flags across rebuilds).
+    // Sync store → RF nodes.
+    // PERF: node objects are reused when nothing visual changed, and if NO
+    // node changed at all we hand React Flow the same array reference —
+    // streaming deltas then cause zero re-renders of the flow/minimap.
     useEffect(() => {
         setNodes((prev) => {
             const prevById = new Map(prev.map((n) => [n.id, n]));
-            return cards.map(
-                (c): AppNode => ({
-                    id: c.id,
-                    type: 'chatCard',
-                    position: c.position,
-                    data: { cardId: c.id },
-                    style: {
-                        width: c.size?.width ?? 380,
-                        height: c.size?.height ?? 360,
-                    },
-                    selected: prevById.get(c.id)?.selected ?? false,
-                }),
+            const next = cards.map(
+                (c): AppNode => {
+                    const old = prevById.get(c.id);
+                    const width = c.size?.width ?? 380;
+                    const height = c.size?.height ?? 360;
+                    if (
+                        old &&
+                        old.position.x === c.position.x &&
+                        old.position.y === c.position.y &&
+                        old.style?.width === width &&
+                        old.style?.height === height
+                    ) {
+                        return old;
+                    }
+                    return {
+                        id: c.id,
+                        type: 'chatCard' as const,
+                        position: c.position,
+                        data: { cardId: c.id },
+                        style: { width, height },
+                        selected: old?.selected ?? false,
+                    };
+                },
             );
+            if (
+                prev.length === next.length &&
+                next.every((n, i) => prev[i] === n)
+            ) {
+                return prev;
+            }
+            return next;
         });
     }, [cards]);
 
