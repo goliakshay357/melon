@@ -11,6 +11,7 @@ import {
     X,
 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
+import { askText, confirmAction } from '@/components/dialogs';
 import { cn } from '@/lib/utils';
 
 const MELON_API = 'http://127.0.0.1:8788';
@@ -104,7 +105,7 @@ export function Sidebar() {
     const newCanvasInFolder = async (cwd: string) => {
         const entry = tree[cwd];
         const suggested = `Canvas ${(entry?.canvases.length ?? 0) + 1}`;
-        const name = window.prompt('Name your new canvas', suggested)?.trim();
+        const name = (await askText({ title: 'Name your new canvas', initial: suggested }))?.trim();
         if (!name) return;
         if (folder !== cwd) await openFolder(cwd);
         await createCanvas(name);
@@ -112,7 +113,12 @@ export function Sidebar() {
     };
 
     const deleteCanvasRow = async (cwd: string, id: string) => {
-        if (!window.confirm('Delete this canvas? Card layout is removed (sessions stay on disk).'))
+        if (!(await confirmAction({
+            title: 'Delete this canvas?',
+            description:
+                'The card layout will be removed. Pi sessions remain on disk and can be reopened later.',
+            confirmLabel: 'Delete',
+        })))
             return;
         if (canvasId === id && folder === cwd) {
             localStorage.removeItem('melon:lastCanvas');
@@ -125,7 +131,7 @@ export function Sidebar() {
     };
 
     const renameCanvasRow = async (cwd: string, cv: { id: string; name: string }) => {
-        const name = window.prompt('Rename canvas', cv.name)?.trim();
+        const name = (await askText({ title: 'Rename canvas', initial: cv.name }))?.trim();
         if (!name || name === cv.name) return;
         await useCanvasStore.getState().renameCanvas(cwd, cv.id, name);
     };
