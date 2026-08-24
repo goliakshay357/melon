@@ -49,6 +49,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		'- Load three.js via <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js"}}</script> then import * as THREE from \'three\'.',
 		"- Inline all CSS/JS. Dark theme: background #161b22, readable colors.",
 		"- Animation via requestAnimationFrame; no external files.",
+	"- NEVER emit mermaid, flowchart, or ASCII-art diagrams (e.g. flowchart TB). They render badly. For diagrams use a viz-html scene instead; otherwise explain in prose.",
 		"- VIEWPORT: your HTML renders in a frame ~380px wide x 320px tall (auto-height up to 700px). Design for that: vertical stacking, nothing critical below 300px height. ABSOLUTELY NO horizontal overflow — set body { overflow-x: hidden } and keep all elements within 100% width.",
 		"Keep prose explanation around the blocks.",
 	].join("\n");

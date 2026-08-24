@@ -575,7 +575,7 @@ function ChatCardNodeInner({
         }
         const isStreamingTail = card.status === 'streaming' && index === card.messages.length - 1;
         return (
-            <div className="space-y-2 border-l-2 border-secondary pl-3">
+            <div className="min-w-0 space-y-2 border-l-2 border-secondary pl-3">
                 {m.thinking != null && (
                     <ThinkingBlock
                         cardId={id}
