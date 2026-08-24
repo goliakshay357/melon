@@ -282,7 +282,7 @@ function ChatCardNodeInner({
                 <div
                     key={i}
                     className={cn(
-                        'max-w-[90%] rounded-lg px-2.5 py-1.5 text-xs leading-relaxed',
+                        'max-w-[92%] overflow-hidden rounded-lg px-2.5 py-1.5 text-xs leading-relaxed',
                         m.role === 'user'
                             ? 'ml-auto bg-primary/10 text-primary'
                             : 'bg-secondary text-secondary-foreground',

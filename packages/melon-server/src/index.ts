@@ -47,7 +47,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	"- ONE complete self-contained HTML document per block.",
 	'- Load three.js via <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js"}}</script> then import * as THREE from \'three\'.',
 	"- Inline all CSS/JS. Dark theme: background #161b22, readable colors.",
-	"- Animation via requestAnimationFrame; canvas fills window; no external files.",
+	"- Animation via requestAnimationFrame; no external files.",
+	"- VIEWPORT: your HTML renders in a frame ~380px wide x 320px tall (auto-height up to 700px). Design for that: vertical stacking, nothing critical below 300px height, no horizontal scrolling.",
 	"Keep prose explanation around the blocks.",
 ].join("\n");
 
