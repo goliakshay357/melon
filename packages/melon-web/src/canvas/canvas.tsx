@@ -3,7 +3,6 @@ import {
     applyNodeChanges,
     Background,
     BackgroundVariant,
-    MiniMap,
     ReactFlow,
     SelectionMode,
     useKeyPress,
@@ -217,12 +216,6 @@ export function Canvas() {
                 proOptions={{ hideAttribution: true }}
             >
                 <Background variant={BackgroundVariant.Dots} gap={16} size={1} color={theme.tokens.canvasDot} />
-                <MiniMap
-                    pannable
-                    zoomable
-                    className="!bottom-14"
-                    nodeColor={() => theme.tokens.minimapNode}
-                />
             </ReactFlow>
 
             <Sidebar />
