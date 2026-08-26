@@ -21,5 +21,9 @@ echo "── 4. package DMG ──"
 npx electron-builder --mac
 
 echo ""
-DMG=$(ls -lh release/*.dmg | awk '{print $NF, $5}')
+DMG=$(ls -lh dist/*.dmg 2>/dev/null | awk '{print $NF, $5}')
+if [ -z "$DMG" ]; then
+    echo "❌ no DMG produced — check dist/"
+    exit 1
+fi
 echo "✅ $DMG"

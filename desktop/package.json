@@ -1,8 +1,8 @@
 {
-    "name": "melon-desktop",
+    "name": "melon",
     "version": "0.1.0",
     "private": true,
-    "description": "Melon canvas — desktop shell (Electron)",
+    "description": "Melon canvas \u2014 desktop shell (Electron)",
     "main": "main.mjs",
     "scripts": {
         "start": "electron .",
@@ -17,5 +17,31 @@
         "electron": "^43.4.1",
         "electron-builder": "^25.1.8"
     },
-    "type": "module"
+    "type": "module",
+    "productName": "Melon",
+    "build": {
+        "appId": "com.melon.canvas",
+        "productName": "Melon",
+        "directories": {
+            "output": "dist",
+            "buildResources": "build"
+        },
+        "files": [
+            "main.mjs",
+            "preload.cjs",
+            "server/**/*",
+            "web-dist/**/*",
+            "package.json"
+        ],
+        "mac": {
+            "category": "public.app-category.developer-tools",
+            "target": [
+                "dmg"
+            ],
+            "identity": null
+        },
+        "asarUnpack": [
+            "node_modules/@earendil-works/pi-coding-agent/**/*"
+        ]
+    }
 }

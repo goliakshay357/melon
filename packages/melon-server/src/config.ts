@@ -17,7 +17,7 @@ export interface MelonConfig {
 export function loadConfig(overrides: Partial<MelonConfig> = {}): MelonConfig {
 	return {
 		port: Number(env("MELON_PORT", "8788")),
-		defaultModel: env("MELON_DEFAULT_MODEL", "opencode-go/ox-alpha-free"),
+		defaultModel: env("MELON_DEFAULT_MODEL", "opencode-go/deepseek-v4-flash"),
 		defaultThinkingLevel: env("MELON_DEFAULT_THINKING", "high") as MelonConfig["defaultThinkingLevel"],
 		defaultCwd: overrides.defaultCwd ?? env("MELON_DEFAULT_CWD", "~/Desktop/workspace/melon"),
 	};

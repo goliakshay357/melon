@@ -5,8 +5,8 @@ function env(name, fallback) {
 }
 export function loadConfig(overrides = {}) {
     return {
-        port: Number(env("MELON_PORT", "0")),
-        defaultModel: env("MELON_DEFAULT_MODEL", "opencode-go/ox-alpha-free"),
+        port: Number(env("MELON_PORT", "8788")),
+        defaultModel: env("MELON_DEFAULT_MODEL", "opencode-go/deepseek-v4-flash"),
         defaultThinkingLevel: env("MELON_DEFAULT_THINKING", "high"),
         defaultCwd: overrides.defaultCwd ?? env("MELON_DEFAULT_CWD", "~/Desktop/workspace/melon"),
     };

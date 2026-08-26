@@ -1,42 +1,85 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import { spawn } from 'node:child_process';
-import http from 'node:http';
 import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// Share state with terminal pi (auth, sessions, model catalog) instead of the
+// branded ~/.melon/agent dir, which is a stale incomplete copy.
+const AGENT_DIR = join(homedir(), '.pi', 'agent');
 
-const serverProc = spawn(process.execPath, [join(__dirname, 'server', 'index.js')], {
-    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
-    stdio: ['ignore', 'pipe', 'pipe'],
-});
+// Spawn the server child on a FREE port (MELON_PORT=0 → OS assigns).
+const serverProc = spawn(
+    process.execPath,
+    [join(__dirname, 'server', 'index.js')],
+    {
+        env: {
+            ...process.env,
+            ELECTRON_RUN_AS_NODE: '1',
+            MELON_PORT: '0',
+            MELON_CODING_AGENT_DIR: AGENT_DIR,
+        },
+        stdio: ['ignore', 'pipe', 'pipe'],
+    },
+);
 
 let serverPort = null;
+let serverLog = '';
 const ready = new Promise((resolve) => {
-    let buf = '';
-    serverProc.stdout.on('data', (d) => {
-        buf += d;
+    let outBuf = '';
+    let errBuf = '';
+    const scan = (chunk, buf) => {
         const m = buf.match(/127\.0\.0\.1:(\d+)/);
-        if (m && !serverPort) { serverPort = +m[1]; resolve(); }
+        if (m && !serverPort) {
+            serverPort = Number(m[1]);
+            resolve();
+        }
+    };
+    serverProc.stdout.on('data', (d) => {
+        outBuf += d;
+        scan(d, outBuf);
     });
-    setTimeout(() => resolve(), 20000);
+    serverProc.stderr.on('data', (d) => {
+        errBuf += d;
+        serverLog += d;
+        scan(d, errBuf);
+    });
+    serverProc.on('exit', (code) => {
+        if (!serverPort) {
+            serverLog += `\n[server exited code ${code}]`;
+            resolve();
+        }
+    });
+    setTimeout(() => resolve(), 15000);
 });
 
 await ready;
-console.error(`[melon] server on port ${serverPort}`);
 
-ipcMain.handle('pick-folder', async () => {
-    const r = await dialog.showOpenDialog({ title: 'Choose folder', properties: ['openDirectory'] });
-    return r.canceled ? null : r.filePaths[0];
-});
-
-function createWindow() {
-    const win = new BrowserWindow({
-        width: 1440, height: 900,
-        backgroundColor: '#282a36',
-        webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true },
+if (!serverPort) {
+    console.error(`[melon] server failed to start:\n${serverLog}`);
+    dialog.showErrorBox('Melon failed to start', serverLog || 'Server did not bind a port.');
+    app.quit();
+} else {
+    console.error(`[melon] server on port ${serverPort}`);
+    ipcMain.handle('pick-folder', async () => {
+        const r = await dialog.showOpenDialog({ title: 'Choose folder', properties: ['openDirectory'] });
+        return r.canceled ? null : r.filePaths[0];
     });
-    win.loadURL(`http://127.0.0.1:${serverPort}`);
+
+    const createWindow = () => {
+        const win = new BrowserWindow({
+            width: 1440,
+            height: 900,
+            backgroundColor: '#282a36',
+            webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true },
+        });
+        win.loadURL(`http://127.0.0.1:${serverPort}`);
+    };
+    app.whenReady().then(createWindow);
 }
-app.whenReady().then(createWindow);
-app.on('window-all-closed', () => { serverProc.kill(); app.quit(); });
+
+app.on('window-all-closed', () => {
+    serverProc.kill();
+    app.quit();
+});

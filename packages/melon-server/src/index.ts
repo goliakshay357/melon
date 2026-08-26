@@ -13,7 +13,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
@@ -855,7 +856,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 
 
 	// Serve web UI in production (when web-dist exists next to server)
-	const webDist = join(process.cwd(), "web-dist");
+	// Resolve web-dist relative to THIS script (not cwd — packaged apps launch from / or home).
+	const webDist = join(dirname(fileURLToPath(import.meta.url)), "..", "web-dist");
 	if (existsSync(join(webDist, "index.html"))) {
 		await app.register(fastifyStatic, { root: webDist });
 		app.setNotFoundHandler((req, reply) => {
@@ -873,6 +875,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop() ?? "")) {
 	const config = loadConfig();
 	const app = await buildApp();
-	await app.listen({ port: config.port, host: "127.0.0.1" });
-	console.error(`melon-server (pi monorepo) on http://127.0.0.1:${config.port}`);
+	const addr = await app.listen({ port: config.port, host: "127.0.0.1" });
+	// Log the ACTUAL bound port (differs from config.port when port:0 → OS picks).
+	console.error(`melon-server on ${addr}`);
 }
