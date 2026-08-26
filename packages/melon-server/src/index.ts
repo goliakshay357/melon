@@ -621,6 +621,24 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		}
 	});
 
+	app.get("/settings", async () => ({ settings: loadSettings() }));
+
+	app.put("/settings", async (req, reply) => {
+		const body = req.body as any;
+		if (!body || typeof body !== "object") return reply.code(400).send({ error: "body required" });
+		const cur = loadSettings();
+		const next = { ...cur, ...body };
+		saveSettings(next);
+		return { ok: true, settings: next };
+	});
+
+	app.post("/settings/model", async (req, reply) => {
+		const model = (req.body as any)?.model;
+		if (!model || !model.includes("/")) return reply.code(400).send({ error: "invalid model" });
+		touchRecentModel(model);
+		return { ok: true };
+	});
+
 	app.get("/auth/providers", async () => {
 		const mr = await getModelRuntime();
 		const settingsData = loadSettings();
@@ -708,12 +726,6 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { ok: true };
 	});
 
-	app.post("/settings/model", async (req, reply) => {
-		const model = (req.body as any)?.model;
-		if (!model || !model.includes("/")) return reply.code(400).send({ error: "invalid model" });
-		touchRecentModel(model);
-		return { ok: true };
-	});
 
 
 	// Transcript from ground truth: pi session .jsonl (context-aware, compaction-safe).
