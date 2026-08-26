@@ -104,10 +104,10 @@ export async function buildApp(deps = {}) {
                     });
                 }
                 else if (event.type === "auto_retry_start") {
-                    registry.broadcast(cardId, { type: "raw", text: "provider error — auto-retrying…" });
+                    registry.broadcast(cardId, { type: "raw", text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}` });
                 }
                 else if (event.type === "summarization_retry_scheduled") {
-                    registry.broadcast(cardId, { type: "raw", text: "context overflow — summarizing and retrying…" });
+                    registry.broadcast(cardId, { type: "raw", text: `context overflow — summarizing and retrying: ${event.errorMessage ?? "context limit"}` });
                 }
                 else if (event.type === "compaction_start") {
                     registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
@@ -178,10 +178,10 @@ export async function buildApp(deps = {}) {
                     });
                 }
                 else if (event.type === "auto_retry_start") {
-                    registry.broadcast(cardId, { type: "raw", text: "provider error — auto-retrying…" });
+                    registry.broadcast(cardId, { type: "raw", text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}` });
                 }
                 else if (event.type === "summarization_retry_scheduled") {
-                    registry.broadcast(cardId, { type: "raw", text: "context overflow — summarizing and retrying…" });
+                    registry.broadcast(cardId, { type: "raw", text: `context overflow — summarizing and retrying: ${event.errorMessage ?? "context limit"}` });
                 }
                 else if (event.type === "compaction_start") {
                     registry.broadcast(cardId, { type: "raw", text: "compacting context…" });

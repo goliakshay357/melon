@@ -87,7 +87,7 @@ echo "  ✓ / serves HTML"
 CARD="smoke-$(date +%s)"
 curl -sf -X POST "http://127.0.0.1:$PORT/sessions" \
     -H 'content-type: application/json' \
-    -d "{\"cardId\":\"$CARD\",\"cwd\":\"$ROOT\"}" >/dev/null
+    -d "{\"cardId\":\"$CARD\",\"cwd\":\"$ROOT\",\"model\":\"opencode-go/deepseek-v4-flash\"}" >/dev/null
 (curl -s -N "http://127.0.0.1:$PORT/sessions/$CARD/events" > /tmp/melon-smoke-events.log 2>&1 &)
 sleep 1
 curl -sf -X POST "http://127.0.0.1:$PORT/sessions/$CARD/prompt" \
