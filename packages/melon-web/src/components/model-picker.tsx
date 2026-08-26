@@ -66,11 +66,6 @@ export function ModelPicker({
 
     const select = (model: string) => {
         onChange(model);
-        fetch('/settings/model', {
-            method: 'POST',
-            headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ model }),
-        }).catch(() => {});
         setOpen(false);
     };
 

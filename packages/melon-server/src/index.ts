@@ -90,13 +90,16 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		});
 	}
 
-	async function attachSession(cardId: string, sessionManager: any): Promise<any> {
+	async function attachSession(cardId: string, sessionManager: any, explicitModel?: string): Promise<any> {
 		const runtime = await createRuntimeFor(sessionManager);
 		try {
-			const resolved = getDefaultModel(config.defaultModel);
-			const [provider, id] = resolved.split("/");
+			const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
+			const [provider, id] = wanted.split("/");
 			const model = (await getModelRuntime()).getModel(provider, id);
-			if (model) await runtime.session.setModel(model);
+			if (model) {
+				await runtime.session.setModel(model);
+				touchRecentModel(wanted);
+			}
 			runtime.session.setThinkingLevel(config.defaultThinkingLevel);
 		} catch (e) {
 			console.error("model switch failed:", (e as Error)?.message ?? e);
@@ -256,14 +259,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	}
 
 	app.post("/sessions", async (req, reply) => {
-		const cardId = (req.body as any)?.cardId ?? randomUUID();
+		const body = req.body as any;
+		const cardId = body?.cardId ?? randomUUID();
 		let dir: string;
 		try {
-			dir = assertCwd((req.body as any)?.cwd ?? config.defaultCwd);
+			dir = assertCwd(body?.cwd ?? config.defaultCwd);
 		} catch (e) {
 			return reply.code(400).send({ error: (e as Error).message });
 		}
-		const runtime = await attachSession(cardId, SessionManager.create(dir));
+		const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model);
 		return {
 			cardId,
 			sessionId: runtime.session.sessionId,
@@ -278,7 +282,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const cardId = body?.cardId ?? randomUUID();
 		const sessionFile = body?.sessionFile;
 		if (!sessionFile) return reply.code(400).send({ error: "sessionFile required" });
-		const runtime = await attachSession(cardId, SessionManager.open(sessionFile));
+		const runtime = await attachSession(cardId, SessionManager.open(sessionFile), body?.model);
 		return {
 			cardId,
 			sessionId: runtime.session.sessionId,
@@ -637,6 +641,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			const m = (await getModelRuntime()).getModel(provider, id);
 			if (!m) return reply.code(400).send({ error: `unknown model: ${model}` });
 			await s.runtime.session.setModel(m);
+			touchRecentModel(model);
 			return { ok: true, model };
 		} catch (e) {
 			return reply.code(500).send({ error: (e as Error).message });

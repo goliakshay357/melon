@@ -655,11 +655,11 @@ function ChatCardNodeInner({
                     )}
                     <ProviderPicker
                         model={card.model ?? ''}
-                        onChange={(m) => useCanvasStore.getState().updateCard(id, { model: m })}
+                        onChange={(m) => useCanvasStore.getState().setModel(id, m)}
                     />
                     <ModelPicker
                         value={card.model ?? ''}
-                        onChange={(m) => useCanvasStore.getState().updateCard(id, { model: m })}
+                        onChange={(m) => useCanvasStore.getState().setModel(id, m)}
                     />
                     <select
                         className="cursor-pointer rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none hover:text-foreground"

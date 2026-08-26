@@ -126,6 +126,7 @@ interface CanvasState {
 	forkCard: (parentId: string) => Promise<string>;
 	moveCard: (id: string, position: { x: number; y: number }) => void;
 	updateCard: (id: string, patch: Partial<SessionCard>) => void;
+	setModel: (id: string, model: string) => void;
 	resizeCard: (id: string, width: number, height: number) => void;
 	undo: () => boolean;
 	deleteCards: (ids: string[]) => void;
@@ -404,6 +405,25 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}));
 	},
 
+	// One path for model changes — keeps UI and backend in sync always.
+	setModel(id, model) {
+		get().updateCard(id, { model });
+		// Persist as the new default for future cards.
+		fetch("/settings/model", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ model }),
+		}).catch(() => {});
+		// If this card already has a live session, switch it immediately.
+		if (attached.has(id)) {
+			fetch(`/sessions/${id}/model`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ model }),
+			}).catch(() => {});
+		}
+	},
+
 	undo() {
 		const snapshot = undoStack.pop();
 		if (!snapshot) return false;
@@ -549,7 +569,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					method: "POST",
 					headers: { "content-type": "application/json" },
 					body: JSON.stringify(
-						sessionFile ? { cardId, sessionFile } : { cardId, cwd: opts?.cwd ?? get().folder ?? undefined },
+						sessionFile
+						? { cardId, sessionFile, model: card.model }
+						: { cardId, cwd: opts?.cwd ?? get().folder ?? undefined, model: card.model },
 					),
 				});
 				if (!res.ok) throw new Error(`attach ${res.status}: ${await res.text()}`);
