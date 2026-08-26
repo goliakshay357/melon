@@ -87,128 +87,153 @@ export async function buildApp(deps = {}) {
         let deltaCount = 0;
         const toolTimers = new Map();
         runtime.session.subscribe((event) => {
-            if (event.type === "agent_start") {
-                console.log(`[${cardId}] agent_start`);
-            }
-            else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-                deltaCount++;
-            }
-            else if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_start") {
-                // too chatty to broadcast every one; lifecycle shows via agent_*
-            }
-            else if (event.type === "turn_end") {
-                registry.broadcast(cardId, {
-                    type: "raw",
-                    text: `turn_end (${event.message?.stopReason ?? "done"})`,
-                });
-            }
-            else if (event.type === "auto_retry_start") {
-                registry.broadcast(cardId, { type: "raw", text: "provider error — auto-retrying…" });
-            }
-            else if (event.type === "summarization_retry_scheduled") {
-                registry.broadcast(cardId, { type: "raw", text: "context overflow — summarizing and retrying…" });
-            }
-            else if (event.type === "compaction_start") {
-                registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
-            }
-            else if (event.type === "queue_update") {
-                const q = event;
-                if (q.steering || q.followUp)
-                    registry.broadcast(cardId, {
-                        type: "raw",
-                        text: `queued: ${q.steering ?? ""}${q.followUp ?? ""}`,
-                    });
-            }
-            else if (event.type === "agent_end") {
-                const msgs = event.messages ?? [];
-                const last = msgs[msgs.length - 1];
-                console.log(`[${cardId}] agent_end stopReason=${last?.stopReason} deltas=${deltaCount} usage=in:${last?.usage?.input?.tokens ?? "?"} out:${last?.usage?.output?.tokens ?? "?"}`);
-                // Auto-prune models the provider has removed ("not supported").
-                const errMsg = String(last?.errorMessage ?? "");
-                if (last?.stopReason === "error" && /not supported|no longer|deprecated|unknown model|does not exist/i.test(errMsg)) {
-                    const dead = last?.model ? `${last.provider ?? "?"}/${last.model}` : null;
-                    if (dead && !dead.includes("?/")) {
-                        denylistModel(dead);
-                        console.log(`[${cardId}] denylisted dead model: ${dead}`);
-                    }
+            try {
+                if (event.type === "agent_start") {
+                    console.log(`[${cardId}] agent_start`);
                 }
-                deltaCount = 0;
-                // Release the card as soon as the ANSWER is done. pi's prompt()
-                // promise can linger tens of seconds afterwards (post-run
-                // processing) — holding busy for that blocks the next message.
-                const entry = registry.get(cardId);
-                if (entry)
-                    entry.busy = false;
-            }
-            else if (event.type === "auto_retry_start" || event.type === "summarization_retry_scheduled") {
-                console.log(`[${cardId}] ${event.type}`);
-            }
-            if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
-                registry.broadcast(cardId, {
-                    type: "thinking",
-                    text: event.assistantMessageEvent.delta,
-                });
-            }
-            else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
-                registry.broadcast(cardId, { type: "delta", text: event.assistantMessageEvent.delta });
-            }
-            else if (event.type === "agent_start") {
-                registry.broadcast(cardId, { type: "status", status: "streaming" });
-            }
-            else if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_start") {
-                // too chatty to broadcast every one; lifecycle shows via agent_*
-            }
-            else if (event.type === "turn_end") {
-                registry.broadcast(cardId, {
-                    type: "raw",
-                    text: `turn_end (${event.message?.stopReason ?? "done"})`,
-                });
-                // Structured boundary — clients close the current output segment.
-                registry.broadcast(cardId, { type: "turn_end", stopReason: event.message?.stopReason });
-            }
-            else if (event.type === "auto_retry_start") {
-                registry.broadcast(cardId, { type: "raw", text: "provider error — auto-retrying…" });
-            }
-            else if (event.type === "summarization_retry_scheduled") {
-                registry.broadcast(cardId, { type: "raw", text: "context overflow — summarizing and retrying…" });
-            }
-            else if (event.type === "compaction_start") {
-                registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
-            }
-            else if (event.type === "queue_update") {
-                const q = event;
-                if (q.steering || q.followUp)
+                else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+                    deltaCount++;
+                }
+                else if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_start") {
+                    // too chatty to broadcast every one; lifecycle shows via agent_*
+                }
+                else if (event.type === "turn_end") {
                     registry.broadcast(cardId, {
                         type: "raw",
-                        text: `queued: ${q.steering ?? ""}${q.followUp ?? ""}`,
+                        text: `turn_end (${event.message?.stopReason ?? "done"})`,
                     });
+                }
+                else if (event.type === "auto_retry_start") {
+                    registry.broadcast(cardId, { type: "raw", text: "provider error — auto-retrying…" });
+                }
+                else if (event.type === "summarization_retry_scheduled") {
+                    registry.broadcast(cardId, { type: "raw", text: "context overflow — summarizing and retrying…" });
+                }
+                else if (event.type === "compaction_start") {
+                    registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
+                }
+                else if (event.type === "queue_update") {
+                    const q = event;
+                    if (q.steering || q.followUp)
+                        registry.broadcast(cardId, {
+                            type: "raw",
+                            text: `queued: ${q.steering ?? ""}${q.followUp ?? ""}`,
+                        });
+                }
+                else if (event.type === "agent_end") {
+                    const msgs = event.messages ?? [];
+                    const last = msgs[msgs.length - 1];
+                    console.log(`[${cardId}] agent_end stopReason=${last?.stopReason} deltas=${deltaCount} usage=in:${last?.usage?.input ?? "?"} out:${last?.usage?.output ?? "?"}`);
+                    // Auto-prune models the provider has removed ("not supported").
+                    const errMsg = String(last?.errorMessage ?? "");
+                    if (last?.stopReason === "error" && /not supported|no longer|deprecated|unknown model|does not exist/i.test(errMsg)) {
+                        const dead = last?.model ? `${last.provider ?? "?"}/${last.model}` : null;
+                        if (dead && !dead.includes("?/")) {
+                            denylistModel(dead);
+                            console.log(`[${cardId}] denylisted dead model: ${dead}`);
+                        }
+                    }
+                    deltaCount = 0;
+                    // Release the card as soon as the ANSWER is done. pi's prompt()
+                    // promise can linger tens of seconds afterwards (post-run
+                    // processing) — holding busy for that blocks the next message.
+                    const entry = registry.get(cardId);
+                    if (entry)
+                        entry.busy = false;
+                }
+                else if (event.type === "auto_retry_start" || event.type === "summarization_retry_scheduled") {
+                    console.log(`[${cardId}] ${event.type}`);
+                }
+                if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
+                    registry.broadcast(cardId, {
+                        type: "thinking",
+                        text: event.assistantMessageEvent.delta,
+                    });
+                }
+                else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+                    registry.broadcast(cardId, { type: "delta", text: event.assistantMessageEvent.delta });
+                }
+                else if (event.type === "agent_start") {
+                    registry.broadcast(cardId, { type: "status", status: "streaming" });
+                    registry.broadcast(cardId, {
+                        type: "raw",
+                        text: `▶ agent started — model ${modelToString(runtime.session.model)}`,
+                    });
+                }
+                else if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_start") {
+                    // too chatty to broadcast every one; lifecycle shows via agent_*
+                }
+                else if (event.type === "turn_end") {
+                    const msg = event.message;
+                    registry.broadcast(cardId, {
+                        type: "raw",
+                        text: `turn_end (${msg?.stopReason ?? "done"})`,
+                    });
+                    // Structured boundary — clients close the current output segment.
+                    // Include the real error so the UI can show WHY it failed.
+                    registry.broadcast(cardId, {
+                        type: "turn_end",
+                        stopReason: msg?.stopReason,
+                        error: msg?.errorMessage ?? undefined,
+                    });
+                }
+                else if (event.type === "auto_retry_start") {
+                    registry.broadcast(cardId, { type: "raw", text: "provider error — auto-retrying…" });
+                }
+                else if (event.type === "summarization_retry_scheduled") {
+                    registry.broadcast(cardId, { type: "raw", text: "context overflow — summarizing and retrying…" });
+                }
+                else if (event.type === "compaction_start") {
+                    registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
+                }
+                else if (event.type === "queue_update") {
+                    const q = event;
+                    if (q.steering || q.followUp)
+                        registry.broadcast(cardId, {
+                            type: "raw",
+                            text: `queued: ${q.steering ?? ""}${q.followUp ?? ""}`,
+                        });
+                }
+                else if (event.type === "agent_end") {
+                    registry.broadcast(cardId, { type: "status", status: "idle" });
+                    const msgs = event.messages ?? [];
+                    const lastMsg = msgs[msgs.length - 1];
+                    registry.broadcast(cardId, {
+                        type: "raw",
+                        text: `■ agent ended — ${lastMsg?.stopReason ?? "?"} | model ${lastMsg?.provider ?? "?"}/${lastMsg?.model ?? "?"} | in ${lastMsg?.usage?.input ?? "?"} out ${lastMsg?.usage?.output ?? "?"}`,
+                    });
+                }
+                else if (event.type === "tool_execution_start") {
+                    toolTimers.set(event.toolCallId, Date.now());
+                    registry.broadcast(cardId, {
+                        type: "tool_start",
+                        callId: event.toolCallId,
+                        name: event.toolName,
+                        args: preview(event.args),
+                    });
+                }
+                else if (event.type === "tool_execution_update") {
+                    registry.broadcast(cardId, {
+                        type: "tool_update",
+                        callId: event.toolCallId,
+                        output: preview(event.partialResult),
+                    });
+                }
+                else if (event.type === "tool_execution_end") {
+                    registry.broadcast(cardId, {
+                        type: "tool_end",
+                        callId: event.toolCallId,
+                        isError: event.isError,
+                        output: preview(event.result),
+                    });
+                }
             }
-            else if (event.type === "agent_end") {
-                registry.broadcast(cardId, { type: "status", status: "idle" });
-            }
-            else if (event.type === "tool_execution_start") {
-                toolTimers.set(event.toolCallId, Date.now());
-                registry.broadcast(cardId, {
-                    type: "tool_start",
-                    callId: event.toolCallId,
-                    name: event.toolName,
-                    args: preview(event.args),
-                });
-            }
-            else if (event.type === "tool_execution_update") {
-                registry.broadcast(cardId, {
-                    type: "tool_update",
-                    callId: event.toolCallId,
-                    output: preview(event.partialResult),
-                });
-            }
-            else if (event.type === "tool_execution_end") {
-                registry.broadcast(cardId, {
-                    type: "tool_end",
-                    callId: event.toolCallId,
-                    isError: event.isError,
-                    output: preview(event.result),
-                });
+            catch (e) {
+                console.error(`[${cardId}] event handler threw:`, e);
+                try {
+                    registry.broadcast(cardId, { type: "raw", text: `⚠ handler error: ${e?.message ?? e}` });
+                }
+                catch { }
             }
         });
     }
@@ -836,6 +861,7 @@ export async function buildApp(deps = {}) {
         s.busy = true;
         reply.send({ ok: true });
         console.log(`[${cardId}] prompt:start "${String(req.body?.text).slice(0, 60)}"`);
+        registry.broadcast(cardId, { type: "raw", text: "⬇ prompt received by server" });
         try {
             let text = req.body?.text ?? "";
             if (!s.vizProtocolSent) {

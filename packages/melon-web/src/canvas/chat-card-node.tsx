@@ -7,7 +7,7 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { ArrowUp, BarChart3, Bug, Minimize2, Plus, Square, X } from 'lucide-react';
+import { ArrowUp, BarChart3, Bug, Copy, Minimize2, Plus, Square, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { ModelPicker } from '@/components/model-picker';
@@ -789,21 +789,42 @@ function ChatCardNodeInner({
 
 function DebugConsole({ logs }: { logs: string[] }) {
     const ref = useRef<HTMLDivElement>(null);
+    const [copied, setCopied] = useState(false);
     useEffect(() => {
         if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
     }, [logs.length]);
+    const copyAll = () => {
+        navigator.clipboard
+            .writeText(logs.join('\n'))
+            .then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1500);
+            })
+            .catch(() => {});
+    };
     return (
-        <div className="flex max-h-44 shrink-0 flex-col border-t border-amber-500/25 bg-black/40">
+        <div className="nodrag select-text flex max-h-44 shrink-0 flex-col border-t border-amber-500/25 bg-black/40">
             <div className="flex items-center gap-1.5 px-2 py-1">
                 <Bug className="size-3 text-amber-500" />
                 <span className="text-[9px] font-semibold uppercase tracking-wide text-amber-500">
                     debug console
                 </span>
                 <span className="ml-auto text-[9px] text-muted-foreground">{logs.length} events</span>
+                <button
+                    className="nodrag flex items-center gap-1 rounded px-1 py-0.5 text-[9px] text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        copyAll();
+                    }}
+                    title="Copy all logs to clipboard"
+                >
+                    <Copy className="size-3" />
+                    {copied ? 'copied' : 'copy'}
+                </button>
             </div>
             <div
                 ref={ref}
-                className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 font-mono text-[10px] leading-relaxed text-muted-foreground"
+                className="nodrag nowheel min-h-0 flex-1 select-text overflow-y-auto px-2 pb-2 font-mono text-[10px] leading-relaxed text-muted-foreground"
             >
                 {logs.length === 0 && (
                     <span className="text-muted-foreground/50">no activity yet</span>
@@ -812,7 +833,7 @@ function DebugConsole({ logs }: { logs: string[] }) {
                     <div
                         key={i}
                         className={cn(
-                            'whitespace-pre-wrap break-words',
+                            'select-text whitespace-pre-wrap break-words',
                             line.includes('✗') || line.includes('error') || line.includes('failed')
                                 ? 'text-red-400'
                                 : undefined,

@@ -18,6 +18,7 @@ const streams = new Map<
 		pendingApply?: () => void;
 		thinkingEventId?: string;
 		thinkingStartTs?: number;
+		toolNames?: Map<string, string>;
 	}
 >();
 const attached = new Set<string>(); // cardIds with an existing server-side session
@@ -596,8 +597,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				pushLog(cardId, `✓ attached — model ${info.model ?? "?"}${info.sessionFile ? ` | ${info.sessionFile.split("/").pop()}` : ""}`);
 				// structured attach event emitted below via pushEvent
 			} catch (e) {
-				pushLog(cardId, `✗ ATTACH FAILED: ${e instanceof Error ? e.message : e}`);
-				rollback("could not reach melon server");
+				rollback(`attach failed: ${e instanceof Error ? e.message : e}`);
 				return false;
 			}
 		} else {
@@ -609,7 +609,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		if (!st) {
 			pushLog(cardId, `→ SSE connect`);
 			const es = new EventSource(`/sessions/${cardId}/events`);
-			st = { es, buffer: "", thinkingBuffer: "", segSealed: false, thinkingStartTs: Date.now() };
+			st = { es, buffer: "", thinkingBuffer: "", segSealed: false, thinkingStartTs: Date.now(), toolNames: new Map() };
 			streams.set(cardId, st);
 			es.onopen = () => pushLog(cardId, "✓ SSE open");
 			es.onmessage = (ev) => {
@@ -733,6 +733,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					// The tool call ends this assistant message — any answer that
 					// follows is a NEW output block, not a continuation.
 					st!.segSealed = true;
+					st!.toolNames!.set(data.callId, data.name);
 				} else if (data.type === "tool_update") {
 					// Snapshot — REPLACE, never append.
 					ensureTool({ callId: data.callId, output: data.output });
@@ -751,9 +752,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						detail: data.output.slice(0, 2000),
 						status: data.isError ? "error" : "ok",
 					});
+					const tName = st!.toolNames?.get(data.callId) ?? data.callId.slice(0, 8);
 					pushLog(
 						cardId,
-						`⚙ ${data.callId.slice(0, 8)} ${data.isError ? "✗" : "✓"}${data.durationMs ? ` ${data.durationMs}ms` : ""}`,
+						`⚙ ${tName} ${data.isError ? "✗" : "✓"}${data.durationMs ? ` ${data.durationMs}ms` : ""}${data.isError && data.output ? ` — ${data.output.slice(0, 200)}` : ""}`,
 					);
 				} else if (data.type === "agent_meta") {
 					const meta = `stopReason=${data.stopReason} tokens in:${data.inputTokens ?? "?"} out:${data.outputTokens ?? "?"}`;
