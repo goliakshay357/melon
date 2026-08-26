@@ -593,6 +593,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					model: info.model,
 				});
 				attached.add(cardId);
+				pushLog(cardId, `✓ attached — model ${info.model ?? "?"}${info.sessionFile ? ` | ${info.sessionFile.split("/").pop()}` : ""}`);
 				// structured attach event emitted below via pushEvent
 			} catch (e) {
 				pushLog(cardId, `✗ ATTACH FAILED: ${e instanceof Error ? e.message : e}`);
