@@ -1,13 +1,9 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import { spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
-import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-// Share state with terminal pi (auth, sessions, model catalog) instead of the
-// branded ~/.melon/agent dir, which is a stale incomplete copy.
-const AGENT_DIR = join(homedir(), '.pi', 'agent');
 
 // Spawn the server child on a FREE port (MELON_PORT=0 → OS assigns).
 const serverProc = spawn(
@@ -18,7 +14,6 @@ const serverProc = spawn(
             ...process.env,
             ELECTRON_RUN_AS_NODE: '1',
             MELON_PORT: '0',
-            MELON_CODING_AGENT_DIR: AGENT_DIR,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
     },

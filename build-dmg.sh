@@ -18,10 +18,29 @@ rm -rf server web-dist
 cp -r ../packages/melon-server/dist server
 cp -r ../packages/melon-web/dist web-dist
 
-echo "── 4. package DMG ──"
+echo "── 4. ensure pi-coding-agent matches dev (version + branding) ──"
+node -e '
+const fs = require("fs");
+const path = require("path");
+const root = require(path.join(process.argv[1], "node_modules/@earendil-works/pi-coding-agent/package.json"));
+const dp = path.join(process.argv[1], "desktop/node_modules/@earendil-works/pi-coding-agent/package.json");
+const d = JSON.parse(fs.readFileSync(dp, "utf8"));
+const pc = d.piConfig || {};
+if (d.version !== root.version) {
+  console.error(`  ✗ desktop pi-coding-agent is v${d.version}, dev is v${root.version}. Run: cd desktop && npm install`);
+  process.exit(1);
+}
+if (pc.name || pc.configDir !== ".pi") {
+  console.error(`  ✗ desktop pi-coding-agent is branded (${JSON.stringify(pc)}). It must match dev: {"configDir":".pi"}`);
+  process.exit(1);
+}
+console.log(`  ✓ pi-coding-agent matches dev (v${root.version}, configDir .pi)`);
+' "$ROOT"
+
+echo "── 5. package DMG ──"
 npx electron-builder --mac
 
-echo "── 5. smoke test the packaged app ──"
+echo "── 6. smoke test the packaged app ──"
 pkill -f "Melon.app/Contents/MacOS/Melon" 2>/dev/null || true
 sleep 2
 LOG=/tmp/melon-smoke.log

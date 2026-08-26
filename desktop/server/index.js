@@ -64,14 +64,16 @@ export async function buildApp(deps = {}) {
             sessionManager,
         });
     }
-    async function attachSession(cardId, sessionManager) {
+    async function attachSession(cardId, sessionManager, explicitModel) {
         const runtime = await createRuntimeFor(sessionManager);
         try {
-            const resolved = getDefaultModel(config.defaultModel);
-            const [provider, id] = resolved.split("/");
+            const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
+            const [provider, id] = wanted.split("/");
             const model = (await getModelRuntime()).getModel(provider, id);
-            if (model)
+            if (model) {
                 await runtime.session.setModel(model);
+                touchRecentModel(wanted);
+            }
             runtime.session.setThinkingLevel(config.defaultThinkingLevel);
         }
         catch (e) {
@@ -245,15 +247,16 @@ export async function buildApp(deps = {}) {
         return dir;
     }
     app.post("/sessions", async (req, reply) => {
-        const cardId = req.body?.cardId ?? randomUUID();
+        const body = req.body;
+        const cardId = body?.cardId ?? randomUUID();
         let dir;
         try {
-            dir = assertCwd(req.body?.cwd ?? config.defaultCwd);
+            dir = assertCwd(body?.cwd ?? config.defaultCwd);
         }
         catch (e) {
             return reply.code(400).send({ error: e.message });
         }
-        const runtime = await attachSession(cardId, SessionManager.create(dir));
+        const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model);
         return {
             cardId,
             sessionId: runtime.session.sessionId,
@@ -268,7 +271,7 @@ export async function buildApp(deps = {}) {
         const sessionFile = body?.sessionFile;
         if (!sessionFile)
             return reply.code(400).send({ error: "sessionFile required" });
-        const runtime = await attachSession(cardId, SessionManager.open(sessionFile));
+        const runtime = await attachSession(cardId, SessionManager.open(sessionFile), body?.model);
         return {
             cardId,
             sessionId: runtime.session.sessionId,
@@ -628,6 +631,7 @@ export async function buildApp(deps = {}) {
             if (!m)
                 return reply.code(400).send({ error: `unknown model: ${model}` });
             await s.runtime.session.setModel(m);
+            touchRecentModel(model);
             return { ok: true, model };
         }
         catch (e) {
