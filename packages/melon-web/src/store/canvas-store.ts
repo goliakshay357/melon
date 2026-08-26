@@ -409,6 +409,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
 	// One path for model changes — keeps UI and backend in sync always.
 	setModel(id, model) {
+		const prev = get().cards.find((c) => c.id === id)?.model;
 		get().updateCard(id, { model });
 		// Persist as the new default for future cards.
 		fetch("/settings/model", {
@@ -417,6 +418,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			body: JSON.stringify({ model }),
 		}).catch(() => {});
 		// If this card already has a live session, switch it immediately.
+		// On failure, REVERT the card's model so UI never lies about the backend.
 		if (attached.has(id)) {
 			fetch(`/sessions/${id}/model`, {
 				method: "POST",
@@ -426,10 +428,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				.then(async (r) => {
 					if (!r.ok) {
 						const d = await r.json().catch(() => ({} as any));
-						pushLog(id, `✗ model switch failed: ${d.error ?? r.status}`);
+						pushLog(id, `✗ model switch failed: ${d.error ?? r.status} — keeping ${prev ?? "current model"}`);
+						get().updateCard(id, { model: prev });
+					} else {
+						pushLog(id, `✓ model switched to ${model}`);
 					}
 				})
-				.catch((e) => pushLog(id, `✗ model switch failed: ${e instanceof Error ? e.message : e}`));
+				.catch((e) => {
+					pushLog(id, `✗ model switch failed: ${e instanceof Error ? e.message : e} — keeping ${prev ?? "current model"}`);
+					get().updateCard(id, { model: prev });
+				});
 		}
 	},
 
