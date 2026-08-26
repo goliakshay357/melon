@@ -11,7 +11,7 @@
 //   POST /sessions/:cardId/abort
 
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import {
@@ -23,9 +23,12 @@ import {
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import cors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import { expandHome, loadConfig, type MelonConfig, modelToString, preview } from "./config.ts";
 import { SessionRegistry } from "./session-registry.ts";
+import { loadSettings, saveSettings, touchRecentModel } from "./settings.js";
+
 
 let _modelRuntime: ModelRuntime | undefined;
 async function getModelRuntime(): Promise<ModelRuntime> {
@@ -618,6 +621,100 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		}
 	});
 
+	app.get("/auth/providers", async () => {
+		const mr = await getModelRuntime();
+		const settingsData = loadSettings();
+		const melonKeys: Record<string, string> = settingsData.providerKeys ?? {};
+
+		let authEntries: Record<string, any> = {};
+		try {
+			authEntries = JSON.parse(readFileSync(join(getAgentDir(), "auth.json"), "utf8"));
+		} catch {}
+
+		function maskKey(key: string): string {
+			return key.length > 10 ? `${key.slice(0, 6)}…${key.slice(-4)}` : `${key.slice(0, 4)}…`;
+		}
+
+		const allProviderIds = new Set<string>();
+		for (const m of mr.getModels()) allProviderIds.add(m.provider);
+		for (const pid of Object.keys(authEntries)) allProviderIds.add(pid);
+
+		const result: Array<{
+			id: string;
+			provider: string;
+			configured: boolean;
+			source?: string;
+			keyPreview?: string;
+			authType?: string;
+		}> = [];
+
+		for (const pid of [...allProviderIds].sort()) {
+			const status = mr.getProviderAuthStatus(pid);
+			const entry = authEntries[pid];
+			const melonKey = melonKeys[pid];
+
+			let keyPreview: string | undefined;
+			let authType: string | undefined;
+
+			if (entry) {
+				authType = entry.type ?? undefined;
+				if (entry.type === "api_key" && typeof entry.key === "string")
+					keyPreview = maskKey(entry.key);
+				else if (entry.type === "oauth" && typeof entry.access === "string")
+					keyPreview = maskKey(entry.access);
+			} else if (melonKey) {
+				keyPreview = maskKey(melonKey);
+				authType = "api_key";
+			}
+
+			result.push({
+				id: pid,
+				provider: pid,
+				configured: !!status.configured,
+				source: (status as any).source ?? undefined,
+				keyPreview,
+				authType,
+			});
+		}
+
+		result.sort((a, b) => {
+			if (a.configured !== b.configured) return a.configured ? -1 : 1;
+			return a.id.localeCompare(b.id);
+		});
+		return result;
+	});
+
+	app.post("/auth/:provider/key", async (req, reply) => {
+		const provider = (req.params as any).provider;
+		const key = (req.body as any)?.key;
+		if (!key) return reply.code(400).send({ error: "key required" });
+		try {
+			await (await getModelRuntime()).setRuntimeApiKey(provider, key);
+			const st = loadSettings();
+			st.providerKeys = { ...(st.providerKeys ?? {}), [provider]: key };
+			saveSettings(st);
+			return { ok: true };
+		} catch (e) {
+			return reply.code(500).send({ error: (e as Error).message });
+		}
+	});
+
+	app.delete("/auth/:provider", async (req) => {
+		const provider = (req.params as any).provider;
+		await (await getModelRuntime()).removeRuntimeApiKey(provider);
+		const st = loadSettings();
+		if (st.providerKeys) delete st.providerKeys[provider];
+		saveSettings(st);
+		return { ok: true };
+	});
+
+	app.post("/settings/model", async (req, reply) => {
+		const model = (req.body as any)?.model;
+		if (!model || !model.includes("/")) return reply.code(400).send({ error: "invalid model" });
+		touchRecentModel(model);
+		return { ok: true };
+	});
+
 
 	// Transcript from ground truth: pi session .jsonl (context-aware, compaction-safe).
 	app.get("/transcript", async (req, reply) => {
@@ -740,6 +837,20 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const s = registry.get((req.params as any).cardId);
 		await s?.runtime.session.abort();
 	});
+
+
+
+	// Serve web UI in production (when web-dist exists next to server)
+	const webDist = join(process.cwd(), "web-dist");
+	if (existsSync(join(webDist, "index.html"))) {
+		await app.register(fastifyStatic, { root: webDist });
+		app.setNotFoundHandler((req, reply) => {
+			if (req.method === "GET") {
+				return reply.type("text/html").send(readFileSync(join(webDist, "index.html")));
+			}
+			reply.code(404).send({ error: "not found" });
+		});
+	}
 
 	return app;
 }

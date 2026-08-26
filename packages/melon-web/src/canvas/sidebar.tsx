@@ -16,7 +16,6 @@ import { askText, confirmAction } from '@/components/dialogs';
 import { SettingsDialog } from '@/components/settings-dialog';
 import { cn } from '@/lib/utils';
 
-const MELON_API = 'http://127.0.0.1:8788';
 
 
 export function Sidebar() {
@@ -38,13 +37,13 @@ export function Sidebar() {
 
     const loadTree = useCallback(async () => {
         try {
-            const fr = await fetch(`${MELON_API}/folders`).then((r) => r.json());
+            const fr = await fetch(`/folders`).then((r) => r.json());
             const list = (fr.folders ?? []) as Array<{ cwd: string; lastOpenedAt: string }>;
             setFolders(list);
             const entries = await Promise.all(
                 list.map(async (f) => {
                     const tr = await fetch(
-                        `${MELON_API}/tree?cwd=${encodeURIComponent(f.cwd)}`,
+                        `/tree?cwd=${encodeURIComponent(f.cwd)}`,
                     ).then((r) => r.json());
                     return [f.cwd, { canvases: tr.canvases ?? [], loose: tr.loose ?? [] }] as const;
                 }),
@@ -91,7 +90,7 @@ export function Sidebar() {
                 }
                 return;
             }
-            const res = await fetch(`${MELON_API}/pick-folder`, { method: 'POST' });
+            const res = await fetch(`/pick-folder`, { method: 'POST' });
             if (res.ok) {
                 const { path } = await res.json();
                 if (path) {
@@ -127,7 +126,7 @@ export function Sidebar() {
             localStorage.removeItem('melon:lastCanvas');
             useCanvasStore.setState({ cards: [], canvasId: null, canvasName: '' });
         }
-        await fetch(`${MELON_API}/canvases/${id}?cwd=${encodeURIComponent(cwd)}`, {
+        await fetch(`/canvases/${id}?cwd=${encodeURIComponent(cwd)}`, {
             method: 'DELETE',
         });
         loadTree();

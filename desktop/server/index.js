@@ -9,15 +9,17 @@
 //   GET  /sessions/:cardId/events     SSE                   → delta | status | tool | error
 //   POST /sessions/:cardId/prompt     {text}                → {ok}
 //   POST /sessions/:cardId/abort
-import cors from "@fastify/cors";
-import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, writeFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { ModelRuntime, SessionManager, createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, getAgentDir, } from "@earendil-works/pi-coding-agent";
+import { join } from "node:path";
+import { createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, getAgentDir, ModelRuntime, SessionManager, } from "@earendil-works/pi-coding-agent";
+import cors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
+import Fastify from "fastify";
 import { expandHome, loadConfig, modelToString, preview } from "./config.js";
 import { SessionRegistry } from "./session-registry.js";
+import { loadSettings, saveSettings, touchRecentModel } from "./settings.js";
 let _modelRuntime;
 async function getModelRuntime() {
     if (!_modelRuntime)
@@ -30,13 +32,14 @@ export async function buildApp(deps = {}) {
         "",
         "[VISUALIZATION PROTOCOL - melon canvas]",
         "You explain on a visual canvas. When a visual genuinely aids understanding, include:",
-        '1. ```mermaid fenced blocks for flowcharts / sequence / state diagrams.',
         "2. ```viz-html fenced blocks for interactive 3D/animated scenes.",
         "viz-html contract (STRICT):",
         "- ONE complete self-contained HTML document per block.",
         '- Load three.js via <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js"}}</script> then import * as THREE from \'three\'.',
         "- Inline all CSS/JS. Dark theme: background #161b22, readable colors.",
-        "- Animation via requestAnimationFrame; canvas fills window; no external files.",
+        "- Animation via requestAnimationFrame; no external files.",
+        "- NEVER emit mermaid, flowchart, or ASCII-art diagrams (e.g. flowchart TB). They render badly. For diagrams use a viz-html scene instead; otherwise explain in prose.",
+        "- VIEWPORT: your HTML renders in a frame ~380px wide x 320px tall (auto-height up to 700px). Design for that: vertical stacking, nothing critical below 300px height. ABSOLUTELY NO horizontal overflow — set body { overflow-x: hidden } and keep all elements within 100% width.",
         "Keep prose explanation around the blocks.",
     ].join("\n");
     const app = Fastify({ logger: false });
@@ -78,6 +81,7 @@ export async function buildApp(deps = {}) {
     }
     function wireEvents(cardId, runtime) {
         let deltaCount = 0;
+        const toolTimers = new Map();
         runtime.session.subscribe((event) => {
             if (event.type === "agent_start") {
                 console.log(`[${cardId}] agent_start`);
@@ -85,10 +89,8 @@ export async function buildApp(deps = {}) {
             else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
                 deltaCount++;
             }
-            else if (event.type === "message_start" ||
-                event.type === "message_end" ||
-                event.type === "turn_start") {
-                // too chatty to broadcast every one; lifecycle shows via agent_* 
+            else if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_start") {
+                // too chatty to broadcast every one; lifecycle shows via agent_*
             }
             else if (event.type === "turn_end") {
                 registry.broadcast(cardId, {
@@ -140,16 +142,16 @@ export async function buildApp(deps = {}) {
             else if (event.type === "agent_start") {
                 registry.broadcast(cardId, { type: "status", status: "streaming" });
             }
-            else if (event.type === "message_start" ||
-                event.type === "message_end" ||
-                event.type === "turn_start") {
-                // too chatty to broadcast every one; lifecycle shows via agent_* 
+            else if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_start") {
+                // too chatty to broadcast every one; lifecycle shows via agent_*
             }
             else if (event.type === "turn_end") {
                 registry.broadcast(cardId, {
                     type: "raw",
                     text: `turn_end (${event.message?.stopReason ?? "done"})`,
                 });
+                // Structured boundary — clients close the current output segment.
+                registry.broadcast(cardId, { type: "turn_end", stopReason: event.message?.stopReason });
             }
             else if (event.type === "auto_retry_start") {
                 registry.broadcast(cardId, { type: "raw", text: "provider error — auto-retrying…" });
@@ -172,6 +174,7 @@ export async function buildApp(deps = {}) {
                 registry.broadcast(cardId, { type: "status", status: "idle" });
             }
             else if (event.type === "tool_execution_start") {
+                toolTimers.set(event.toolCallId, Date.now());
                 registry.broadcast(cardId, {
                     type: "tool_start",
                     callId: event.toolCallId,
@@ -319,7 +322,11 @@ export async function buildApp(deps = {}) {
         let s = registry.get(parentCardId);
         // Card not live (e.g. server restarted)? Re-open it from disk.
         if (!s && body?.sessionFile) {
-            s = { runtime: await createRuntimeFor(SessionManager.open(body.sessionFile)), clients: new Set(), busy: false };
+            s = {
+                runtime: await createRuntimeFor(SessionManager.open(body.sessionFile)),
+                clients: new Set(),
+                busy: false,
+            };
         }
         if (!s)
             return reply.code(404).send({ error: "unknown card" });
@@ -368,12 +375,20 @@ export async function buildApp(deps = {}) {
                     continue;
                 try {
                     const raw = JSON.parse(readFileSync(join(cvDir2, f), "utf8"));
-                    out.push({ id: raw.id ?? f.replace(/\.json$/, ""), name: raw.name ?? "Untitled", modified: raw.modified ?? "" });
+                    out.push({
+                        id: raw.id ?? f.replace(/\.json$/, ""),
+                        name: raw.name ?? "Untitled",
+                        modified: raw.modified ?? "",
+                    });
                 }
-                catch { /* skip corrupt */ }
+                catch {
+                    /* skip corrupt */
+                }
             }
         }
-        catch { /* no workspaces yet */ }
+        catch {
+            /* no workspaces yet */
+        }
         return { canvases: out };
     });
     // Delete a canvas file.
@@ -421,6 +436,22 @@ export async function buildApp(deps = {}) {
         const ws = body?.canvas ?? body?.workspace; // accept legacy key
         if (!ws?.id)
             return reply.code(400).send({ error: "canvas.id required" });
+        // DATA GUARD: refuse to overwrite a populated canvas with an empty one.
+        const existingFile = join(canvasesDir(dir), `${ws.id}.json`);
+        try {
+            const existing = JSON.parse(readFileSync(existingFile, "utf8"));
+            if ((!Array.isArray(ws.cards) || ws.cards.length === 0) &&
+                Array.isArray(existing.cards) &&
+                existing.cards.length > 0) {
+                return reply.code(409).send({
+                    error: "refusing to overwrite populated canvas with empty state",
+                    existingCards: existing.cards.length,
+                });
+            }
+        }
+        catch {
+            /* no existing file — fine */
+        }
         const cvDir2 = canvasesDir(dir);
         const { mkdirSync, writeFileSync } = await import("node:fs");
         mkdirSync(cvDir2, { recursive: true });
@@ -480,10 +511,14 @@ export async function buildApp(deps = {}) {
                     });
                     canvases.push({ id: cv.id, name: cv.name ?? "Untitled", sessions });
                 }
-                catch { /* skip corrupt */ }
+                catch {
+                    /* skip corrupt */
+                }
             }
         }
-        catch { /* no canvases dir */ }
+        catch {
+            /* no canvases dir */
+        }
         const all = (await SessionManager.list(dir));
         const loose = all
             .filter((s) => !bound.has(s.path))
@@ -529,7 +564,7 @@ export async function buildApp(deps = {}) {
         const [cmd, ...args] = commands[process.platform] ?? commands.linux;
         try {
             const stdout = await new Promise((resolve, reject) => {
-                execFile(cmd, args, { timeout: 120000 }, (err, out) => err ? reject(err) : resolve(String(out)));
+                execFile(cmd, args, { timeout: 120000 }, (err, out) => (err ? reject(err) : resolve(String(out))));
             });
             const path = stdout.trim().replace(/\/$/, "");
             if (!path)
@@ -546,6 +581,189 @@ export async function buildApp(deps = {}) {
                 return reply.code(409).send({ cancelled: true });
             }
             return reply.code(500).send({ error: msg });
+        }
+    });
+    // Available models for the picker.
+    app.get("/models", async () => {
+        const mr = await getModelRuntime();
+        const models = mr.getModels().map((m) => ({
+            label: `${m.provider}/${m.id}`,
+            provider: m.provider,
+            id: m.id,
+        }));
+        return { models };
+    });
+    // Switch model on a live card session.
+    app.post("/sessions/:cardId/model", async (req, reply) => {
+        const s = registry.get(req.params.cardId);
+        if (!s)
+            return reply.code(404).send({ error: "unknown card" });
+        const model = String(req.body?.model ?? "");
+        const [provider, id] = model.split("/");
+        if (!provider || !id)
+            return reply.code(400).send({ error: "model must be provider/id" });
+        try {
+            const m = (await getModelRuntime()).getModel(provider, id);
+            if (!m)
+                return reply.code(400).send({ error: `unknown model: ${model}` });
+            await s.runtime.session.setModel(m);
+            return { ok: true, model };
+        }
+        catch (e) {
+            return reply.code(500).send({ error: e.message });
+        }
+    });
+    app.get("/auth/providers", async () => {
+        const mr = await getModelRuntime();
+        const settingsData = loadSettings();
+        const melonKeys = settingsData.providerKeys ?? {};
+        let authEntries = {};
+        try {
+            authEntries = JSON.parse(readFileSync(join(getAgentDir(), "auth.json"), "utf8"));
+        }
+        catch { }
+        function maskKey(key) {
+            return key.length > 10 ? `${key.slice(0, 6)}…${key.slice(-4)}` : `${key.slice(0, 4)}…`;
+        }
+        const allProviderIds = new Set();
+        for (const m of mr.getModels())
+            allProviderIds.add(m.provider);
+        for (const pid of Object.keys(authEntries))
+            allProviderIds.add(pid);
+        const result = [];
+        for (const pid of [...allProviderIds].sort()) {
+            const status = mr.getProviderAuthStatus(pid);
+            const entry = authEntries[pid];
+            const melonKey = melonKeys[pid];
+            let keyPreview;
+            let authType;
+            if (entry) {
+                authType = entry.type ?? undefined;
+                if (entry.type === "api_key" && typeof entry.key === "string")
+                    keyPreview = maskKey(entry.key);
+                else if (entry.type === "oauth" && typeof entry.access === "string")
+                    keyPreview = maskKey(entry.access);
+            }
+            else if (melonKey) {
+                keyPreview = maskKey(melonKey);
+                authType = "api_key";
+            }
+            result.push({
+                id: pid,
+                provider: pid,
+                configured: !!status.configured,
+                source: status.source ?? undefined,
+                keyPreview,
+                authType,
+            });
+        }
+        result.sort((a, b) => {
+            if (a.configured !== b.configured)
+                return a.configured ? -1 : 1;
+            return a.id.localeCompare(b.id);
+        });
+        return result;
+    });
+    app.post("/auth/:provider/key", async (req, reply) => {
+        const provider = req.params.provider;
+        const key = req.body?.key;
+        if (!key)
+            return reply.code(400).send({ error: "key required" });
+        try {
+            await (await getModelRuntime()).setRuntimeApiKey(provider, key);
+            const st = loadSettings();
+            st.providerKeys = { ...(st.providerKeys ?? {}), [provider]: key };
+            saveSettings(st);
+            return { ok: true };
+        }
+        catch (e) {
+            return reply.code(500).send({ error: e.message });
+        }
+    });
+    app.delete("/auth/:provider", async (req) => {
+        const provider = req.params.provider;
+        await (await getModelRuntime()).removeRuntimeApiKey(provider);
+        const st = loadSettings();
+        if (st.providerKeys)
+            delete st.providerKeys[provider];
+        saveSettings(st);
+        return { ok: true };
+    });
+    app.post("/settings/model", async (req, reply) => {
+        const model = req.body?.model;
+        if (!model || !model.includes("/"))
+            return reply.code(400).send({ error: "invalid model" });
+        touchRecentModel(model);
+        return { ok: true };
+    });
+    // Transcript from ground truth: pi session .jsonl (context-aware, compaction-safe).
+    app.get("/transcript", async (req, reply) => {
+        const q = req.query;
+        const file = q.sessionFile ? expandHome(q.sessionFile) : undefined;
+        if (!file || statSync(file, { throwIfNoEntry: false })?.isFile() !== true) {
+            return reply.code(400).send({ error: "valid sessionFile required" });
+        }
+        try {
+            const sm = SessionManager.open(file);
+            const ctx = sm.buildContextEntries();
+            const clean = (t) => t
+                .split("\n[VISUALIZATION PROTOCOL")[0]
+                .split("\n[VIZ MODE IS ON")[0]
+                .split("\n[READ-ONLY MODE")[0]
+                .trim();
+            const textOf = (content) => (Array.isArray(content) ? content : [])
+                .filter((b) => b.type === "text")
+                .map((b) => b.text)
+                .join("");
+            const messages = [];
+            for (const e of ctx) {
+                if (e.type !== "message")
+                    continue;
+                const m = e.message;
+                if (m.role === "user") {
+                    const text = clean(textOf(m.content));
+                    if (text)
+                        messages.push({ role: "user", text });
+                }
+                else if (m.role === "assistant") {
+                    let text = "";
+                    let thinking = "";
+                    for (const b of m.content ?? []) {
+                        if (b.type === "text")
+                            text += b.text;
+                        else if (b.type === "thinking")
+                            thinking += b.thinking ?? "";
+                    }
+                    if (text.trim() || thinking.trim())
+                        messages.push({
+                            role: "assistant",
+                            text: text.trim(),
+                            thinking: thinking.trim() || undefined,
+                        });
+                }
+                else if (m.role === "toolResult") {
+                    const lastA = [...messages].reverse().find((x) => x.role === "assistant");
+                    if (lastA) {
+                        lastA.tools = lastA.tools ?? [];
+                        if (!lastA.tools.some((t) => t.callId === m.toolCallId)) {
+                            lastA.tools.push({
+                                callId: m.toolCallId,
+                                name: m.toolName ?? "tool",
+                                status: m.isError ? "error" : "ok",
+                                output: textOf(m.content).slice(0, 4000),
+                            });
+                        }
+                    }
+                }
+            }
+            return {
+                sessionId: sm.getSessionId(),
+                cwd: sm.getCwd(),
+                messages,
+            };
+        }
+        catch (e) {
+            return reply.code(500).send({ error: e.message });
         }
     });
     app.get("/sessions/:cardId/events", (req, reply) => {
@@ -567,12 +785,21 @@ export async function buildApp(deps = {}) {
         const s = registry.get(req.params.cardId);
         if (!s)
             return reply.code(404).send({ error: "unknown card" });
-        if (s.busy)
-            return reply.code(409).send({ error: "card is streaming" });
-        s.busy = true;
-        reply.send({ ok: true });
         const cardId = req.params.cardId;
         const started = Date.now();
+        // Busy? Queue via pi's followUp — runs automatically when current work ends.
+        if (s.busy) {
+            try {
+                await s.runtime.session.followUp(req.body?.text ?? "");
+                reply.send({ ok: true, queued: true });
+            }
+            catch (e) {
+                reply.code(500).send({ error: e.message });
+            }
+            return;
+        }
+        s.busy = true;
+        reply.send({ ok: true });
         console.log(`[${cardId}] prompt:start "${String(req.body?.text).slice(0, 60)}"`);
         try {
             let text = req.body?.text ?? "";
@@ -596,6 +823,17 @@ export async function buildApp(deps = {}) {
         const s = registry.get(req.params.cardId);
         await s?.runtime.session.abort();
     });
+    // Serve web UI in production (when web-dist exists next to server)
+    const webDist = join(process.cwd(), "web-dist");
+    if (existsSync(join(webDist, "index.html"))) {
+        await app.register(fastifyStatic, { root: webDist });
+        app.setNotFoundHandler((req, reply) => {
+            if (req.method === "GET") {
+                return reply.type("text/html").send(readFileSync(join(webDist, "index.html")));
+            }
+            reply.code(404).send({ error: "not found" });
+        });
+    }
     return app;
 }
 // Run directly? (vs imported by tests)

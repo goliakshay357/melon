@@ -2,7 +2,6 @@ import { nanoid } from "nanoid";
 import { create } from "zustand";
 import { type ChatMessage, newCardId, type SessionCard, type ToolRun } from "@/types/session-card";
 
-const MELON_API = "http://127.0.0.1:8788";
 
 // cardId → live SSE stream state
 const streams = new Map<
@@ -170,7 +169,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		let canvases: CanvasMeta[] | null = null;
 		for (let attempt = 0; attempt < 5; attempt++) {
 			try {
-				const res = await fetch(`${MELON_API}/canvases?cwd=${encodeURIComponent(folder)}`);
+				const res = await fetch(`/canvases?cwd=${encodeURIComponent(folder)}`);
 				if (res.ok) {
 					canvases = (await res.json()).canvases ?? [];
 					break;
@@ -201,11 +200,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const trimmed = name.trim();
 		if (!trimmed || !cwd || !canvasId) return;
 		try {
-			const res = await fetch(`${MELON_API}/canvases/${canvasId}?cwd=${encodeURIComponent(cwd)}`);
+			const res = await fetch(`/canvases/${canvasId}?cwd=${encodeURIComponent(cwd)}`);
 			if (!res.ok) return;
 			const data = await res.json();
 			data.name = trimmed;
-			const put = await fetch(`${MELON_API}/canvases/${canvasId}`, {
+			const put = await fetch(`/canvases/${canvasId}`, {
 				method: "PUT",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({ cwd, canvas: data }),
@@ -232,7 +231,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		} catch {
 			/* quota — non-fatal */
 		}
-		await fetch(`${MELON_API}/canvases/${canvasId}`, {
+		await fetch(`/canvases/${canvasId}`, {
 			method: "PUT",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
@@ -251,7 +250,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	async switchCanvas(id) {
 		const folder = get().folder;
 		if (!folder) return;
-		const res = await fetch(`${MELON_API}/canvases/${id}?cwd=${encodeURIComponent(folder)}`).catch(() => null);
+		const res = await fetch(`/canvases/${id}?cwd=${encodeURIComponent(folder)}`).catch(() => null);
 		if (!res?.ok) return;
 		const cv = await res.json();
 		set({
@@ -274,14 +273,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		localStorage.setItem("melon:lastCanvas", id);
 		await get().saveCanvas();
 		// refresh list
-		const res = await fetch(`${MELON_API}/canvases?cwd=${encodeURIComponent(get().folder ?? "")}`).catch(() => null);
+		const res = await fetch(`/canvases?cwd=${encodeURIComponent(get().folder ?? "")}`).catch(() => null);
 		if (res?.ok) set({ canvases: (await res.json()).canvases ?? [] });
 	},
 
 	async openFolder(rawFolder) {
 		set({ folder: rawFolder, canvases: [], cards: [], canvasId: null });
 		localStorage.setItem("melon:lastFolder", rawFolder);
-		const res = await fetch(`${MELON_API}/canvases?cwd=${encodeURIComponent(rawFolder)}`).catch(() => null);
+		const res = await fetch(`/canvases?cwd=${encodeURIComponent(rawFolder)}`).catch(() => null);
 		let canvases: CanvasMeta[] = [];
 		if (res?.ok) canvases = (await res.json()).canvases ?? [];
 		set({ canvases });
@@ -323,7 +322,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
 		// Ask the server to clone the pi session (root→leaf → new .jsonl).
 		try {
-			const res = await fetch(`${MELON_API}/sessions/${parentId}/fork`, {
+			const res = await fetch(`/sessions/${parentId}/fork`, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
@@ -396,14 +395,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const cardId = newCardId();
 		let transcript: any = null;
 		try {
-			const res = await fetch(`${MELON_API}/sessions/resume`, {
+			const res = await fetch(`/sessions/resume`, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({ cardId, sessionFile }),
 			});
 			if (!res.ok) throw new Error(await res.text());
 			transcript = await fetch(
-				`${MELON_API}/transcript?sessionFile=${encodeURIComponent(sessionFile)}`,
+				`/transcript?sessionFile=${encodeURIComponent(sessionFile)}`,
 			).then((r) => r.json());
 		} catch {
 			return null;
@@ -459,7 +458,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
         if (!file) return;
         try {
             const res = await fetch(
-                `${MELON_API}/transcript?sessionFile=${encodeURIComponent(file)}`,
+                `/transcript?sessionFile=${encodeURIComponent(file)}`,
             );
             if (!res.ok) return;
             const d = await res.json();
@@ -504,7 +503,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		// ── 1. attach (idempotent, resume-first) ──
 		if (!attached.has(cardId)) {
 			const sessionFile = opts?.sessionFile ?? card.sessionFile;
-			const url = sessionFile ? `${MELON_API}/sessions/resume` : `${MELON_API}/sessions`;
+			const url = sessionFile ? `/sessions/resume` : `/sessions`;
 			pushLog(
 				cardId,
 				`→ ATTACH ${sessionFile ? `RESUME ${sessionFile.split("/").pop()}` : `NEW cwd=${opts?.cwd ?? "(default)"}`}`,
@@ -542,7 +541,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		let st = streams.get(cardId);
 		if (!st) {
 			pushLog(cardId, `→ SSE connect`);
-			const es = new EventSource(`${MELON_API}/sessions/${cardId}/events`);
+			const es = new EventSource(`/sessions/${cardId}/events`);
 			st = { es, buffer: "", thinkingBuffer: "", segSealed: false, thinkingStartTs: Date.now() };
 			streams.set(cardId, st);
 			es.onopen = () => pushLog(cardId, "✓ SSE open");
@@ -803,7 +802,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		pushLog(cardId, `→ PROMPT "${text.slice(0, 40)}"`);
 		let pres: Response;
 		try {
-			pres = await fetch(`${MELON_API}/sessions/${cardId}/prompt`, {
+			pres = await fetch(`/sessions/${cardId}/prompt`, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({

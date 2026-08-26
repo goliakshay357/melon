@@ -443,7 +443,7 @@ function ChatCardNodeInner({
 
     useEffect(() => {
         if (models.length > 0) return;
-        fetch('http://127.0.0.1:8788/models')
+        fetch('/models')
             .then((r) => r.json())
             .then((d) => setModels(d.models ?? []))
             .catch(() => {});
@@ -456,7 +456,7 @@ function ChatCardNodeInner({
     };
 
     const abortStream = () => {
-        fetch(`http://127.0.0.1:8788/sessions/${id}/abort`, { method: 'POST' }).catch(() => {});
+        fetch(`/sessions/${id}/abort`, { method: 'POST' }).catch(() => {});
     };
 
     useEffect(() => {

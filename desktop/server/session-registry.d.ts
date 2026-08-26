@@ -4,6 +4,7 @@ export interface AttachedSession {
     clients: Set<FastifyReply>;
     busy: boolean;
     vizProtocolSent?: boolean;
+    lastViz?: boolean;
 }
 export declare class SessionRegistry {
     private readonly sessions;
