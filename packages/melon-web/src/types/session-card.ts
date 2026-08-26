@@ -55,6 +55,8 @@ export interface SessionCard {
 	logs?: string[]; // live pipe trace, newest last
 	/** Show the on-card debug console (logs). Defaults ON. */
 	debug?: boolean;
+	/** Prominent error banner — the current failure reason, if any. */
+	error?: string;
 	/** Visualization-first mode: agent explains with diagrams/scenes. */
 	vizMode?: boolean;
 	/** Workspace permission for the agent. */

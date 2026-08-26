@@ -743,6 +743,24 @@ function ChatCardNodeInner({
                 <Handle type="source" position={Position.Bottom} className="!opacity-0" />
 
                 {header(false)}
+                {card.error && (
+                    <div className="nodrag flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-3 py-2">
+                        <span className="shrink-0 text-xs">⚠️</span>
+                        <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-red-300">
+                            {card.error}
+                        </span>
+                        <button
+                            className="nodrag shrink-0 rounded p-0.5 text-red-400 transition-colors hover:bg-red-500/20 hover:text-red-200"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                useCanvasStore.getState().clearCardError(id);
+                            }}
+                            title="Dismiss error"
+                        >
+                            <X className="size-3.5" />
+                        </button>
+                    </div>
+                )}
                 {view === 'trajectory' ? trajectoryBody : messagesBody}
                 {card.debug !== false && <DebugConsole logs={card.logs ?? []} />}
                 {footerInput}
@@ -759,6 +777,24 @@ function ChatCardNodeInner({
                             onClick={(e) => e.stopPropagation()}
                         >
                             {header(true)}
+                            {card.error && (
+                                <div className="nodrag flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-3 py-2">
+                                    <span className="shrink-0 text-xs">⚠️</span>
+                                    <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-red-300">
+                                        {card.error}
+                                    </span>
+                                    <button
+                                        className="nodrag shrink-0 rounded p-0.5 text-red-400 transition-colors hover:bg-red-500/20 hover:text-red-200"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            useCanvasStore.getState().clearCardError(id);
+                                        }}
+                                        title="Dismiss error"
+                                    >
+                                        <X className="size-3.5" />
+                                    </button>
+                                </div>
+                            )}
                             <div className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col">
                                 {view === 'trajectory' ? (
                                     <TrajectoryView card={card} />

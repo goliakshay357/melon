@@ -128,6 +128,8 @@ interface CanvasState {
 	moveCard: (id: string, position: { x: number; y: number }) => void;
 	updateCard: (id: string, patch: Partial<SessionCard>) => void;
 	setModel: (id: string, model: string) => void;
+	setCardError: (id: string, message: string) => void;
+	clearCardError: (id: string) => void;
 	resizeCard: (id: string, width: number, height: number) => void;
 	undo: () => boolean;
 	deleteCards: (ids: string[]) => void;
@@ -407,6 +409,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}));
 	},
 
+	// Prominent on-card error banner.
+	setCardError(id, message) {
+		get().updateCard(id, { error: message });
+	},
+	clearCardError(id) {
+		get().updateCard(id, { error: undefined });
+	},
+
 	// One path for model changes — keeps UI and backend in sync always.
 	setModel(id, model) {
 		const prev = get().cards.find((c) => c.id === id)?.model;
@@ -429,13 +439,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					if (!r.ok) {
 						const d = await r.json().catch(() => ({} as any));
 						pushLog(id, `✗ model switch failed: ${d.error ?? r.status} — keeping ${prev ?? "current model"}`);
+						get().setCardError(id, `Model switch failed: ${d.error ?? r.status}`);
 						get().updateCard(id, { model: prev });
 					} else {
 						pushLog(id, `✓ model switched to ${model}`);
+						get().clearCardError(id);
 					}
 				})
 				.catch((e) => {
 					pushLog(id, `✗ model switch failed: ${e instanceof Error ? e.message : e} — keeping ${prev ?? "current model"}`);
+					get().setCardError(id, `Model switch failed: ${e instanceof Error ? e.message : e}`);
 					get().updateCard(id, { model: prev });
 				});
 		}
@@ -561,6 +574,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const messagesBefore = [...card.messages];
 		get().updateCard(cardId, {
 			status: "streaming",
+			error: undefined,
 			title: card.messages.length === 0 ? text.slice(0, 40) : card.title,
 			messages: [...card.messages, { role: "user", text }],
 		});
@@ -605,7 +619,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				pushLog(cardId, `✓ attached — model ${info.model ?? "?"}${info.sessionFile ? ` | ${info.sessionFile.split("/").pop()}` : ""}`);
 				// structured attach event emitted below via pushEvent
 			} catch (e) {
-				rollback(`attach failed: ${e instanceof Error ? e.message : e}`);
+				const msg = `Attach failed: ${e instanceof Error ? e.message : e}`;
+				rollback(msg);
+				get().setCardError(cardId, msg);
 				return false;
 			}
 		} else {
@@ -797,6 +813,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						const readable = data.error.split("stack=")[0].trim().slice(0, 300);
 						pushEvent(cardId, { kind: "system", name: "error", detail: readable });
 						pushLog(cardId, `✗ ${readable}`);
+						get().setCardError(cardId, readable);
 					}
 				} else if (data.type === "thinking") {
 					if (!st!.thinkingEventId) {
@@ -857,6 +874,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					const msg = (data as { message?: string }).message;
 					pushLog(cardId, `✗ agent error: ${msg ?? "unknown"}`);
 					if (msg) pushEvent(cardId, { kind: "system", name: "error", detail: msg.slice(0, 300) });
+					get().setCardError(cardId, msg ?? "agent error");
 					useCanvasStore.getState().updateCard(cardId, {
 						status: "error",
 						queue: [],
