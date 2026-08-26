@@ -31,6 +31,14 @@ import { SessionRegistry } from "./session-registry.ts";
 import { loadSettings, saveSettings, touchRecentModel, denylistModel, getDefaultModel } from "./settings.js";
 
 
+// Split "provider/model-id" on the FIRST slash only — model IDs may contain
+// slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
+function splitModel(model: string): [string, string] {
+	const idx = model.indexOf("/");
+	if (idx <= 0) return ["", ""];
+	return [model.slice(0, idx), model.slice(idx + 1)];
+}
+
 let _modelRuntime: ModelRuntime | undefined;
 async function getModelRuntime(): Promise<ModelRuntime> {
 	if (!_modelRuntime) _modelRuntime = await ModelRuntime.create();
@@ -94,7 +102,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const runtime = await createRuntimeFor(sessionManager);
 		try {
 			const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
-			const [provider, id] = wanted.split("/");
+			const [provider, id] = splitModel(wanted);
 			const model = (await getModelRuntime()).getModel(provider, id);
 			if (model) {
 				await runtime.session.setModel(model);
@@ -656,11 +664,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const s = registry.get((req.params as any).cardId);
 		if (!s) return reply.code(404).send({ error: "unknown card" });
 		const model = String((req.body as any)?.model ?? "");
-		const [provider, id] = model.split("/");
+		const [provider, id] = splitModel(model);
 		if (!provider || !id) return reply.code(400).send({ error: "model must be provider/id" });
 		try {
 			const m = (await getModelRuntime()).getModel(provider, id);
-			if (!m) return reply.code(400).send({ error: `unknown model: ${model}` });
+			if (!m) {
+				// Model is not in the live catalog — hide it so it stops failing.
+				denylistModel(model);
+				return reply.code(400).send({ error: `unknown model: ${model}` });
+			}
 			await s.runtime.session.setModel(m);
 			touchRecentModel(model);
 			return { ok: true, model };
