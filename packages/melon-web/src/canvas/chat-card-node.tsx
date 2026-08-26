@@ -10,6 +10,8 @@ import {
 import { ArrowUp, BarChart3, Minimize2, Plus, Square, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
+import { ModelPicker } from '@/components/model-picker';
+import { ProviderPicker } from '@/components/provider-picker';
 import type { TraceEvent } from '@/types/session-card';
 import { cn } from '@/lib/utils';
 
@@ -439,15 +441,6 @@ function ChatCardNodeInner({
     const [draft, setDraft] = useState('');
     const [maximized, setMaximized] = useState(false);
     const [view, setView] = useState<'chat' | 'trajectory'>('chat');
-    const [models, setModels] = useState<Array<{ label: string }>>([]);
-
-    useEffect(() => {
-        if (models.length > 0) return;
-        fetch('/models')
-            .then((r) => r.json())
-            .then((d) => setModels(d.models ?? []))
-            .catch(() => {});
-    }, [models.length]);
 
     const growTextarea = (el: HTMLTextAreaElement | null) => {
         if (!el) return;
@@ -660,22 +653,14 @@ function ChatCardNodeInner({
                             📁 {folder.split('/').pop()}
                         </span>
                     )}
-                    <select
-                        className="max-w-[150px] cursor-pointer truncate rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none hover:text-foreground"
-                        title="Model"
+                    <ProviderPicker
+                        model={card.model ?? ''}
+                        onChange={(m) => useCanvasStore.getState().updateCard(id, { model: m })}
+                    />
+                    <ModelPicker
                         value={card.model ?? ''}
-                        onChange={(e) => useCanvasStore.getState().updateCard(id, { model: e.target.value })}
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        {(card.model && !models.some((m) => m.label === card.model)
-                            ? [{ label: card.model }, ...models]
-                            : models
-                        ).map((m) => (
-                            <option key={m.label} value={m.label}>
-                                {m.label}
-                            </option>
-                        ))}
-                    </select>
+                        onChange={(m) => useCanvasStore.getState().updateCard(id, { model: m })}
+                    />
                     <select
                         className="cursor-pointer rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none hover:text-foreground"
                         title="Workspace permissions"

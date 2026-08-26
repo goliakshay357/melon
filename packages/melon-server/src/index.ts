@@ -593,15 +593,17 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		}
 	});
 
-	// Available models for the picker.
-	app.get("/models", async () => {
+	// Available models for the picker. ?provider= scopes the list to one provider.
+	app.get("/models", async (req) => {
+		const provider = String((req.query as any)?.provider ?? "");
 		const mr = await getModelRuntime();
-		const models = mr.getModels().map((m: any) => ({
+		const all = mr.getModels().map((m: any) => ({
 			label: `${m.provider}/${m.id}`,
 			provider: m.provider,
 			id: m.id,
 		}));
-		return { models };
+		const models = provider ? all.filter((m) => m.provider === provider) : all;
+		return { models, total: models.length };
 	});
 
 	// Switch model on a live card session.
