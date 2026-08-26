@@ -11,7 +11,7 @@
 //   POST /sessions/:cardId/abort
 
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -895,9 +895,32 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	return app;
 }
 
+// One-time migration: Melon is isolated in ~/.melon/agent. On first run, if it's
+// empty but a terminal pi install (~/.pi/agent) exists, copy credentials + catalog
+// so the user doesn't have to re-enter API keys. Idempotent — runs only when empty.
+function seedFromPiIfEmpty(): void {
+	const melonDir = getAgentDir();
+	const piDir = join(homedir(), ".pi", "agent");
+	if (existsSync(join(melonDir, "auth.json")) || !existsSync(join(piDir, "auth.json"))) return;
+	try {
+		mkdirSync(melonDir, { recursive: true });
+		for (const f of ["auth.json", "models-store.json"]) {
+			const src = join(piDir, f);
+			const dst = join(melonDir, f);
+			if (existsSync(src) && !existsSync(dst)) {
+				copyFileSync(src, dst);
+				console.error(`[melon] seeded ${f} from ~/.pi/agent`);
+			}
+		}
+	} catch (e) {
+		console.error("[melon] seed failed:", (e as Error)?.message ?? e);
+	}
+}
+
 // Run directly? (vs imported by tests)
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop() ?? "")) {
 	const config = loadConfig();
+	seedFromPiIfEmpty();
 	const app = await buildApp();
 	const addr = await app.listen({ port: config.port, host: "127.0.0.1" });
 	const boundPort = Number(String(addr).split(":").pop());

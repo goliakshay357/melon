@@ -1,9 +1,12 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron';
 import { spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
+import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+// Melon owns its data dir, isolated from the terminal pi CLI (~/.pi/agent).
+const MELON_AGENT_DIR = join(homedir(), '.melon', 'agent');
 
 // Spawn the server child on a FREE port (MELON_PORT=0 → OS assigns).
 const serverProc = spawn(
@@ -14,6 +17,7 @@ const serverProc = spawn(
             ...process.env,
             ELECTRON_RUN_AS_NODE: '1',
             MELON_PORT: '0',
+            MELON_CODING_AGENT_DIR: MELON_AGENT_DIR,
         },
         stdio: ['ignore', 'pipe', 'pipe'],
     },

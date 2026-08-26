@@ -23,6 +23,7 @@ echo "── 4. starting the SAME server the DMG runs ──"
 echo "    (single process: UI + API on http://127.0.0.1:$PORT)"
 echo "    Ctrl+C to stop"
 echo ""
-# Use Electron's own Node binary (identical runtime to the packaged app).
-ELECTRON_RUN_AS_NODE=1 MELON_PORT="$PORT" \
+# Use Electron's own Node binary (identical runtime to the packaged app),
+# and the same isolated data dir (~/.melon/agent).
+ELECTRON_RUN_AS_NODE=1 MELON_PORT="$PORT" MELON_CODING_AGENT_DIR="$HOME/.melon/agent" \
     ./node_modules/electron/dist/Electron.app/Contents/MacOS/Electron server/index.js

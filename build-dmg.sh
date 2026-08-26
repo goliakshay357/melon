@@ -18,23 +18,33 @@ rm -rf server web-dist
 cp -r ../packages/melon-server/dist server
 cp -r ../packages/melon-web/dist web-dist
 
-echo "── 4. ensure pi-coding-agent matches dev (version + branding) ──"
+echo "── 4. enforce identical pi-coding-agent in dev + desktop (version + branding) ──"
 node -e '
 const fs = require("fs");
 const path = require("path");
-const root = require(path.join(process.argv[1], "node_modules/@earendil-works/pi-coding-agent/package.json"));
+const root = path.join(process.argv[1], "node_modules/@earendil-works/pi-coding-agent/package.json");
 const dp = path.join(process.argv[1], "desktop/node_modules/@earendil-works/pi-coding-agent/package.json");
-const d = JSON.parse(fs.readFileSync(dp, "utf8"));
-const pc = d.piConfig || {};
-if (d.version !== root.version) {
-  console.error(`  ✗ desktop pi-coding-agent is v${d.version}, dev is v${root.version}. Run: cd desktop && npm install`);
+const EXPECTED = { name: "melon", configDir: ".melon" };
+
+function normalize(p) {
+  const d = JSON.parse(fs.readFileSync(p, "utf8"));
+  let changed = false;
+  const pc = d.piConfig || {};
+  if (pc.name !== EXPECTED.name || pc.configDir !== EXPECTED.configDir) {
+    d.piConfig = { ...EXPECTED };
+    changed = true;
+  }
+  if (changed) fs.writeFileSync(p, JSON.stringify(d, null, 2) + "\n");
+  return d;
+}
+
+const rootPkg = normalize(root);
+const deskPkg = normalize(dp);
+if (rootPkg.version !== deskPkg.version) {
+  console.error(`  ✗ version drift: dev v${rootPkg.version} vs desktop v${deskPkg.version}. Run: cd desktop && npm install`);
   process.exit(1);
 }
-if (pc.name || pc.configDir !== ".pi") {
-  console.error(`  ✗ desktop pi-coding-agent is branded (${JSON.stringify(pc)}). It must match dev: {"configDir":".pi"}`);
-  process.exit(1);
-}
-console.log(`  ✓ pi-coding-agent matches dev (v${root.version}, configDir .pi)`);
+console.log(`  ✓ pi-coding-agent identical: v${rootPkg.version}, configDir .melon (both branded melon)`);
 ' "$ROOT"
 
 echo "── 5. package DMG ──"
