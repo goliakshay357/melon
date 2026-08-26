@@ -45,6 +45,7 @@ export function Canvas() {
         if (restoredRef.current) return;
         restoredRef.current = true;
         useCanvasStore.getState().restoreLast();
+        useCanvasStore.getState().startHealthPoll();
     }, []);
 
     const nodeTypes = useMemo(() => ({ chatCard: ChatCardNode }), []);

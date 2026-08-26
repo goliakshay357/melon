@@ -64,6 +64,16 @@ export function ModelPicker({
         };
     }, []);
 
+    const select = (model: string) => {
+        onChange(model);
+        fetch('/settings/model', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ model }),
+        }).catch(() => {});
+        setOpen(false);
+    };
+
     const q = query.trim().toLowerCase();
     const filtered = q ? models.filter((m) => m.label.toLowerCase().includes(q)) : models;
     const recentModels = recents.filter((r) => r.startsWith(`${provider}/`));
@@ -114,10 +124,7 @@ export function ModelPicker({
                                             'block w-full truncate px-2 py-1 text-left text-[11px] text-card-foreground hover:bg-secondary',
                                             r === value && 'bg-primary/10 text-primary',
                                         )}
-                                        onClick={() => {
-                                            onChange(r);
-                                            setOpen(false);
-                                        }}
+                                        onClick={() => select(r)}
                                     >
                                         {r}
                                     </button>
@@ -138,10 +145,7 @@ export function ModelPicker({
                                     'block w-full truncate px-2 py-1 text-left text-[11px] text-card-foreground hover:bg-secondary',
                                     m.label === value && 'bg-primary/10 text-primary',
                                 )}
-                                onClick={() => {
-                                    onChange(m.label);
-                                    setOpen(false);
-                                }}
+                                onClick={() => select(m.label)}
                             >
                                 {m.label}
                             </button>

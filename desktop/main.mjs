@@ -28,22 +28,24 @@ let serverPort = null;
 let serverLog = '';
 const ready = new Promise((resolve) => {
     let outBuf = '';
-    let errBuf = '';
-    const scan = (chunk, buf) => {
-        const m = buf.match(/127\.0\.0\.1:(\d+)/);
+    const scan = (buf) => {
+        // Structured handshake: server prints `MELON_READY {"port":N}` on stdout.
+        const m = buf.match(/MELON_READY\s+(\{[^}]+\})/);
         if (m && !serverPort) {
-            serverPort = Number(m[1]);
-            resolve();
+            try {
+                serverPort = JSON.parse(m[1]).port;
+                resolve();
+            } catch {
+                /* keep waiting */
+            }
         }
     };
     serverProc.stdout.on('data', (d) => {
         outBuf += d;
-        scan(d, outBuf);
+        scan(outBuf);
     });
     serverProc.stderr.on('data', (d) => {
-        errBuf += d;
         serverLog += d;
-        scan(d, errBuf);
     });
     serverProc.on('exit', (code) => {
         if (!serverPort) {

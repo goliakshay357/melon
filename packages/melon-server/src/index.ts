@@ -28,7 +28,7 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import { expandHome, loadConfig, type MelonConfig, modelToString, preview } from "./config.ts";
 import { SessionRegistry } from "./session-registry.ts";
-import { loadSettings, saveSettings, touchRecentModel } from "./settings.js";
+import { loadSettings, saveSettings, touchRecentModel, denylistModel, getDefaultModel } from "./settings.js";
 
 
 let _modelRuntime: ModelRuntime | undefined;
@@ -93,7 +93,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	async function attachSession(cardId: string, sessionManager: any): Promise<any> {
 		const runtime = await createRuntimeFor(sessionManager);
 		try {
-			const [provider, id] = config.defaultModel.split("/");
+			const resolved = getDefaultModel(config.defaultModel);
+			const [provider, id] = resolved.split("/");
 			const model = (await getModelRuntime()).getModel(provider, id);
 			if (model) await runtime.session.setModel(model);
 			runtime.session.setThinkingLevel(config.defaultThinkingLevel);
@@ -139,6 +140,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				console.log(
 					`[${cardId}] agent_end stopReason=${last?.stopReason} deltas=${deltaCount} usage=in:${last?.usage?.input?.tokens ?? "?"} out:${last?.usage?.output?.tokens ?? "?"}`,
 				);
+				// Auto-prune models the provider has removed ("not supported").
+				const errMsg = String(last?.errorMessage ?? "");
+				if (last?.stopReason === "error" && /not supported|no longer|deprecated|unknown model|does not exist/i.test(errMsg)) {
+					const dead = last?.model ? `${last.provider ?? "?"}/${last.model}` : null;
+					if (dead && !dead.includes("?/")) {
+						denylistModel(dead);
+						console.log(`[${cardId}] denylisted dead model: ${dead}`);
+					}
+				}
 				deltaCount = 0;
 				// Release the card as soon as the ANSWER is done. pi's prompt()
 				// promise can linger tens of seconds afterwards (post-run
@@ -603,9 +613,18 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			provider: m.provider,
 			id: m.id,
 		}));
-		const models = provider ? all.filter((m) => m.provider === provider) : all;
+		const denied = new Set((loadSettings().denylistedModels ?? []).map((x) => x));
+		const filtered = all.filter((m) => !denied.has(m.label));
+		const models = provider ? filtered.filter((m) => m.provider === provider) : filtered;
 		return { models, total: models.length };
 	});
+
+	// Liveness probe — the frontend polls this to clear the "reconnecting" banner.
+	app.get("/healthz", async () => ({
+		ok: true,
+		uptime: Math.round(process.uptime()),
+		model: getDefaultModel(config.defaultModel),
+	}));
 
 	// Switch model on a live card session.
 	app.post("/sessions/:cardId/model", async (req, reply) => {
@@ -876,6 +895,8 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()
 	const config = loadConfig();
 	const app = await buildApp();
 	const addr = await app.listen({ port: config.port, host: "127.0.0.1" });
-	// Log the ACTUAL bound port (differs from config.port when port:0 → OS picks).
-	console.error(`melon-server on ${addr}`);
+	const boundPort = Number(String(addr).split(":").pop());
+	// Structured handshake for the Electron parent — do NOT change this format.
+	console.log(`MELON_READY ${JSON.stringify({ port: boundPort })}`);
+	console.error(`melon-server on http://127.0.0.1:${boundPort}`);
 }

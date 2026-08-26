@@ -111,6 +111,8 @@ interface CanvasState {
 	viewport?: { x: number; y: number; zoom: number };
 	setViewport: (v: { x: number; y: number; zoom: number }) => void;
 	restoreLast: () => Promise<void>;
+	restoreLastInner: () => Promise<void>;
+	startHealthPoll: () => void;
 	hydrateMessages: (cardId: string, sessionFile?: string) => Promise<void>;
 	flushPending: () => void;
 	renameCanvas: (cwd: string, canvasId: string, name: string) => Promise<void>;
@@ -142,6 +144,9 @@ function loadLastLocation(): { folder: string | null; canvasId: string | null } 
 	}
 }
 
+let healthTimer: ReturnType<typeof setInterval> | null = null;
+let restoring = false;
+
 const loc = loadLastLocation();
 
 export const useCanvasStore = create<CanvasState>((set, get) => ({
@@ -160,6 +165,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	// Reopen the last folder + canvas after a refresh.
 	// Retries while the desktop/server is restarting — never silently blank.
 	async restoreLast() {
+		if (restoring) return;
+		restoring = true;
+		try {
+			await get().restoreLastInner();
+		} finally {
+			restoring = false;
+		}
+	},
+
+	async restoreLastInner() {
 		const folder = localStorage.getItem("melon:lastFolder");
 		if (!folder) {
 			set({ hydrated: true });
@@ -193,6 +208,27 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const target = canvases.find((c) => c.id === wanted)?.id ?? canvases[0].id;
 		await get().switchCanvas(target);
 		set({ hydrated: true });
+	},
+
+	// Poll /healthz and auto-recover the UI the moment the server is back.
+	startHealthPoll() {
+		if (healthTimer) return;
+		const tick = async () => {
+			try {
+				const res = await fetch('/healthz', { cache: 'no-store' });
+				const body = await res.json();
+				if (res.ok && body?.ok === true) {
+					set({ serverOffline: false });
+					if (!get().hydrated) get().restoreLast();
+				} else {
+					set({ serverOffline: true });
+				}
+			} catch {
+				set({ serverOffline: true });
+			}
+		};
+		tick();
+		healthTimer = setInterval(tick, 3000);
 	},
 
 	// Single rename path — active-canvas name, disk, and navigator stay in sync.
