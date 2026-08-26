@@ -342,6 +342,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			parentId,
 			status: "idle",
 			messages: [],
+			debug: true,
 		};
 		set((s) => ({ cards: [...s.cards, card] }));
 		return card.id;
@@ -420,7 +421,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({ model }),
-			}).catch(() => {});
+			})
+				.then(async (r) => {
+					if (!r.ok) {
+						const d = await r.json().catch(() => ({} as any));
+						pushLog(id, `✗ model switch failed: ${d.error ?? r.status}`);
+					}
+				})
+				.catch((e) => pushLog(id, `✗ model switch failed: ${e instanceof Error ? e.message : e}`));
 		}
 	},
 
@@ -835,7 +843,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						status: data.status,
 					});
 				} else if ((data as { type: string }).type === "error") {
-					pushLog(cardId, "✗ agent error");
+					const msg = (data as { message?: string }).message;
+					pushLog(cardId, `✗ agent error: ${msg ?? "unknown"}`);
+					if (msg) pushEvent(cardId, { kind: "system", name: "error", detail: msg.slice(0, 300) });
 					useCanvasStore.getState().updateCard(cardId, {
 						status: "error",
 						queue: [],

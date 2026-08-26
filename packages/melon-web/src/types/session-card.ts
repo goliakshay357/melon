@@ -53,6 +53,8 @@ export interface SessionCard {
 	sessionFile?: string; // pi .jsonl on disk — source of truth for resume
 	model?: string;
 	logs?: string[]; // live pipe trace, newest last
+	/** Show the on-card debug console (logs). Defaults ON. */
+	debug?: boolean;
 	/** Visualization-first mode: agent explains with diagrams/scenes. */
 	vizMode?: boolean;
 	/** Workspace permission for the agent. */

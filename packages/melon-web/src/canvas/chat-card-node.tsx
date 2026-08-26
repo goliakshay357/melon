@@ -7,7 +7,7 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { ArrowUp, BarChart3, Minimize2, Plus, Square, X } from 'lucide-react';
+import { ArrowUp, BarChart3, Bug, Minimize2, Plus, Square, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { ModelPicker } from '@/components/model-picker';
@@ -514,6 +514,22 @@ function ChatCardNodeInner({
                 Viz
             </button>
             <button
+                className={cn(
+                    'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
+                    card.debug !== false
+                        ? 'bg-amber-500/15 text-amber-500 ring-1 ring-inset ring-amber-500/40'
+                        : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                )}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    useCanvasStore.getState().updateCard(id, { debug: card.debug === false });
+                }}
+                title={card.debug !== false ? 'Debug console ON' : 'Debug console OFF'}
+            >
+                <Bug className="size-3.5" />
+                DBG
+            </button>
+            <button
                 className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
                 onClick={(e) => {
                     e.stopPropagation();
@@ -728,6 +744,7 @@ function ChatCardNodeInner({
 
                 {header(false)}
                 {view === 'trajectory' ? trajectoryBody : messagesBody}
+                {card.debug !== false && <DebugConsole logs={card.logs ?? []} />}
                 {footerInput}
             </div>
 
@@ -748,6 +765,7 @@ function ChatCardNodeInner({
                                 ) : (
                                     <>
                                         {messagesBody}
+                                        {card.debug !== false && <DebugConsole logs={card.logs ?? []} />}
                                         {footerInput}
                                     </>
                                 )}
@@ -766,6 +784,45 @@ function ChatCardNodeInner({
                     document.body,
                 )}
         </>
+    );
+}
+
+function DebugConsole({ logs }: { logs: string[] }) {
+    const ref = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        if (ref.current) ref.current.scrollTop = ref.current.scrollHeight;
+    }, [logs.length]);
+    return (
+        <div className="flex max-h-44 shrink-0 flex-col border-t border-amber-500/25 bg-black/40">
+            <div className="flex items-center gap-1.5 px-2 py-1">
+                <Bug className="size-3 text-amber-500" />
+                <span className="text-[9px] font-semibold uppercase tracking-wide text-amber-500">
+                    debug console
+                </span>
+                <span className="ml-auto text-[9px] text-muted-foreground">{logs.length} events</span>
+            </div>
+            <div
+                ref={ref}
+                className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 font-mono text-[10px] leading-relaxed text-muted-foreground"
+            >
+                {logs.length === 0 && (
+                    <span className="text-muted-foreground/50">no activity yet</span>
+                )}
+                {logs.map((line, i) => (
+                    <div
+                        key={i}
+                        className={cn(
+                            'whitespace-pre-wrap break-words',
+                            line.includes('✗') || line.includes('error') || line.includes('failed')
+                                ? 'text-red-400'
+                                : undefined,
+                        )}
+                    >
+                        {line}
+                    </div>
+                ))}
+            </div>
+        </div>
     );
 }
 
