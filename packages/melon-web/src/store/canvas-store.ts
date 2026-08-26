@@ -617,7 +617,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 							durationMs?: number;
 					  }
 					| { type: "raw"; text: string }
-					| { type: "turn_end"; stopReason?: string }
+					| { type: "turn_end"; stopReason?: string; error?: string }
 					| {
 							type: "agent_meta";
 							stopReason: string;
@@ -773,6 +773,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					pushLog(cardId, `• ${data.text}`);
 				} else if (data.type === "turn_end") {
 					st!.segSealed = true;
+					if (data.error) {
+						// Show the real failure reason, not just "turn_end (error)".
+						const readable = data.error.split("stack=")[0].trim().slice(0, 300);
+						pushEvent(cardId, { kind: "system", name: "error", detail: readable });
+						pushLog(cardId, `✗ ${readable}`);
+					}
 				} else if (data.type === "thinking") {
 					if (!st!.thinkingEventId) {
 						st!.thinkingEventId = pushEvent(cardId, {

@@ -174,12 +174,18 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			} else if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_start") {
 				// too chatty to broadcast every one; lifecycle shows via agent_*
 			} else if (event.type === "turn_end") {
+				const msg = event.message as any;
 				registry.broadcast(cardId, {
 					type: "raw",
-					text: `turn_end (${(event.message as any)?.stopReason ?? "done"})`,
+					text: `turn_end (${msg?.stopReason ?? "done"})`,
 				});
 				// Structured boundary — clients close the current output segment.
-				registry.broadcast(cardId, { type: "turn_end", stopReason: (event.message as any)?.stopReason });
+				// Include the real error so the UI can show WHY it failed.
+				registry.broadcast(cardId, {
+					type: "turn_end",
+					stopReason: msg?.stopReason,
+					error: msg?.errorMessage ?? undefined,
+				});
 			} else if (event.type === "auto_retry_start") {
 				registry.broadcast(cardId, { type: "raw", text: "provider error — auto-retrying…" });
 			} else if (event.type === "summarization_retry_scheduled") {
