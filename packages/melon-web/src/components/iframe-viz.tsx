@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useActiveTheme } from '@/theme/theme-store';
 
 /**
@@ -6,7 +6,7 @@ import { useActiveTheme } from '@/theme/theme-store';
  * Sandboxed: scripts allowed, no same-origin. Height auto-fits the scene via
  * a postMessage handshake (clamped 200–700px).
  */
-export function IframeViz({ code }: { code: string }) {
+export const IframeViz = memo(function IframeViz({ code }: { code: string }) {
     const frameRef = useRef<HTMLIFrameElement | null>(null);
     const [height, setHeight] = useState(320);
     const theme = useActiveTheme();
@@ -54,4 +54,4 @@ export function IframeViz({ code }: { code: string }) {
             />
         </div>
     );
-}
+});

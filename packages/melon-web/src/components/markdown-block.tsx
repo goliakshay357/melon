@@ -1,4 +1,5 @@
 import ReactMarkdown from 'react-markdown';
+import { memo } from 'react';
 import { IframeViz } from './iframe-viz';
 import remarkGfm from 'remark-gfm';
 
@@ -27,7 +28,7 @@ function splitBlocks(raw: string): Part[] {
     return parts.length > 0 ? parts : [{ kind: 'markdown', content: raw }];
 }
 
-export function MarkdownBlock({ content }: { content: string }) {
+export const MarkdownBlock = memo(function MarkdownBlock({ content }: { content: string }) {
     return (
         <div className="md-body">
             {splitBlocks(content).map((part, i) =>
@@ -41,4 +42,4 @@ export function MarkdownBlock({ content }: { content: string }) {
             )}
         </div>
     );
-}
+});

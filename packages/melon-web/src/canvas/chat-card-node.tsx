@@ -443,6 +443,16 @@ function ChatCardNodeInner({
     const [view, setView] = useState<'chat' | 'trajectory'>('chat');
     const [openPicker, setOpenPicker] = useState<'model' | 'provider' | null>(null);
     const [editingTitle, setEditingTitle] = useState(false);
+    const scrollRef = useRef<HTMLDivElement>(null);
+    const maxScrollRef = useRef<HTMLDivElement>(null);
+    const lastMsg = card?.messages[card.messages.length - 1];
+    // Follow the stream: scroll to bottom whenever the tail grows / tools change / status flips.
+    useEffect(() => {
+        const el = scrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+        const el2 = maxScrollRef.current;
+        if (el2) el2.scrollTop = el2.scrollHeight;
+    }, [card?.messages.length, lastMsg?.text, lastMsg?.tools, card?.status]);
 
     const growTextarea = (el: HTMLTextAreaElement | null) => {
         if (!el) return;
@@ -646,8 +656,11 @@ function ChatCardNodeInner({
         );
     };
 
-    const messagesBody = (
-        <div className="nowheel min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto px-4 py-3">
+    const messagesBody = (scrollTo: React.RefObject<HTMLDivElement>) => (
+        <div
+            ref={scrollTo}
+            className="nowheel min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto px-4 py-3"
+        >
             {card.messages.length === 0 && (
                 <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
                     Ask something to start this thread.
@@ -794,7 +807,7 @@ function ChatCardNodeInner({
                         </button>
                     </div>
                 )}
-                {view === 'trajectory' ? trajectoryBody : messagesBody}
+                {view === 'trajectory' ? trajectoryBody : messagesBody(scrollRef)}
                 {card.debug !== false && <DebugConsole logs={card.logs ?? []} />}
                 {footerInput}
             </div>
@@ -833,7 +846,7 @@ function ChatCardNodeInner({
                                     <TrajectoryView card={card} />
                                 ) : (
                                     <>
-                                        {messagesBody}
+                                        {messagesBody(maxScrollRef)}
                                         {card.debug !== false && <DebugConsole logs={card.logs ?? []} />}
                                         {footerInput}
                                     </>
