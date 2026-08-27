@@ -200,7 +200,7 @@ export function Sidebar() {
                                 <p className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                                     Recent canvases
                                 </p>
-                                <div className="mb-2 space-y-0.5 border-b border-border pb-2">
+                                <div className="mb-2 space-y-0.5 pb-2">
                                     {recent.map((cv) => (
                                         <button
                                             key={`${cv.cwd}::${cv.id}`}
@@ -233,6 +233,12 @@ export function Sidebar() {
                                     Add one to start your first canvas.
                                 </p>
                             </div>
+                        )}
+
+                        {folders.length > 0 && (
+                            <p className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                                Workspaces
+                            </p>
                         )}
 
                         {folders.map(({ cwd }) => {

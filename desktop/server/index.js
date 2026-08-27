@@ -438,6 +438,39 @@ export async function buildApp(deps = {}) {
         }
         return { canvases: out };
     });
+    // Recent canvases across ALL known folders (by last-modified), for the sidebar.
+    app.get("/canvases/recent", async () => {
+        const recents = [];
+        for (const f of loadFolderHistory()) {
+            const dir = canvasesDir(f.cwd);
+            let files;
+            try {
+                files = readdirSync(dir);
+            }
+            catch {
+                continue;
+            }
+            for (const file of files) {
+                if (!file.endsWith(".json"))
+                    continue;
+                try {
+                    const raw = JSON.parse(readFileSync(join(dir, file), "utf8"));
+                    recents.push({
+                        id: raw.id ?? file.replace(/\.json$/, ""),
+                        name: raw.name ?? "Untitled",
+                        cwd: f.cwd,
+                        folderName: f.cwd.split("/").pop() ?? f.cwd,
+                        modified: raw.modified ?? "",
+                    });
+                }
+                catch {
+                    /* skip corrupt */
+                }
+            }
+        }
+        recents.sort((a, b) => (b.modified ?? "").localeCompare(a.modified ?? ""));
+        return { recent: recents.slice(0, 12) };
+    });
     // Delete a canvas file.
     app.delete("/canvases/:id", async (req, reply) => {
         const q = req.query;
