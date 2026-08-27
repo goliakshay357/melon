@@ -131,6 +131,27 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	function wireEvents(cardId: string, runtime: any): void {
 		let deltaCount = 0;
 		const toolTimers = new Map<string, number>();
+		// Live context-window fill: broadcast on a 2s throttle while the turn
+		// streams, and force a final one on agent_end.
+		let ctxLast = 0;
+		const broadcastCtx = (force = false) => {
+			const now = Date.now();
+			if (!force && now - ctxLast < 2000) return;
+			ctxLast = now;
+			try {
+				const cu = (runtime.session as any).getContextUsage?.();
+				if (cu) {
+					registry.broadcast(cardId, {
+						type: "context_usage",
+						tokens: cu.tokens ?? null,
+						contextWindow: cu.contextWindow ?? 0,
+						percent: cu.percent ?? null,
+					});
+				}
+			} catch {
+				/* unavailable — ignore */
+			}
+		};
 		runtime.session.subscribe((event: any) => {
 			try {
 				if (event.type === "agent_start") {
@@ -198,6 +219,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					});
 				} else if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
 					registry.broadcast(cardId, { type: "delta", text: event.assistantMessageEvent.delta });
+					broadcastCtx();
 				} else if (event.type === "agent_start") {
 					registry.broadcast(cardId, { type: "status", status: "streaming" });
 					registry.broadcast(cardId, {
@@ -239,21 +261,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 						type: "raw",
 						text: `■ agent ended — ${lastMsg?.stopReason ?? "?"} | model ${lastMsg?.provider ?? "?"}/${lastMsg?.model ?? "?"} | in ${lastMsg?.usage?.input ?? "?"} out ${lastMsg?.usage?.output ?? "?"}`,
 					});
-					// pi tracks context usage itself — surface it so the card can
-					// show how full the model's context window is.
-					try {
-						const cu = (runtime.session as any).getContextUsage?.();
-						if (cu) {
-							registry.broadcast(cardId, {
-								type: "context_usage",
-								tokens: cu.tokens ?? null,
-								contextWindow: cu.contextWindow ?? 0,
-								percent: cu.percent ?? null,
-							});
-						}
-					} catch {
-						/* context usage unavailable — ignore */
-					}
+					// Final context fill for this turn.
+					broadcastCtx(true);
 				} else if (event.type === "tool_execution_start") {
 					toolTimers.set(event.toolCallId, Date.now());
 					registry.broadcast(cardId, {
@@ -275,6 +284,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 						isError: event.isError,
 						output: preview(event.result),
 					});
+					broadcastCtx();
 				}
 			} catch (e) {
 				console.error(`[${cardId}] event handler threw:`, e);

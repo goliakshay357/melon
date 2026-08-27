@@ -10,7 +10,7 @@
 //   POST /sessions/:cardId/prompt     {text}                → {ok}
 //   POST /sessions/:cardId/abort
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -20,7 +20,7 @@ import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
 import { expandHome, loadConfig, modelToString, preview } from "./config.js";
 import { SessionRegistry } from "./session-registry.js";
-import { loadSettings, saveSettings, touchRecentModel, denylistModel, getDefaultModel } from "./settings.js";
+import { denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel } from "./settings.js";
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
 function splitModel(model) {
@@ -115,10 +115,16 @@ export async function buildApp(deps = {}) {
                     });
                 }
                 else if (event.type === "auto_retry_start") {
-                    registry.broadcast(cardId, { type: "raw", text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}` });
+                    registry.broadcast(cardId, {
+                        type: "raw",
+                        text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}`,
+                    });
                 }
                 else if (event.type === "summarization_retry_scheduled") {
-                    registry.broadcast(cardId, { type: "raw", text: `context overflow — summarizing and retrying: ${event.errorMessage ?? "context limit"}` });
+                    registry.broadcast(cardId, {
+                        type: "raw",
+                        text: `context overflow — summarizing and retrying: ${event.errorMessage ?? "context limit"}`,
+                    });
                 }
                 else if (event.type === "compaction_start") {
                     registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
@@ -137,7 +143,8 @@ export async function buildApp(deps = {}) {
                     console.log(`[${cardId}] agent_end stopReason=${last?.stopReason} deltas=${deltaCount} usage=in:${last?.usage?.input ?? "?"} out:${last?.usage?.output ?? "?"}`);
                     // Auto-prune models the provider has removed ("not supported").
                     const errMsg = String(last?.errorMessage ?? "");
-                    if (last?.stopReason === "error" && /not supported|no longer|deprecated|unknown model|does not exist/i.test(errMsg)) {
+                    if (last?.stopReason === "error" &&
+                        /not supported|no longer|deprecated|unknown model|does not exist/i.test(errMsg)) {
                         const dead = last?.model ? `${last.provider ?? "?"}/${last.model}` : null;
                         if (dead && !dead.includes("?/")) {
                             denylistModel(dead);
@@ -189,10 +196,16 @@ export async function buildApp(deps = {}) {
                     });
                 }
                 else if (event.type === "auto_retry_start") {
-                    registry.broadcast(cardId, { type: "raw", text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}` });
+                    registry.broadcast(cardId, {
+                        type: "raw",
+                        text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}`,
+                    });
                 }
                 else if (event.type === "summarization_retry_scheduled") {
-                    registry.broadcast(cardId, { type: "raw", text: `context overflow — summarizing and retrying: ${event.errorMessage ?? "context limit"}` });
+                    registry.broadcast(cardId, {
+                        type: "raw",
+                        text: `context overflow — summarizing and retrying: ${event.errorMessage ?? "context limit"}`,
+                    });
                 }
                 else if (event.type === "compaction_start") {
                     registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
@@ -205,6 +218,22 @@ export async function buildApp(deps = {}) {
                         type: "raw",
                         text: `■ agent ended — ${lastMsg?.stopReason ?? "?"} | model ${lastMsg?.provider ?? "?"}/${lastMsg?.model ?? "?"} | in ${lastMsg?.usage?.input ?? "?"} out ${lastMsg?.usage?.output ?? "?"}`,
                     });
+                    // pi tracks context usage itself — surface it so the card can
+                    // show how full the model's context window is.
+                    try {
+                        const cu = runtime.session.getContextUsage?.();
+                        if (cu) {
+                            registry.broadcast(cardId, {
+                                type: "context_usage",
+                                tokens: cu.tokens ?? null,
+                                contextWindow: cu.contextWindow ?? 0,
+                                percent: cu.percent ?? null,
+                            });
+                        }
+                    }
+                    catch {
+                        /* context usage unavailable — ignore */
+                    }
                 }
                 else if (event.type === "tool_execution_start") {
                     toolTimers.set(event.toolCallId, Date.now());
@@ -809,11 +838,7 @@ export async function buildApp(deps = {}) {
         try {
             const sm = SessionManager.open(file);
             const ctx = sm.buildContextEntries();
-            const clean = (t) => t
-                .split("\n[VISUALIZATION PROTOCOL")[0]
-                .split("\n[VIZ MODE IS ON")[0]
-                .split("\n[READ-ONLY MODE")[0]
-                .trim();
+            const clean = (t) => t.split("\n[VISUALIZATION PROTOCOL")[0].split("\n[VIZ MODE IS ON")[0].split("\n[READ-ONLY MODE")[0].trim();
             const textOf = (content) => (Array.isArray(content) ? content : [])
                 .filter((b) => b.type === "text")
                 .map((b) => b.text)
