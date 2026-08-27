@@ -19,11 +19,16 @@ interface ProviderInfo {
 export function ProviderPicker({
     model,
     onChange,
+    open,
+    onOpenChange,
 }: {
     model: string;
     onChange: (model: string) => void;
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
 }) {
-    const [open, setOpen] = useState(false);
+    const onOpenChangeRef = useRef(onOpenChange);
+    onOpenChangeRef.current = onOpenChange;
     const [providers, setProviders] = useState<ProviderInfo[]>([]);
     const [configuring, setConfiguring] = useState<ProviderInfo | null>(null);
     const [key, setKey] = useState('');
@@ -45,10 +50,10 @@ export function ProviderPicker({
 
     useEffect(() => {
         const onDown = (e: MouseEvent) => {
-            if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+            if (ref.current && !ref.current.contains(e.target as Node)) onOpenChangeRef.current(false);
         };
         const onEsc = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') setOpen(false);
+            if (e.key === 'Escape') onOpenChangeRef.current(false);
         };
         document.addEventListener('mousedown', onDown);
         document.addEventListener('keydown', onEsc);
@@ -59,7 +64,7 @@ export function ProviderPicker({
     }, []);
 
     const selectProvider = async (p: ProviderInfo) => {
-        setOpen(false);
+        onOpenChange(false);
         const res = await fetch(`/models?provider=${encodeURIComponent(p.id)}`).then((r) =>
             r.json(),
         );
@@ -104,7 +109,7 @@ export function ProviderPicker({
                 title={`Provider: ${current || 'none'}`}
                 onClick={(e) => {
                     e.stopPropagation();
-                    setOpen(!open);
+                    onOpenChange(!open);
                 }}
             >
                 <Settings2 className="size-3 shrink-0" />
@@ -114,7 +119,7 @@ export function ProviderPicker({
 
             {open && (
                 <div
-                    className="absolute bottom-full left-0 z-[50] mb-1 max-h-64 w-72 overflow-y-auto rounded-lg border border-border bg-card py-1 shadow-xl"
+                    className="nowheel nodrag absolute bottom-full left-0 z-[50] mb-1 max-h-64 w-72 overflow-y-auto rounded-lg border border-border bg-card py-1 shadow-xl"
                     onKeyDown={(e) => e.stopPropagation()}
                     onMouseDown={(e) => e.stopPropagation()}
                 >
@@ -163,7 +168,7 @@ export function ProviderPicker({
                                     setConfiguring(p);
                                     setKey('');
                                     setError('');
-                                    setOpen(false);
+                                    onOpenChange(false);
                                 }}
                             >
                                 <KeyRound className="size-3" />

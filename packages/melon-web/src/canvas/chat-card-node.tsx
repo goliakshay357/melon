@@ -441,6 +441,7 @@ function ChatCardNodeInner({
     const [draft, setDraft] = useState('');
     const [maximized, setMaximized] = useState(false);
     const [view, setView] = useState<'chat' | 'trajectory'>('chat');
+    const [openPicker, setOpenPicker] = useState<'model' | 'provider' | null>(null);
 
     const growTextarea = (el: HTMLTextAreaElement | null) => {
         if (!el) return;
@@ -658,7 +659,7 @@ function ChatCardNodeInner({
                     }}
                     onClick={(e) => e.stopPropagation()}
                     placeholder="Ask anything…  (Enter to send, Shift+Enter for newline)"
-                    className="nowheel block max-h-[120px] w-full resize-none bg-transparent px-3 pt-2.5 text-xs leading-relaxed outline-none placeholder:text-muted-foreground"
+                    className="nodrag nowheel block max-h-[120px] w-full resize-none bg-transparent px-3 pt-2.5 text-xs leading-relaxed outline-none placeholder:text-muted-foreground"
                 />
                 <div className="flex items-center gap-1 px-2 pb-1.5 pt-1">
                     {folder && (
@@ -672,10 +673,14 @@ function ChatCardNodeInner({
                     <ProviderPicker
                         model={card.model ?? ''}
                         onChange={(m) => useCanvasStore.getState().setModel(id, m)}
+                        open={openPicker === 'provider'}
+                        onOpenChange={(o) => setOpenPicker(o ? 'provider' : null)}
                     />
                     <ModelPicker
                         value={card.model ?? ''}
                         onChange={(m) => useCanvasStore.getState().setModel(id, m)}
+                        open={openPicker === 'model'}
+                        onOpenChange={(o) => setOpenPicker(o ? 'model' : null)}
                     />
                     <select
                         className="cursor-pointer rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none hover:text-foreground"

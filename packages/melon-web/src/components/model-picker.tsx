@@ -15,11 +15,16 @@ interface ModelInfo {
 export function ModelPicker({
     value,
     onChange,
+    open,
+    onOpenChange,
 }: {
     value: string;
     onChange: (model: string) => void;
+    open: boolean;
+    onOpenChange: (open: boolean) => void;
 }) {
-    const [open, setOpen] = useState(false);
+    const onOpenChangeRef = useRef(onOpenChange);
+    onOpenChangeRef.current = onOpenChange;
     const [query, setQuery] = useState('');
     const [models, setModels] = useState<ModelInfo[]>([]);
     const [recents, setRecents] = useState<string[]>([]);
@@ -51,10 +56,10 @@ export function ModelPicker({
 
     useEffect(() => {
         const onDown = (e: MouseEvent) => {
-            if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+            if (ref.current && !ref.current.contains(e.target as Node)) onOpenChangeRef.current(false);
         };
         const onEsc = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') setOpen(false);
+            if (e.key === 'Escape') onOpenChangeRef.current(false);
         };
         document.addEventListener('mousedown', onDown);
         document.addEventListener('keydown', onEsc);
@@ -66,7 +71,7 @@ export function ModelPicker({
 
     const select = (model: string) => {
         onChange(model);
-        setOpen(false);
+        onOpenChange(false);
     };
 
     const q = query.trim().toLowerCase();
@@ -81,7 +86,7 @@ export function ModelPicker({
                 title={`Model: ${value}`}
                 onClick={(e) => {
                     e.stopPropagation();
-                    setOpen(!open);
+                    onOpenChange(!open);
                     setQuery('');
                 }}
             >
@@ -106,7 +111,7 @@ export function ModelPicker({
                         />
                     </div>
 
-                    <div className="max-h-56 overflow-y-auto py-1">
+                    <div className="nowheel nodrag max-h-56 overflow-y-auto py-1">
                         {showRecents && (
                             <>
                                 <p className="px-2 pb-0.5 pt-1 text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
