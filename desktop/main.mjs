@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain, dialog } from 'electron';
 import { spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
@@ -75,16 +75,31 @@ if (!serverPort) {
             backgroundColor: '#282a36',
             webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true },
         });
-        // Cmd+Alt+I opens DevTools in the packaged app (for debugging UI).
-        win.webContents.on('before-input-event', (event, input) => {
-            if (input.type === 'keyDown' && input.key === 'i' && input.meta && input.alt) {
-                win.webContents.toggleDevTools();
-                event.preventDefault();
-            }
-        });
         win.loadURL(`http://127.0.0.1:${serverPort}`);
     };
-    app.whenReady().then(createWindow);
+    app.whenReady().then(() => {
+        // Standard app menu so the packaged app has DevTools (Cmd+Alt+I),
+        // reload, zoom — just like a browser.
+        Menu.setApplicationMenu(
+            Menu.buildFromTemplate([
+                { role: 'appMenu' },
+                { role: 'editMenu' },
+                {
+                    label: 'View',
+                    submenu: [
+                        { role: 'reload' },
+                        { role: 'toggleDevTools' },
+                        { type: 'separator' },
+                        { role: 'resetZoom' },
+                        { role: 'zoomIn' },
+                        { role: 'zoomOut' },
+                    ],
+                },
+                { role: 'windowMenu' },
+            ]),
+        );
+        createWindow();
+    });
 }
 
 app.on('window-all-closed', () => {
