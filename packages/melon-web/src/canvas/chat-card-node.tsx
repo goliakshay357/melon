@@ -39,6 +39,13 @@ function Spinner() {
 }
 
 // ── 💭 Thinking ──────────────────────────────────────────────────────────
+function fmtTokens(n: number | null): string {
+    if (n == null) return '?';
+    if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+    if (n >= 1_000) return `${(n / 1_000).toFixed(0)}K`;
+    return String(n);
+}
+
 type MessageShape = {
     role: string;
     text: string;
@@ -651,6 +658,30 @@ function ChatCardNodeInner({
                 >
                     {card.title}
                 </span>
+            )}
+            {card.contextUsage?.percent != null && (
+                <div
+                    className="flex shrink-0 items-center gap-1"
+                    title={`Context window: ${Math.round(card.contextUsage.percent)}% — ${fmtTokens(card.contextUsage.tokens)} of ${fmtTokens(card.contextUsage.contextWindow)} tokens`}
+                >
+                    <div className="h-1 w-12 overflow-hidden rounded-full bg-secondary">
+                        <div
+                            className="h-full rounded-full transition-all"
+                            style={{
+                                width: `${Math.min(card.contextUsage.percent, 100)}%`,
+                                background:
+                                    card.contextUsage.percent < 70
+                                        ? '#50fa7b'
+                                        : card.contextUsage.percent < 90
+                                          ? '#ffb86c'
+                                          : '#ff5555',
+                            }}
+                        />
+                    </div>
+                    <span className="text-[9px] tabular-nums text-muted-foreground">
+                        {Math.round(card.contextUsage.percent)}%
+                    </span>
+                </div>
             )}
             {/* TRAJECTORY DISABLED — re-enable later by changing {false && ...} to {true && ...} */}
             {false && (

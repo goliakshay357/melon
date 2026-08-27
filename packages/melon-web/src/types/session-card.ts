@@ -57,6 +57,8 @@ export interface SessionCard {
 	debug?: boolean;
 	/** Prominent error banner — the current failure reason, if any. */
 	error?: string;
+	/** How full the model's context window is (from pi's getContextUsage). */
+	contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
 	/** Visualization-first mode: agent explains with diagrams/scenes. */
 	vizMode?: boolean;
 	/** Workspace permission for the agent. */

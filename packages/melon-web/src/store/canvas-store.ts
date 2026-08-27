@@ -663,7 +663,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 							outputTokens: number | null;
 					  }
 					| { type: "status"; status: "idle" | "streaming" | "error" }
-					| { type: "error"; message: string };
+					| { type: "error"; message: string }
+					| { type: "context_usage"; tokens: number | null; contextWindow: number; percent: number | null };
 
 				// Batched mutation of the newest assistant message (~8fps, anti-flicker).
 				// Pending state lives on the STREAM (not this per-frame closure) so it
@@ -900,6 +901,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					}
 					useCanvasStore.getState().updateCard(cardId, {
 						status: data.status,
+					});
+				} else if (data.type === "context_usage") {
+					useCanvasStore.getState().updateCard(cardId, {
+						contextUsage: {
+							tokens: data.tokens,
+							contextWindow: data.contextWindow,
+							percent: data.percent,
+						},
 					});
 				} else if ((data as { type: string }).type === "error") {
 					const msg = (data as { message?: string }).message;

@@ -239,6 +239,21 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 						type: "raw",
 						text: `■ agent ended — ${lastMsg?.stopReason ?? "?"} | model ${lastMsg?.provider ?? "?"}/${lastMsg?.model ?? "?"} | in ${lastMsg?.usage?.input ?? "?"} out ${lastMsg?.usage?.output ?? "?"}`,
 					});
+					// pi tracks context usage itself — surface it so the card can
+					// show how full the model's context window is.
+					try {
+						const cu = (runtime.session as any).getContextUsage?.();
+						if (cu) {
+							registry.broadcast(cardId, {
+								type: "context_usage",
+								tokens: cu.tokens ?? null,
+								contextWindow: cu.contextWindow ?? 0,
+								percent: cu.percent ?? null,
+							});
+						}
+					} catch {
+						/* context usage unavailable — ignore */
+					}
 				} else if (event.type === "tool_execution_start") {
 					toolTimers.set(event.toolCallId, Date.now());
 					registry.broadcast(cardId, {
