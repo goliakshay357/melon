@@ -120,7 +120,10 @@ export function ProviderPicker({
             {open && (
                 <div
                     className="nowheel nodrag absolute bottom-full left-0 z-[50] mb-1 max-h-64 w-72 overflow-y-auto rounded-lg border border-border bg-card py-1 shadow-xl"
-                    onKeyDown={(e) => e.stopPropagation()}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Escape') onOpenChangeRef.current(false);
+                        e.stopPropagation();
+                    }}
                     onMouseDown={(e) => e.stopPropagation()}
                 >
                     <p className="px-2 pb-0.5 pt-1 text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
