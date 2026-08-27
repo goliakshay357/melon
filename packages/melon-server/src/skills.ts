@@ -1,6 +1,7 @@
-import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync, cpSync } from "node:fs";
+import { join, dirname } from "node:path";
 import { homedir } from "node:os";
+import { fileURLToPath } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export interface Skill {
@@ -20,79 +21,46 @@ function parseSkillMd(id: string, md: string): Skill | null {
 	return { id, name, description, instructions: body };
 }
 
-/** Built-in melon skills (always available; custom skills.json can override). */
-const BUILTIN: Record<string, Skill> = {
-	visualization: {
-		id: "visualization",
-		name: "Visualization",
-		description: "Explain with interactive 3D viz-html scenes (three.js, draggable/zoomable)",
-		instructions: `[VISUALIZATION PROTOCOL - melon canvas]
-You explain on a visual canvas. When a visual genuinely aids understanding, include:
-2. \`\`\`viz-html fenced blocks for interactive 3D/animated scenes.
-viz-html contract (STRICT):
-- ONE complete self-contained HTML document per block.
-- Load three.js via <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three-orbit":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/controls/OrbitControls.js"}}</script> then import * as THREE from 'three'.
-- INTERACTION (MANDATORY for 3D scenes): the scene MUST be draggable and zoomable. Add OrbitControls: import { OrbitControls } from 'three-orbit'; then const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true; and call controls.update() inside the animation loop. The user must be able to DRAG to orbit/rotate and SCROLL (or pinch) to zoom.
-- Inline all CSS/JS. Dark theme: background #161b22, readable colors.
-- Animation via requestAnimationFrame; no external files.
-- NEVER emit mermaid, flowchart, or ASCII-art diagrams (e.g. flowchart TB). They render badly. For diagrams use a viz-html scene instead; otherwise explain in prose.
-- VIEWPORT: your HTML renders in a frame ~380px wide x 320px tall (auto-height up to 700px). Design for that: vertical stacking, nothing critical below 300px height. ABSOLUTELY NO horizontal overflow — set body { overflow-x: hidden } and keep all elements within 100% width.
-Keep prose explanation around the blocks.`,
-	},
-	"product-manager": {
-		id: "product-manager",
-		name: "Product Manager",
-		description: "Explain from a non-developer product POV: plain language, no code internals, k8s-style diagrams",
-		instructions: `Explain from a PRODUCT MANAGER's point of view — the reader is a NON-DEVELOPER (a junior intern). Describe WHAT the system does: users, features, business flows, and how data moves between parts. NEVER show developer internals: function names, variables, file paths, code snippets, DB schemas, or API internals. If a technical term is unavoidable, give it a plain-language label.
-DIAGRAM STYLE: prefer simple labeled box-and-arrow layouts (like Kubernetes architecture diagrams): components as labeled boxes, connections as arrows with plain-language labels. Use color only to distinguish roles (users, services, data stores).`,
-	},
-};
-
-/**
- * Write every custom skill (built-ins + skills.json) as a real SKILL.md in
- * <agentDir>/skills/<id>/SKILL.md — pi's resource loader discovers these, so
- * `/skill:<id>` activates them natively and the model treats them as genuine.
- * (Pi skills are already on disk; this only materializes melon-owned ones.)
- */
-export function materializeSkills(): void {
-	const dir = join(getAgentDir(), "skills");
-	const all = loadSkills();
-	for (const sk of Object.values(all)) {
-		const skillDir = join(dir, sk.id);
-		const md = join(skillDir, "SKILL.md");
-		if (existsSync(md)) continue; // already materialized (or pi-owned) — keep on-disk content
-		try {
-			mkdirSync(skillDir, { recursive: true });
-			const front = [`---`, `name: ${sk.id}`, sk.description ? `description: '${sk.description.replace(/'/g, "")}'` : null, `---`]
-				.filter((x): x is string => x !== null)
-				.join("\n");
-			writeFileSync(md, `${front}\n\n${sk.instructions}\n`);
-		} catch {
-			/* skip */
+function readSkillDir(dir: string, into: Record<string, Skill>): void {
+	try {
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			if (!entry.isDirectory()) continue;
+			const md = join(dir, entry.name, "SKILL.md");
+			if (!existsSync(md)) continue;
+			const skill = parseSkillMd(entry.name, readFileSync(md, "utf8"));
+			if (skill) into[skill.id] = skill;
 		}
+	} catch {
+		/* no such dir */
 	}
 }
 
 /**
- * Skill registry.
- * - built-in melon skills (visualization, product-manager)
- * - pi skills: discovered read-only from ~/.pi/agent/skills/<id>/SKILL.md
- * - custom melon skills: <agentDir>/melon/skills.json -> { id: {name?, description?, instructions} }
- * Later entries override earlier ones with the same id.
+ * Default skills SHIP WITH THE APP in <compiled>/skills/ (bundled from
+ * assets/skills by the build). On every startup we copy them into the agent
+ * dir so a fresh laptop gets them without any manual setup. User-editable
+ * overrides live in <agentDir>/melon/skills.json.
+ */
+export function materializeSkills(): void {
+	const bundled = join(dirname(fileURLToPath(import.meta.url)), "skills");
+	const target = join(getAgentDir(), "skills");
+	try {
+		cpSync(bundled, target, { recursive: true, force: false });
+	} catch {
+		/* bundled dir missing (dev without build) — fall through */
+	}
+}
+
+/**
+ * Skill registry (later sources override earlier):
+ * 1. pi skills: ~/.pi/agent/skills/<id>/SKILL.md (fallback when pi is installed)
+ * 2. materialized melon skills: <agentDir>/skills/<id>/SKILL.md (ships with the app)
+ * 3. custom overrides: <agentDir>/melon/skills.json
  */
 export function loadSkills(): Record<string, Skill> {
-	const all: Record<string, Skill> = { ...BUILTIN };
-	try {
-		const piSkillsDir = join(homedir(), ".pi", "agent", "skills");
-		for (const dir of readdirSync(piSkillsDir)) {
-			const md = join(piSkillsDir, dir, "SKILL.md");
-			if (!existsSync(md)) continue;
-			const skill = parseSkillMd(dir, readFileSync(md, "utf8"));
-			if (skill) all[skill.id] = skill;
-		}
-	} catch {
-		/* no pi skills dir */
-	}
+	const all: Record<string, Skill> = {};
+	readSkillDir(join(homedir(), ".pi", "agent", "skills"), all);
+	readSkillDir(join(getAgentDir(), "skills"), all);
 	try {
 		const custom = JSON.parse(readFileSync(join(getAgentDir(), "melon", "skills.json"), "utf8"));
 		for (const [id, s] of Object.entries(custom)) {

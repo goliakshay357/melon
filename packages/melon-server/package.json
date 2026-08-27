@@ -8,7 +8,7 @@
     "types": "./dist/index.d.ts",
     "scripts": {
         "clean": "shx rm -rf dist",
-        "build": "tsgo -p tsconfig.build.json",
+        "build": "tsgo -p tsconfig.build.json && node -e \"require('fs').cpSync('assets/skills','dist/skills',{recursive:true})\"",
         "dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
         "start": "MELON_CODING_AGENT_DIR=$HOME/.melon/agent node dist/index.js",
         "test": "vitest --run",
