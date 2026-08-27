@@ -442,6 +442,7 @@ function ChatCardNodeInner({
     const [maximized, setMaximized] = useState(false);
     const [view, setView] = useState<'chat' | 'trajectory'>('chat');
     const [openPicker, setOpenPicker] = useState<'model' | 'provider' | null>(null);
+    const [editingTitle, setEditingTitle] = useState(false);
 
     const growTextarea = (el: HTMLTextAreaElement | null) => {
         if (!el) return;
@@ -482,7 +483,41 @@ function ChatCardNodeInner({
             )}
         >
             <span className={cn('size-2 shrink-0 rounded-full', statusDot[card.status])} />
-            <span className="flex-1 truncate text-sm font-medium text-card-foreground">{card.title}</span>
+            {editingTitle ? (
+                <input
+                    autoFocus
+                    defaultValue={card.title}
+                    className="nodrag min-w-0 flex-1 rounded border border-ring bg-background px-1.5 py-0.5 text-sm font-medium text-card-foreground outline-none"
+                    onBlur={(e) => {
+                        setEditingTitle(false);
+                        const t = e.target.value.trim();
+                        if (t && t !== card.title) useCanvasStore.getState().updateCard(id, { title: t.slice(0, 44) });
+                    }}
+                    onKeyDown={(e) => {
+                        e.stopPropagation();
+                        if (e.key === 'Enter') {
+                            const t = (e.target as HTMLInputElement).value.trim();
+                            setEditingTitle(false);
+                            if (t && t !== card.title) useCanvasStore.getState().updateCard(id, { title: t.slice(0, 44) });
+                        } else if (e.key === 'Escape') {
+                            setEditingTitle(false);
+                        }
+                    }}
+                    onClick={(e) => e.stopPropagation()}
+                    onMouseDown={(e) => e.stopPropagation()}
+                />
+            ) : (
+                <span
+                    className="min-w-0 flex-1 cursor-text truncate text-sm font-medium text-card-foreground"
+                    title="Double-click to rename"
+                    onDoubleClick={(e) => {
+                        e.stopPropagation();
+                        setEditingTitle(true);
+                    }}
+                >
+                    {card.title}
+                </span>
+            )}
             <button
                 className={cn(
                     'nodrag rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
