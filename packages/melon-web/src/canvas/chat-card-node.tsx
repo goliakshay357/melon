@@ -1,4 +1,4 @@
-import { memo as ReactMemo, useEffect, useRef, useState } from 'react';
+import { memo as ReactMemo, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
     Handle,
@@ -7,7 +7,7 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { ArrowUp, BarChart3, Bug, Copy, Minimize2, Plus, Square, X } from 'lucide-react';
+import { ArrowUp, BarChart3, Bug, ChevronDown, Copy, Minimize2, Plus, Square, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { ModelPicker } from '@/components/model-picker';
@@ -445,35 +445,45 @@ function ChatCardNodeInner({
     const [editingTitle, setEditingTitle] = useState(false);
     const scrollRef = useRef<HTMLDivElement>(null);
     const maxScrollRef = useRef<HTMLDivElement>(null);
+    const atBottomRef = useRef(true); // user pinned to the newest output?
+    const [showDown, setShowDown] = useState(false); // floating ↓ button
     const lastMsg = card?.messages[card.messages.length - 1];
-    // Follow the stream: scroll to bottom whenever the tail grows / tools change / status flips.
+
+    const handleMessagesScroll = (el: HTMLDivElement) => {
+        const near = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+        atBottomRef.current = near;
+        setShowDown(!near); // React bails out when unchanged
+    };
+    const goToBottom = () => {
+        atBottomRef.current = true;
+        setShowDown(false);
+        const el = scrollRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+        const el2 = maxScrollRef.current;
+        if (el2) el2.scrollTop = el2.scrollHeight;
+    };
+
+    // Auto-follow ONLY while the user is at the bottom. If they scroll away,
+    // new output must NOT yank them down — the ↓ button returns them instead.
     useEffect(() => {
+        if (!atBottomRef.current) return;
         const el = scrollRef.current;
         if (el) el.scrollTop = el.scrollHeight;
         const el2 = maxScrollRef.current;
         if (el2) el2.scrollTop = el2.scrollHeight;
     }, [card?.messages.length, lastMsg?.text, lastMsg?.tools, card?.status]);
 
-    // The card has a FIXED height: when the input textarea grows, the footer
-    // grows and the messages viewport shrinks — which visually pushes the newest
-    // output up (typing) or reveals it again (backspace). If the user is already
-    // at the bottom, snap back to the bottom on ANY viewport resize.
+    // Fixed-height card: growing the input footer shrinks the messages viewport.
+    // If the user is pinned to the bottom, snap back on ANY resize so typing
+    // never pushes the chat up/down.
     useEffect(() => {
         const attach = (el: HTMLDivElement | null) => {
             if (!el) return;
-            let wasAtBottom = true;
-            const onScroll = () => {
-                wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-            };
             const ro = new ResizeObserver(() => {
-                if (wasAtBottom) el.scrollTop = el.scrollHeight;
+                if (atBottomRef.current) el.scrollTop = el.scrollHeight;
             });
-            el.addEventListener('scroll', onScroll, { passive: true });
             ro.observe(el);
-            return () => {
-                el.removeEventListener('scroll', onScroll);
-                ro.disconnect();
-            };
+            return () => ro.disconnect();
         };
         const d1 = attach(scrollRef.current);
         const d2 = attach(maxScrollRef.current);
@@ -483,11 +493,14 @@ function ChatCardNodeInner({
         };
     }, [maximized]);
 
-    const growTextarea = (el: HTMLTextAreaElement | null) => {
+    // STABLE ref callback — the inline arrow was re-created every render, so
+    // React re-ran growTextarea on EVERY keystroke (height:auto → reset), which
+    // made the footer bob up/down. useCallback stops that.
+    const growTextarea = useCallback((el: HTMLTextAreaElement | null) => {
         if (!el) return;
         el.style.height = 'auto';
         el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
-    };
+    }, []);
 
     const abortStream = () => {
         fetch(`/sessions/${id}/abort`, { method: 'POST' }).catch(() => {});
@@ -686,21 +699,36 @@ function ChatCardNodeInner({
     };
 
     const messagesBody = (scrollTo: React.RefObject<HTMLDivElement>) => (
-        <div
-            ref={scrollTo}
-            className="nowheel min-h-0 min-w-0 flex-1 space-y-4 overflow-y-auto px-4 py-3"
-        >
-            {card.messages.length === 0 && (
-                <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                    Ask something to start this thread.
-                </p>
+        <div className="relative min-h-0 min-w-0 flex-1">
+            <div
+                ref={scrollTo}
+                onScroll={(e) => handleMessagesScroll(e.currentTarget)}
+                className="nowheel h-full space-y-4 overflow-y-auto px-4 py-3"
+            >
+                {card.messages.length === 0 && (
+                    <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                        Ask something to start this thread.
+                    </p>
+                )}
+                {card.messages.map((m, i) => (
+                    <MessageBlocks key={i} m={m} index={i} />
+                ))}
+                {card.status === 'streaming' &&
+                    (card.messages.length === 0 ||
+                        card.messages[card.messages.length - 1]?.role === 'user') && <ActivityLine />}
+            </div>
+            {showDown && (
+                <button
+                    className="nodrag absolute bottom-3 right-3 z-10 flex size-7 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        goToBottom();
+                    }}
+                    title="Scroll to latest output"
+                >
+                    <ChevronDown className="size-4" />
+                </button>
             )}
-            {card.messages.map((m, i) => (
-                <MessageBlocks key={i} m={m} index={i} />
-            ))}
-            {card.status === 'streaming' &&
-                (card.messages.length === 0 ||
-                    card.messages[card.messages.length - 1]?.role === 'user') && <ActivityLine />}
         </div>
     );
 
@@ -715,7 +743,7 @@ function ChatCardNodeInner({
                 <textarea
                     rows={1}
                     value={draft}
-                    ref={(el) => growTextarea(el)}
+                    ref={growTextarea}
                     onChange={(e) => {
                         setDraft(e.target.value);
                         growTextarea(e.target);

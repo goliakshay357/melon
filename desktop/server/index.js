@@ -194,14 +194,6 @@ export async function buildApp(deps = {}) {
                 else if (event.type === "compaction_start") {
                     registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
                 }
-                else if (event.type === "queue_update") {
-                    const q = event;
-                    if (q.steering || q.followUp)
-                        registry.broadcast(cardId, {
-                            type: "raw",
-                            text: `queued: ${q.steering ?? ""}${q.followUp ?? ""}`,
-                        });
-                }
                 else if (event.type === "agent_end") {
                     registry.broadcast(cardId, { type: "status", status: "idle" });
                     const msgs = event.messages ?? [];
