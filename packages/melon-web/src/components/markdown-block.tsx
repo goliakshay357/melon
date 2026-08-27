@@ -35,7 +35,16 @@ export const MarkdownBlock = memo(function MarkdownBlock({ content }: { content:
                 part.kind === 'viz-html' ? (
                     <IframeViz key={i} code={part.content} />
                 ) : (
-                    <ReactMarkdown key={i} remarkPlugins={[remarkGfm]}>
+                    <ReactMarkdown
+                        key={i}
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                            // Links open in the OS default browser, never inside the app.
+                            a: ({ node: _node, ...props }) => (
+                                <a target="_blank" rel="noopener noreferrer" {...props} />
+                            ),
+                        }}
+                    >
                         {part.content}
                     </ReactMarkdown>
                 ),

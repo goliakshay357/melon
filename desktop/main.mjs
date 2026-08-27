@@ -1,4 +1,4 @@
-import { app, BrowserWindow, Menu, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, Menu, ipcMain, dialog, shell } from 'electron';
 import { spawn } from 'node:child_process';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
@@ -74,6 +74,23 @@ if (!serverPort) {
             height: 900,
             backgroundColor: '#282a36',
             webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true },
+        });
+        // NEVER open links inside the app. Any window.open / target=_blank link
+        // goes to the OS default browser; in-app navigation is blocked too.
+        win.webContents.setWindowOpenHandler(({ url }) => {
+            if (/^https?:/i.test(url)) shell.openExternal(url);
+            return { action: 'deny' };
+        });
+        win.webContents.on('will-navigate', (event, url) => {
+            try {
+                const appOrigin = new URL(win.webContents.getURL()).origin;
+                if (new URL(url).origin !== appOrigin) {
+                    event.preventDefault();
+                    shell.openExternal(url);
+                }
+            } catch {
+                /* malformed URL — ignore */
+            }
         });
         win.loadURL(`http://127.0.0.1:${serverPort}`);
     };
