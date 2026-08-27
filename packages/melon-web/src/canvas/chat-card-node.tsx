@@ -785,7 +785,7 @@ function ChatCardNodeInner({
             <div
                 ref={scrollTo}
                 onScroll={(e) => handleMessagesScroll(e.currentTarget)}
-                className="nodrag nowheel h-full select-text space-y-4 overflow-y-auto px-4 py-3"
+                className="nodrag nowheel h-full cursor-default select-text space-y-4 overflow-y-auto px-4 py-3"
             >
                 {card.messages.length === 0 && (
                     <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
