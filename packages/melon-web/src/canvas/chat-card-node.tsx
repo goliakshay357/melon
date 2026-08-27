@@ -662,7 +662,7 @@ function ChatCardNodeInner({
             {card.contextUsage?.percent != null && (
                 <div
                     className="flex shrink-0 items-center gap-1"
-                    title={`Context window: ${Math.round(card.contextUsage.percent)}% — ${fmtTokens(card.contextUsage.tokens)} of ${fmtTokens(card.contextUsage.contextWindow)} tokens`}
+                    title={`Context window: ${Math.round(card.contextUsage.percent)}% — ${(card.contextUsage.tokens ?? 0).toLocaleString()} of ${card.contextUsage.contextWindow.toLocaleString()} tokens`}
                 >
                     <div className="h-1 w-12 overflow-hidden rounded-full bg-secondary">
                         <div
