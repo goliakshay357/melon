@@ -454,18 +454,39 @@ function ChatCardNodeInner({
         if (el2) el2.scrollTop = el2.scrollHeight;
     }, [card?.messages.length, lastMsg?.text, lastMsg?.tools, card?.status]);
 
+    // The card has a FIXED height: when the input textarea grows, the footer
+    // grows and the messages viewport shrinks — which visually pushes the newest
+    // output up (typing) or reveals it again (backspace). If the user is already
+    // at the bottom, snap back to the bottom on ANY viewport resize.
+    useEffect(() => {
+        const attach = (el: HTMLDivElement | null) => {
+            if (!el) return;
+            let wasAtBottom = true;
+            const onScroll = () => {
+                wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+            };
+            const ro = new ResizeObserver(() => {
+                if (wasAtBottom) el.scrollTop = el.scrollHeight;
+            });
+            el.addEventListener('scroll', onScroll, { passive: true });
+            ro.observe(el);
+            return () => {
+                el.removeEventListener('scroll', onScroll);
+                ro.disconnect();
+            };
+        };
+        const d1 = attach(scrollRef.current);
+        const d2 = attach(maxScrollRef.current);
+        return () => {
+            d1?.();
+            d2?.();
+        };
+    }, [maximized]);
+
     const growTextarea = (el: HTMLTextAreaElement | null) => {
         if (!el) return;
         el.style.height = 'auto';
         el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
-        // The taller footer shrinks the messages viewport, which can push the
-        // newest output out of view. If we're at/near the bottom, snap back.
-        for (const ref of [scrollRef, maxScrollRef]) {
-            const sb = ref.current;
-            if (sb && sb.scrollHeight - sb.scrollTop - sb.clientHeight < 120) {
-                sb.scrollTop = sb.scrollHeight;
-            }
-        }
     };
 
     const abortStream = () => {
