@@ -632,6 +632,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					model: info.model,
 				});
 				attached.add(cardId);
+				// Skills toggled BEFORE the card was attached never reached the
+				// server — sync them now so the first prompt carries them.
+				if ((card.skills ?? []).length > 0) {
+					fetch(`/sessions/${cardId}/skills`, {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({ skills: card.skills }),
+					}).catch(() => {});
+				}
 				pushLog(
 					cardId,
 					`✓ attached — model ${info.model ?? "?"}${info.sessionFile ? ` | ${info.sessionFile.split("/").pop()}` : ""}`,
