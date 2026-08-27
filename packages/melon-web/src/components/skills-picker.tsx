@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, Wand2 } from 'lucide-react';
+import { ChevronDown, Search, Wand2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface SkillInfo {
@@ -9,8 +9,8 @@ interface SkillInfo {
 }
 
 /**
- * Per-card skills toggle. Lists available skills (GET /skills), each a
- * checkbox; active skills are injected into the card's prompts. Default OFF.
+ * Per-card skills toggle. Lists available skills (GET /skills) with search,
+ * each a checkbox; active skills are injected into the card's prompts.
  */
 export function SkillsPicker({
     value,
@@ -24,12 +24,14 @@ export function SkillsPicker({
     onOpenChange: (open: boolean) => void;
 }) {
     const [skills, setSkills] = useState<SkillInfo[]>([]);
+    const [query, setQuery] = useState('');
     const ref = useRef<HTMLDivElement>(null);
     const onOpenChangeRef = useRef(onOpenChange);
     onOpenChangeRef.current = onOpenChange;
 
     useEffect(() => {
         if (!open) return;
+        setQuery('');
         fetch('/skills')
             .then((r) => r.json())
             .then((d) => setSkills(d.skills ?? []))
@@ -55,6 +57,15 @@ export function SkillsPicker({
         const next = value.includes(id) ? value.filter((s) => s !== id) : [...value, id];
         onChange(next);
     };
+
+    const q = query.trim().toLowerCase();
+    const filtered = q
+        ? skills.filter(
+              (sk) =>
+                  sk.name.toLowerCase().includes(q) ||
+                  (sk.description ?? '').toLowerCase().includes(q),
+          )
+        : skills;
 
     return (
         <div ref={ref} className="relative">
@@ -83,13 +94,26 @@ export function SkillsPicker({
                     }}
                     onMouseDown={(e) => e.stopPropagation()}
                 >
+                    <div className="flex items-center gap-1.5 border-b border-border px-2 py-1.5">
+                        <Search className="size-3 text-muted-foreground" />
+                        <input
+                            autoFocus
+                            value={query}
+                            onChange={(e) => setQuery(e.target.value)}
+                            placeholder="Search skills…"
+                            className="w-full bg-transparent text-xs outline-none placeholder:text-muted-foreground"
+                        />
+                    </div>
                     <p className="px-2 pb-1 pt-1 text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
                         Skills (default off)
                     </p>
                     {skills.length === 0 && (
                         <p className="px-2 py-1 text-[11px] text-muted-foreground">no skills found</p>
                     )}
-                    {skills.map((sk) => {
+                    {filtered.length === 0 && skills.length > 0 && (
+                        <p className="px-2 py-1 text-[11px] text-muted-foreground">no matches</p>
+                    )}
+                    {filtered.map((sk) => {
                         const active = value.includes(sk.id);
                         return (
                             <label
