@@ -87,11 +87,11 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
             ))}
             {isStreamingTail ? (
                 <StreamText content={m.text} />
-            ) : (
+            ) : m.text.trim() ? (
                 <div className="rounded-lg bg-secondary/40 px-3 py-2">
                     <MarkdownBlock content={m.text} />
                 </div>
-            )}
+            ) : null}
         </div>
     );
 });
