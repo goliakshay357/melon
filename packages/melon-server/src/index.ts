@@ -660,7 +660,14 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	});
 
 	// Melon folder history — the navigator's source of truth.
-	app.get("/folders", async () => ({ folders: loadFolderHistory() }));
+	app.get("/folders", async () => {
+		// Only list folders that still exist on disk — rm -rf'd folders vanish
+		// from the sidebar on the next refresh.
+		const folders = loadFolderHistory().filter(
+			(f) => statSync(f.cwd, { throwIfNoEntry: false })?.isDirectory() === true,
+		);
+		return { folders };
+	});
 
 	app.post("/folders", async (req, reply) => {
 		const cwd = (req.body as any)?.cwd;
