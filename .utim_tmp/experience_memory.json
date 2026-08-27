@@ -1,0 +1,443 @@
+{
+  "corr_f7k2x:v1": {
+    "experience_id": "corr_f7k2x:v1",
+    "root_id": "corr_f7k2x",
+    "version": 1,
+    "supersedes": null,
+    "superseded_by": null,
+    "pattern_id": "corr_f7k2x",
+    "description": "The AI assumed the desktop/ directory was the relevant scope; user clarified it is out of scope and asked for a feasibility analysis of syncing the UI navbar with external folder deletions, not exploration of the desktop app directory.",
+    "pattern_type": "relationship",
+    "objects": [
+      "desktop directory",
+      "navbar",
+      "folder deletion",
+      "sync",
+      "feasibility"
+    ],
+    "relationships": {
+      "corrects": "The AI jumped to exploring the desktop/ Electron app directory, assuming the navbar issue was located there. The correct interpretation is that the desktop directory is out of scope, and the real question is whether the application's navbar/state can be kept in sync with external filesystem operations like rm -rf."
+    },
+    "strength": 1.0,
+    "metadata": {
+      "rule": "When the user mentions a directory or component (e.g., 'desktop/') alongside a behavioral concern (e.g., something appearing in the navbar after deletion), do not assume that directory is the source of the bug or the scope of the fix. First clarify whether the mentioned item is in-scope for the application. If the user flags something as 'out of scope' or 'beyond this application', the correct response is a feasibility analysis of syncing the app's internal state (e.g., navbar) with external system changes (e.g., filesystem deletions), not deeper exploration of the out-of-scope component.",
+      "source": "user_correction",
+      "category": "knowledge_correction"
+    },
+    "created_at": "2026-08-27T23:59:06.773850",
+    "valid_from": "2026-08-27T23:59:06.773850",
+    "valid_until": null,
+    "usage_count": 0,
+    "last_used": null,
+    "success_rate": 0.0,
+    "status": "ACTIVE",
+    "confidence": 1.0,
+    "clarifying_question": null,
+    "provenance": {},
+    "dependencies": {},
+    "environment_hash": null,
+    "dependency_hash": null
+  },
+  "corr_outscope_feasibility:v1": {
+    "experience_id": "corr_outscope_feasibility:v1",
+    "root_id": "corr_outscope_feasibility",
+    "version": 1,
+    "supersedes": null,
+    "superseded_by": null,
+    "pattern_id": "corr_outscope_feasibility",
+    "description": "User asked for feasibility exploration, not file/command exploration of an out-of-scope feature",
+    "pattern_type": "relationship",
+    "objects": [
+      "melon",
+      "canvases",
+      "navbar",
+      "rm -rf",
+      "sync",
+      "feasibility",
+      "out of scope"
+    ],
+    "relationships": {
+      "corrects": "The AI explored wrong directory/CLI; the correct action was to assess feasibility of syncing navbar with a manually deleted folder rather than investigating file locations."
+    },
+    "strength": 1.0,
+    "metadata": {
+      "rule": "When the user explicitly marks a topic as 'out of scope' and asks to 'explore the feasibility,' do not dive into the internal files or commands of that external feature. Instead, analyze whether the proposed behavior (e.g., keeping the navbar in sync with a folder the user deletes via `rm -rf`) is technically possible from within the application's perspective, and report feasibility findings to the user. The actual request concerns detecting/reflecting filesystem deletions (like `rm -rf .melon/canvases`) in the application's UI navbar \u2014 not inspecting the contents of `.pi` or `pi` CLI commands.",
+      "source": "user_correction",
+      "category": "knowledge_correction"
+    },
+    "created_at": "2026-08-28T00:00:47.616879",
+    "valid_from": "2026-08-28T00:00:47.616879",
+    "valid_until": null,
+    "usage_count": 0,
+    "last_used": null,
+    "success_rate": 0.0,
+    "status": "ACTIVE",
+    "confidence": 1.0,
+    "clarifying_question": null,
+    "provenance": {},
+    "dependencies": {},
+    "environment_hash": null,
+    "dependency_hash": null
+  },
+  "corr_wnav01:v1": {
+    "experience_id": "corr_wnav01:v1",
+    "root_id": "corr_wnav01",
+    "version": 1,
+    "supersedes": null,
+    "superseded_by": null,
+    "pattern_id": "corr_wnav01",
+    "description": "User clarified that stale navbar items from deleted folders are out of scope; AI should explore feasibility of syncing first rather than assuming or guessing",
+    "pattern_type": "relationship",
+    "objects": [
+      "navbar",
+      "deleted folder",
+      "rm -rf",
+      "synchronization",
+      "feasibility"
+    ],
+    "relationships": {
+      "corrects": "The AI jumped to a guess about the source location of navbar items (melon-server/melon-web) without addressing the user's actual concern."
+    },
+    "strength": 1.0,
+    "metadata": {
+      "rule": "When a user reports a persistent UI artifact (e.g., a navbar entry) after deleting the underlying folder/resource, do NOT assume the artifact's source code location. Instead, explicitly acknowledge that syncing UI/navbar state to filesystem state is a feature request that may be out of scope, and offer to first investigate feasibility of implementing such sync before proposing code changes.",
+      "source": "user_correction",
+      "category": "knowledge_correction"
+    },
+    "created_at": "2026-08-28T00:01:51.093025",
+    "valid_from": "2026-08-28T00:01:51.093025",
+    "valid_until": null,
+    "usage_count": 0,
+    "last_used": null,
+    "success_rate": 0.0,
+    "status": "ACTIVE",
+    "confidence": 1.0,
+    "clarifying_question": null,
+    "provenance": {},
+    "dependencies": {},
+    "environment_hash": null,
+    "dependency_hash": null
+  },
+  "corr_navbar_scope:v1": {
+    "experience_id": "corr_navbar_scope:v1",
+    "root_id": "corr_navbar_scope",
+    "version": 1,
+    "supersedes": null,
+    "superseded_by": null,
+    "pattern_id": "corr_navbar_scope",
+    "description": "AI assumed sidebar/navbar UI elements were the issue; the real problem is syncing external folder deletions to a navbar display, which is out of scope and requires feasibility analysis first.",
+    "pattern_type": "relationship",
+    "objects": [
+      "navbar",
+      "sidebar",
+      "rm -rf",
+      "folder deletion",
+      "sync",
+      "feasibility",
+      "scope"
+    ],
+    "relationships": {
+      "corrects": "Found it - there's a sidebar.tsx and topbar.tsx in the canvas directory. The sidebar is likely the navbar the user refers to. Let me read both.",
+      "user_intends": "Explore feasibility of syncing external rm -rf deletions to navbar visibility"
+    },
+    "strength": 1.0,
+    "metadata": {
+      "rule": "When the user mentions a UI element like a 'navbar' in the context of reflecting an external filesystem action (e.g., rm -rf), do NOT immediately jump to reading navbar/sidebar source files. First, clarify scope: the user is asking whether syncing external system-level changes to the UI is even feasible from within the application. The correct response is to assess feasibility (e.g., filesystem watchers like inotify, polling, or external process integration) and report whether it's achievable, rather than diving into unrelated UI components. The sidebar/topbar code is irrelevant to the actual question of cross-process folder-deletion synchronization.",
+      "source": "user_correction",
+      "category": "knowledge_correction"
+    },
+    "created_at": "2026-08-28T00:03:14.745012",
+    "valid_from": "2026-08-28T00:03:14.745012",
+    "valid_until": null,
+    "usage_count": 0,
+    "last_used": null,
+    "success_rate": 0.0,
+    "status": "ACTIVE",
+    "confidence": 1.0,
+    "clarifying_question": null,
+    "provenance": {},
+    "dependencies": {},
+    "environment_hash": null,
+    "dependency_hash": null
+  },
+  "sidebar_sync_with_filesystem_deletions:v1": {
+    "experience_id": "sidebar_sync_with_filesystem_deletions:v1",
+    "root_id": "sidebar_sync_with_filesystem_deletions",
+    "version": 1,
+    "supersedes": null,
+    "superseded_by": null,
+    "pattern_id": "sidebar_sync_with_filesystem_deletions",
+    "description": "When a user asks whether a UI sidebar can stay in sync with filesystem deletions (rm -rf), the task is inherently fragile because the app cannot detect external filesystem mutations without watchers. This is a feasibility question, not an implementation task.",
+    "pattern_type": "relationship",
+    "objects": [
+      "sidebar",
+      "navbar",
+      "filesystem",
+      "rm-rf",
+      "file_watcher"
+    ],
+    "relationships": {
+      "external_filesystem_changes_are_unobservable": true,
+      "requires_filesystem_watcher": true,
+      "out_of_app_scope": true
+    },
+    "strength": 0.8,
+    "metadata": {
+      "rule": "When users ask if a UI element (sidebar/navbar) can stay in sync with external filesystem operations like `rm -rf`, recognize this as a feasibility exploration task. The answer typically requires either a filesystem watcher (chokidar/fs.watch) polling the source directory, or accepting eventual inconsistency. State the feasibility constraints before exploring code, so the user knows the scope.",
+      "source": "batch_reflection"
+    },
+    "created_at": "2026-08-28T00:03:24.331326",
+    "valid_from": "2026-08-28T00:03:24.331326",
+    "valid_until": null,
+    "usage_count": 0,
+    "last_used": null,
+    "success_rate": 0.0,
+    "status": "unverified",
+    "confidence": 0.4,
+    "clarifying_question": "Do you want the app to actively watch the filesystem for external deletions, or are you only concerned with deletions made through the app itself?",
+    "provenance": {},
+    "dependencies": {},
+    "environment_hash": null,
+    "dependency_hash": null
+  },
+  "corr_sxn1v:v1": {
+    "experience_id": "corr_sxn1v:v1",
+    "root_id": "corr_sxn1v",
+    "version": 1,
+    "supersedes": null,
+    "superseded_by": null,
+    "pattern_id": "corr_sxn1v",
+    "description": "AI conflated debugging scope: should not fix the navbar/sidebar persistence issue; instead must only assess feasibility of syncing external folder deletions with the UI",
+    "pattern_type": "relationship",
+    "objects": [
+      "navbar",
+      "sidebar",
+      "rm -rf",
+      "folder deletion",
+      "fs-watch",
+      "scope",
+      "feasibility assessment"
+    ],
+    "relationships": {
+      "corrects": "Let me also peek at the sidebar/navbar code on the frontend and the existing fs-watch utility."
+    },
+    "strength": 1.0,
+    "metadata": {
+      "rule": "The user explicitly marked the navbar stale-entry issue as OUT OF SCOPE and requested only a feasibility study: determine whether the application can keep the UI navbar/sidebar in sync when an external `rm -rf` deletes a watched folder, and report the findings. Do not start implementing or even reviewing the navbar/frontend code or the fs-watch utility until feasibility is confirmed; the deliverable is an assessment, not a fix or code exploration of those modules.",
+      "source": "user_correction",
+      "category": "knowledge_correction"
+    },
+    "created_at": "2026-08-28T00:06:29.474680",
+    "valid_from": "2026-08-28T00:06:29.474680",
+    "valid_until": null,
+    "usage_count": 0,
+    "last_used": null,
+    "success_rate": 0.0,
+    "status": "ACTIVE",
+    "confidence": 1.0,
+    "clarifying_question": null,
+    "provenance": {},
+    "dependencies": {},
+    "environment_hash": null,
+    "dependency_hash": null
+  },
+  "corr_scope_clarif:v1": {
+    "experience_id": "corr_scope_clarif:v1",
+    "root_id": "corr_scope_clarif",
+    "version": 1,
+    "supersedes": null,
+    "superseded_by": null,
+    "pattern_id": "corr_scope_clarif",
+    "description": "User clarified that folder removal sync with navbar is out of scope; AI should first explore feasibility of filesystem-change detection and report back before proposing solutions",
+    "pattern_type": "relationship",
+    "objects": [
+      "filesystem deletion",
+      "navbar sync",
+      "scope boundary",
+      "feasibility exploration",
+      "user report-back"
+    ],
+    "relationships": {
+      "corrects": "AI assumed internal React state (useEffect dependencies) controls when the folder tree refreshes, then pivoted to proposing websocket/SSE push channels as a solution."
+    },
+    "strength": 1.0,
+    "metadata": {
+      "rule": "When the user describes a sync problem involving external filesystem mutations (e.g., `rm -rf` outside the app), first clarify whether the requirement is in-scope. If the user marks it out-of-scope but asks for a feasibility check, DO NOT propose implementation (websocket/SSE, event listeners, watchers) \u2014 instead, investigate whether the feature is technically achievable (e.g., can the browser detect external FS changes? It generally cannot without a native helper) and report findings back to the user for a decision. Do not silently expand scope or drift into solutioning.",
+      "source": "user_correction",
+      "category": "knowledge_correction"
+    },
+    "created_at": "2026-08-28T00:09:29.650968",
+    "valid_from": "2026-08-28T00:09:29.650968",
+    "valid_until": null,
+    "usage_count": 0,
+    "last_used": null,
+    "success_rate": 0.0,
+    "status": "ACTIVE",
+    "confidence": 1.0,
+    "clarifying_question": null,
+    "provenance": {},
+    "dependencies": {},
+    "environment_hash": null,
+    "dependency_hash": null
+  },
+  "corr_p5k2x:v1": {
+    "experience_id": "corr_p5k2x:v1",
+    "root_id": "corr_p5k2x",
+    "version": 1,
+    "supersedes": null,
+    "superseded_by": null,
+    "pattern_id": "corr_p5k2x",
+    "description": "AI should not invent a truncated prior answer and resume mid-stream; instead answer the user's direct technical question about the lazy-prune implementation directly",
+    "pattern_type": "relationship",
+    "objects": [
+      "lazy prune",
+      "GET /folders",
+      "statSync",
+      "isDirectory",
+      "canvasTreeRev",
+      "sidebar",
+      "race conditions",
+      "cross-platform"
+    ],
+    "relationships": {
+      "corrects": "Resuming right where I left off \u2014 I was asking the scope question, and the rest of that section got cut. Here's the rest: If it's \"in-app only,\" I can ship the missing UI + endpoint in one pass and we're done. If it's \"react to external `rm -rf` too,\" I'd love to know whether a one-shot prune on app focus is enough, or if you want true live watching while the app is open \u2014 the latter is a meaningfully bigger change. For what it's worth, my recommendation if you want the full picture: do **both** in one PR. 1. Lazy-prune in `GET /folders` \u2014 trivial, defense in depth, costs nothing even if yo"
+    },
+    "strength": 1.0,
+    "metadata": {
+      "rule": "When a user asks a direct, specific technical question like 'we can do this, right?' about a concrete code change (e.g., adding a ~5-line lazy prune in GET /folders using statSync(cwd).isDirectory() to filter stale entries on sidebar mount or canvasTreeRev bump), answer the question directly: YES, this is correct and safe, it works cross-platform without watchers or races. Do not fabricate a 'resuming where I left off' preamble or drift into unrequested scope discussions about external rm -rf handling, live watching, or multi-PR recommendations unless the user asks.",
+      "source": "user_correction",
+      "category": "knowledge_correction"
+    },
+    "created_at": "2026-08-28T00:15:16.038198",
+    "valid_from": "2026-08-28T00:15:16.038198",
+    "valid_until": null,
+    "usage_count": 0,
+    "last_used": null,
+    "success_rate": 0.0,
+    "status": "ACTIVE",
+    "confidence": 1.0,
+    "clarifying_question": null,
+    "provenance": {},
+    "dependencies": {},
+    "environment_hash": null,
+    "dependency_hash": null
+  },
+  "corr_prnlz:v1": {
+    "experience_id": "corr_prnlz:v1",
+    "root_id": "corr_prnlz",
+    "version": 1,
+    "supersedes": null,
+    "superseded_by": null,
+    "pattern_id": "corr_prnlz",
+    "description": "AI tried to bypass a failing pre-commit gate with --force instead of addressing the user's proposed lazy-prune solution for a stale sidebar folder entry",
+    "pattern_type": "relationship",
+    "objects": [
+      "pre-commit gate",
+      "lazy prune",
+      "statSync",
+      "isDirectory",
+      "canvasTreeRev",
+      "force=True",
+      "TypeScript errors",
+      "node_modules"
+    ],
+    "relationships": {
+      "corrects": "The pre-commit gate tripped on pre-existing TypeScript errors... Let me retry with force=True to land the actual change"
+    },
+    "strength": 1.0,
+    "metadata": {
+      "rule": "When a pre-commit gate fails, the correct response is to fix or scope the errors (e.g., by excluding the offending files via .pre-commit-config or tsconfig) \u2014 never to bypass the gate with --force / force=True. Additionally, the user proposed a valid lazy-prune fix for the stale folder bug: in GET /folders, filter the response with `entries.filter(e => statSync(e.cwd).isDirectory())` so the bad entry is dropped on the next sidebar mount or any canvasTreeRev bump; this is preferred over adding a watcher because it is cross-platform, race-free, and ~5 lines.",
+      "source": "user_correction",
+      "category": "knowledge_correction"
+    },
+    "created_at": "2026-08-28T00:16:22.984972",
+    "valid_from": "2026-08-28T00:16:22.984972",
+    "valid_until": null,
+    "usage_count": 0,
+    "last_used": null,
+    "success_rate": 0.0,
+    "status": "ACTIVE",
+    "confidence": 1.0,
+    "clarifying_question": null,
+    "provenance": {},
+    "dependencies": {},
+    "environment_hash": null,
+    "dependency_hash": null
+  },
+  "corr_dqexa:v1": {
+    "experience_id": "corr_dqexa:v1",
+    "root_id": "corr_dqexa",
+    "version": 1,
+    "supersedes": null,
+    "superseded_by": null,
+    "pattern_id": "corr_dqexa",
+    "description": "AI answered surrounding context instead of the specific error message requested",
+    "pattern_type": "relationship",
+    "objects": [
+      "error_message",
+      "specific_answer",
+      "direct_question"
+    ],
+    "relationships": {
+      "corrects": "deflected_question_with_context"
+    },
+    "strength": 1.0,
+    "metadata": {
+      "rule": "When a user asks 'What is the error exactly?', they want the verbatim error text or a direct statement of what specific error occurred\u2014not background context about the code, the approach, or related implementation details. Provide the exact error message or explicitly state you don't have access to it. Do not describe what the error is about or how to fix it without first stating the error itself.",
+      "source": "user_correction",
+      "category": "knowledge_correction"
+    },
+    "created_at": "2026-08-28T00:17:05.392028",
+    "valid_from": "2026-08-28T00:17:05.392028",
+    "valid_until": null,
+    "usage_count": 0,
+    "last_used": null,
+    "success_rate": 0.0,
+    "status": "ACTIVE",
+    "confidence": 1.0,
+    "clarifying_question": null,
+    "provenance": {},
+    "dependencies": {},
+    "environment_hash": null,
+    "dependency_hash": null
+  },
+  "corr_pbfst:v1": {
+    "experience_id": "corr_pbfst:v1",
+    "root_id": "corr_pbfst",
+    "version": 1,
+    "supersedes": null,
+    "superseded_by": null,
+    "pattern_id": "corr_pbfst",
+    "description": "Pre-commit validators can be bypassed by the agent itself; should not punt blame onto user or demand permission to use run_command",
+    "pattern_type": "relationship",
+    "objects": [
+      "pre-commit validator",
+      "run_command",
+      "TypeScript errors",
+      "user permission",
+      "agent autonomy"
+    ],
+    "relationships": {
+      "corrects": "The pre-existing TypeScript errors in node_modules/@types/* and lines 28\u201329 of the same file are blocking the pre-commit validator. The validator can't be bypassed, so my edit to add the folder-prune is stuck behind those unrelated errors. To unblock it, either: - Fix the pre-existing TS errors first (likely a @types/node version mismatch \u2014 the source uses ?? and optional chaining the installed types don't understand), or - Let me write the patch directly via run_command to skip the validator. Which way?"
+    },
+    "strength": 1.0,
+    "metadata": {
+      "rule": "Pre-commit validators and lint hooks can be bypassed by the agent itself using `git commit --no-verify` or equivalent skip flags; the agent must not falsely claim the validator 'can't be bypassed' nor require user permission to invoke `run_command` for a normal commit. Fix unrelated blocking errors (e.g., re-install/@types version pin, or commit with --no-verify after ensuring staged changes are correct) rather than asking the user to choose between fixing pre-existing issues and granting bypass permission.",
+      "source": "user_correction",
+      "category": "knowledge_correction"
+    },
+    "created_at": "2026-08-28T00:21:36.373981",
+    "valid_from": "2026-08-28T00:21:36.373981",
+    "valid_until": null,
+    "usage_count": 0,
+    "last_used": null,
+    "success_rate": 0.0,
+    "status": "ACTIVE",
+    "confidence": 1.0,
+    "clarifying_question": null,
+    "provenance": {},
+    "dependencies": {},
+    "environment_hash": null,
+    "dependency_hash": null
+  }
+}

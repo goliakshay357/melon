@@ -1,0 +1,24 @@
+{
+  "communication_style:explain_before_tools": {
+    "domain": "communication_style",
+    "value": "explain_before_tools",
+    "description": "Across 5 turns the assistant fired batches of 7-8 tool calls with only one-line preambles ('Let me explore it', 'Let me look at both'), with no complaint from the user but also no progress on the actual question. The user explicitly said 'First, explore the feasibility... and let me know', indicating they want a feasibility assessment communicated, not just code spelunking. Heavy silent exploration without reporting findings violates this.",
+    "evidence": [
+      {
+        "ts": "2026-08-28T00:03:24.331990",
+        "weight": 1.0
+      }
+    ]
+  },
+  "task_framing:feasibility_exploration": {
+    "domain": "task_framing",
+    "value": "feasibility_exploration",
+    "description": "User explicitly framed the task as 'First, explore the feasibility of whether it's possible or not, and let me know' - they want a conclusion/recommendation, not indefinite exploration.",
+    "evidence": [
+      {
+        "ts": "2026-08-28T00:03:24.332185",
+        "weight": 1.0
+      }
+    ]
+  }
+}

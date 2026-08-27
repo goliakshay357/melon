@@ -2,7 +2,6 @@ import { nanoid } from "nanoid";
 import { create } from "zustand";
 import { type ChatMessage, newCardId, type SessionCard, type ToolRun } from "@/types/session-card";
 
-
 // cardId → live SSE stream state
 const streams = new Map<
 	string,
@@ -219,7 +218,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		if (healthTimer) return;
 		const tick = async () => {
 			try {
-				const res = await fetch('/healthz', { cache: 'no-store' });
+				const res = await fetch("/healthz", { cache: "no-store" });
 				const body = await res.json();
 				if (res.ok && body?.ok === true) {
 					set({ serverOffline: false });
@@ -437,7 +436,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			})
 				.then(async (r) => {
 					if (!r.ok) {
-						const d = await r.json().catch(() => ({} as any));
+						const d = await r.json().catch(() => ({}) as any);
 						pushLog(id, `✗ model switch failed: ${d.error ?? r.status} — keeping ${prev ?? "current model"}`);
 						get().setCardError(id, `Model switch failed: ${d.error ?? r.status}`);
 						get().updateCard(id, { model: prev });
@@ -447,7 +446,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					}
 				})
 				.catch((e) => {
-					pushLog(id, `✗ model switch failed: ${e instanceof Error ? e.message : e} — keeping ${prev ?? "current model"}`);
+					pushLog(
+						id,
+						`✗ model switch failed: ${e instanceof Error ? e.message : e} — keeping ${prev ?? "current model"}`,
+					);
 					get().setCardError(id, `Model switch failed: ${e instanceof Error ? e.message : e}`);
 					get().updateCard(id, { model: prev });
 				});
@@ -487,9 +489,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				body: JSON.stringify({ cardId, sessionFile }),
 			});
 			if (!res.ok) throw new Error(await res.text());
-			transcript = await fetch(
-				`/transcript?sessionFile=${encodeURIComponent(sessionFile)}`,
-			).then((r) => r.json());
+			transcript = await fetch(`/transcript?sessionFile=${encodeURIComponent(sessionFile)}`).then((r) => r.json());
 		} catch {
 			return null;
 		}
@@ -498,8 +498,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const maxX = cards.length ? Math.max(...cards.map((c) => c.position.x)) : -400;
 		get().addCard({ x: maxX + 440, y: cards.length ? cards[0].position.y : 0 }, null, cardId);
 		const tMsgs = ((transcript?.messages ?? []) as any[]).filter(
-			(mm: any) =>
-				mm.role === "user" || mm.text || mm.thinking || mm.tools?.length,
+			(mm: any) => mm.role === "user" || mm.text || mm.thinking || mm.tools?.length,
 		);
 		get().updateCard(cardId, {
 			title: "Resumed session",
@@ -514,58 +513,54 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		return cardId;
 	},
 
-    // Force-apply batched stream patches (tab close / visibility loss).
-    flushPending() {
-        for (const [cardId, st] of streams.entries()) {
-            if (st.flushTimer) {
-                clearTimeout(st.flushTimer);
-                st.flushTimer = undefined;
-            }
-            if (!st.pendingPatch) continue;
-            const fn = st.pendingPatch;
-            st.pendingPatch = undefined;
-            const cur = get().cards.find((c) => c.id === cardId);
-            if (!cur) continue;
-            const msgs = [...cur.messages];
-            const last = msgs[msgs.length - 1];
-            if (last?.role === "assistant") msgs[msgs.length - 1] = fn(last);
-            else msgs.push(fn({ role: "assistant", text: "" }));
-            useCanvasStore.setState((s) => ({
-                cards: s.cards.map((c) =>
-                    c.id === cardId ? { ...c, messages: msgs } : c,
-                ),
-            }));
-        }
-    },
+	// Force-apply batched stream patches (tab close / visibility loss).
+	flushPending() {
+		for (const [cardId, st] of streams.entries()) {
+			if (st.flushTimer) {
+				clearTimeout(st.flushTimer);
+				st.flushTimer = undefined;
+			}
+			if (!st.pendingPatch) continue;
+			const fn = st.pendingPatch;
+			st.pendingPatch = undefined;
+			const cur = get().cards.find((c) => c.id === cardId);
+			if (!cur) continue;
+			const msgs = [...cur.messages];
+			const last = msgs[msgs.length - 1];
+			if (last?.role === "assistant") msgs[msgs.length - 1] = fn(last);
+			else msgs.push(fn({ role: "assistant", text: "" }));
+			useCanvasStore.setState((s) => ({
+				cards: s.cards.map((c) => (c.id === cardId ? { ...c, messages: msgs } : c)),
+			}));
+		}
+	},
 
-    // Rebuild chat from pi session ground truth (.jsonl).
-    async hydrateMessages(cardId, sessionFile) {
-        const file = sessionFile ?? get().cards.find((c) => c.id === cardId)?.sessionFile;
-        if (!file) return;
-        try {
-            const res = await fetch(
-                `/transcript?sessionFile=${encodeURIComponent(file)}`,
-            );
-            if (!res.ok) return;
-            const d = await res.json();
-            const msgs = (d.messages ?? []).filter(
-                (m: any) => m.role === "user" || m.text || m.thinking || m.tools?.length,
-            );
-            if (msgs.length === 0) return;
-            get().updateCard(cardId, {
-                sessionId: d.sessionId ?? undefined,
-                messages: msgs.map((m: any) => ({
-                    role: m.role,
-                    text: m.text ?? "",
-                    thinking: m.thinking,
-                    tools: m.tools,
-                })),
-            });
-            pushLog(cardId, `✓ transcript hydrated (${msgs.length} messages from .jsonl)`);
-        } catch {
-            /* keep whatever we have */
-        }
-    },
+	// Rebuild chat from pi session ground truth (.jsonl).
+	async hydrateMessages(cardId, sessionFile) {
+		const file = sessionFile ?? get().cards.find((c) => c.id === cardId)?.sessionFile;
+		if (!file) return;
+		try {
+			const res = await fetch(`/transcript?sessionFile=${encodeURIComponent(file)}`);
+			if (!res.ok) return;
+			const d = await res.json();
+			const msgs = (d.messages ?? []).filter(
+				(m: any) => m.role === "user" || m.text || m.thinking || m.tools?.length,
+			);
+			if (msgs.length === 0) return;
+			get().updateCard(cardId, {
+				sessionId: d.sessionId ?? undefined,
+				messages: msgs.map((m: any) => ({
+					role: m.role,
+					text: m.text ?? "",
+					thinking: m.thinking,
+					tools: m.tools,
+				})),
+			});
+			pushLog(cardId, `✓ transcript hydrated (${msgs.length} messages from .jsonl)`);
+		} catch {
+			/* keep whatever we have */
+		}
+	},
 
 	async sendMessage(cardId, text, opts) {
 		const card = get().cards.find((c) => c.id === cardId);
@@ -601,8 +596,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					headers: { "content-type": "application/json" },
 					body: JSON.stringify(
 						sessionFile
-						? { cardId, sessionFile, model: card.model }
-						: { cardId, cwd: opts?.cwd ?? get().folder ?? undefined, model: card.model },
+							? { cardId, sessionFile, model: card.model }
+							: { cardId, cwd: opts?.cwd ?? get().folder ?? undefined, model: card.model },
 					),
 				});
 				if (!res.ok) throw new Error(`attach ${res.status}: ${await res.text()}`);
@@ -616,7 +611,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					model: info.model,
 				});
 				attached.add(cardId);
-				pushLog(cardId, `✓ attached — model ${info.model ?? "?"}${info.sessionFile ? ` | ${info.sessionFile.split("/").pop()}` : ""}`);
+				pushLog(
+					cardId,
+					`✓ attached — model ${info.model ?? "?"}${info.sessionFile ? ` | ${info.sessionFile.split("/").pop()}` : ""}`,
+				);
 				// structured attach event emitted below via pushEvent
 			} catch (e) {
 				const msg = `Attach failed: ${e instanceof Error ? e.message : e}`;
@@ -633,7 +631,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		if (!st) {
 			pushLog(cardId, `→ SSE connect`);
 			const es = new EventSource(`/sessions/${cardId}/events`);
-			st = { es, buffer: "", thinkingBuffer: "", segSealed: false, thinkingStartTs: Date.now(), toolNames: new Map() };
+			st = {
+				es,
+				buffer: "",
+				thinkingBuffer: "",
+				segSealed: false,
+				thinkingStartTs: Date.now(),
+				toolNames: new Map(),
+			};
 			streams.set(cardId, st);
 			es.onopen = () => pushLog(cardId, "✓ SSE open");
 			es.onmessage = (ev) => {
@@ -728,10 +733,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 							if (last?.role === "assistant") {
 								msgs[msgs.length - 1] = {
 									...last,
-									tools: [...(last.tools ?? []), { name: "tool", status: "running", output: "", ...run } as ToolRun],
+									tools: [
+										...(last.tools ?? []),
+										{ name: "tool", status: "running", output: "", ...run } as ToolRun,
+									],
 								};
 							} else {
-								msgs.push({ role: "assistant", text: "", tools: [{ name: "tool", status: "running", output: "", ...run } as ToolRun] });
+								msgs.push({
+									role: "assistant",
+									text: "",
+									tools: [{ name: "tool", status: "running", output: "", ...run } as ToolRun],
+								});
 							}
 							return { ...c, messages: msgs };
 						}),

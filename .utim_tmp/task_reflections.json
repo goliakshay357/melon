@@ -1,0 +1,58 @@
+[
+  {
+    "timestamp": "2026-08-28T00:03:24.330752",
+    "user_task": "When I do rm -rf of that folder, I should not see that folder. - I shouldn't see that in the navbar, but this is something out of scope, beyond this application. I don't know if you can keep it in syn",
+    "learnings": {
+      "has_usable_pattern": true,
+      "experiences": [
+        {
+          "pattern_id": "sidebar_sync_with_filesystem_deletions",
+          "description": "When a user asks whether a UI sidebar can stay in sync with filesystem deletions (rm -rf), the task is inherently fragile because the app cannot detect external filesystem mutations without watchers. This is a feasibility question, not an implementation task.",
+          "pattern_type": "relationship",
+          "objects": [
+            "sidebar",
+            "navbar",
+            "filesystem",
+            "rm-rf",
+            "file_watcher"
+          ],
+          "relationships": {
+            "external_filesystem_changes_are_unobservable": true,
+            "requires_filesystem_watcher": true,
+            "out_of_app_scope": true
+          },
+          "rule": "When users ask if a UI element (sidebar/navbar) can stay in sync with external filesystem operations like `rm -rf`, recognize this as a feasibility exploration task. The answer typically requires either a filesystem watcher (chokidar/fs.watch) polling the source directory, or accepting eventual inconsistency. State the feasibility constraints before exploring code, so the user knows the scope.",
+          "clarifying_question": "Do you want the app to actively watch the filesystem for external deletions, or are you only concerned with deletions made through the app itself?"
+        }
+      ],
+      "preference_signals": [
+        {
+          "domain": "communication_style",
+          "value": "explain_before_tools",
+          "polarity": 1.0,
+          "description": "Across 5 turns the assistant fired batches of 7-8 tool calls with only one-line preambles ('Let me explore it', 'Let me look at both'), with no complaint from the user but also no progress on the actual question. The user explicitly said 'First, explore the feasibility... and let me know', indicating they want a feasibility assessment communicated, not just code spelunking. Heavy silent exploration without reporting findings violates this."
+        },
+        {
+          "domain": "task_framing",
+          "value": "feasibility_exploration",
+          "polarity": 1.0,
+          "description": "User explicitly framed the task as 'First, explore the feasibility of whether it's possible or not, and let me know' - they want a conclusion/recommendation, not indefinite exploration."
+        }
+      ],
+      "conventions": [
+        "The 'navbar' the user refers to is the sidebar.tsx component in the canvas directory of the melon-web package",
+        "Folder/canvas persistence data lives in .melon/canvases",
+        "The project is a pnpm monorepo (pi workspace) with packages including melon-server, melon-web, and desktop"
+      ],
+      "rules": [
+        "When a user requests a feasibility assessment, deliver a written verdict (possible/not possible/with caveats) before or alongside tool exploration, not after unbounded exploration",
+        "For sidebar/navbar filesystem sync questions, propose a concrete mechanism (file watcher + invalidation event) and ask the user to confirm scope before implementing",
+        "Limit consecutive exploratory tool calls to ~3-5 before pausing to report findings to the user",
+        "When a tool call is malformed, acknowledge the error explicitly and retry rather than producing zero tool calls silently"
+      ],
+      "corrections": [
+        "User did not issue a direct correction, but repeated the same prompt 5 times indicating the assistant failed to either (a) ask a clarifying question, (b) deliver a feasibility verdict, or (c) make meaningful progress toward answering the sync question"
+      ]
+    }
+  }
+]

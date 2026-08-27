@@ -11,7 +11,16 @@
 //   POST /sessions/:cardId/abort
 
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -28,8 +37,7 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import { expandHome, loadConfig, type MelonConfig, modelToString, preview } from "./config.ts";
 import { SessionRegistry } from "./session-registry.ts";
-import { loadSettings, saveSettings, touchRecentModel, denylistModel, getDefaultModel } from "./settings.js";
-
+import { denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel } from "./settings.js";
 
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
@@ -62,7 +70,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		"- INTERACTION (MANDATORY for 3D scenes): the scene MUST be draggable and zoomable. Add OrbitControls: import { OrbitControls } from 'three-orbit'; then const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true; and call controls.update() inside the animation loop. The user must be able to DRAG to orbit/rotate and SCROLL (or pinch) to zoom.",
 		"- Inline all CSS/JS. Dark theme: background #161b22, readable colors.",
 		"- Animation via requestAnimationFrame; no external files.",
-	"- NEVER emit mermaid, flowchart, or ASCII-art diagrams (e.g. flowchart TB). They render badly. For diagrams use a viz-html scene instead; otherwise explain in prose.",
+		"- NEVER emit mermaid, flowchart, or ASCII-art diagrams (e.g. flowchart TB). They render badly. For diagrams use a viz-html scene instead; otherwise explain in prose.",
 		"- AUDIENCE (MANDATORY): explain from a PRODUCT MANAGER's point of view — the reader is a NON-DEVELOPER (a junior intern). Describe WHAT the system does: users, features, business flows, and how data moves between parts. NEVER show developer internals: function names, variables, file paths, code snippets, DB schemas, or API internals. If a technical term is unavoidable, give it a plain-language label.",
 		"- DIAGRAM STYLE: prefer simple labeled box-and-arrow layouts (like Kubernetes architecture diagrams): components as labeled boxes, connections as arrows with plain-language labels. Use color only to distinguish roles (users, services, data stores).",
 		"- VIEWPORT: your HTML renders in a frame ~380px wide x 320px tall (auto-height up to 700px). Design for that: vertical stacking, nothing critical below 300px height. ABSOLUTELY NO horizontal overflow — set body { overflow-x: hidden } and keep all elements within 100% width.",
@@ -137,9 +145,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 						text: `turn_end (${(event.message as any)?.stopReason ?? "done"})`,
 					});
 				} else if (event.type === "auto_retry_start") {
-					registry.broadcast(cardId, { type: "raw", text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}` });
+					registry.broadcast(cardId, {
+						type: "raw",
+						text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}`,
+					});
 				} else if (event.type === "summarization_retry_scheduled") {
-					registry.broadcast(cardId, { type: "raw", text: `context overflow — summarizing and retrying: ${event.errorMessage ?? "context limit"}` });
+					registry.broadcast(cardId, {
+						type: "raw",
+						text: `context overflow — summarizing and retrying: ${event.errorMessage ?? "context limit"}`,
+					});
 				} else if (event.type === "compaction_start") {
 					registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
 				} else if (event.type === "queue_update") {
@@ -157,7 +171,10 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					);
 					// Auto-prune models the provider has removed ("not supported").
 					const errMsg = String(last?.errorMessage ?? "");
-					if (last?.stopReason === "error" && /not supported|no longer|deprecated|unknown model|does not exist/i.test(errMsg)) {
+					if (
+						last?.stopReason === "error" &&
+						/not supported|no longer|deprecated|unknown model|does not exist/i.test(errMsg)
+					) {
 						const dead = last?.model ? `${last.provider ?? "?"}/${last.model}` : null;
 						if (dead && !dead.includes("?/")) {
 							denylistModel(dead);
@@ -203,9 +220,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 						error: msg?.errorMessage ?? undefined,
 					});
 				} else if (event.type === "auto_retry_start") {
-					registry.broadcast(cardId, { type: "raw", text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}` });
+					registry.broadcast(cardId, {
+						type: "raw",
+						text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}`,
+					});
 				} else if (event.type === "summarization_retry_scheduled") {
-					registry.broadcast(cardId, { type: "raw", text: `context overflow — summarizing and retrying: ${event.errorMessage ?? "context limit"}` });
+					registry.broadcast(cardId, {
+						type: "raw",
+						text: `context overflow — summarizing and retrying: ${event.errorMessage ?? "context limit"}`,
+					});
 				} else if (event.type === "compaction_start") {
 					registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
 				} else if (event.type === "agent_end") {
@@ -240,7 +263,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				}
 			} catch (e) {
 				console.error(`[${cardId}] event handler threw:`, e);
-				try { registry.broadcast(cardId, { type: "raw", text: `⚠ handler error: ${(e as Error)?.message ?? e}` }); } catch {}
+				try {
+					registry.broadcast(cardId, { type: "raw", text: `⚠ handler error: ${(e as Error)?.message ?? e}` });
+				} catch {}
 			}
 		});
 	}
@@ -767,10 +792,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 
 			if (entry) {
 				authType = entry.type ?? undefined;
-				if (entry.type === "api_key" && typeof entry.key === "string")
-					keyPreview = maskKey(entry.key);
-				else if (entry.type === "oauth" && typeof entry.access === "string")
-					keyPreview = maskKey(entry.access);
+				if (entry.type === "api_key" && typeof entry.key === "string") keyPreview = maskKey(entry.key);
+				else if (entry.type === "oauth" && typeof entry.access === "string") keyPreview = maskKey(entry.access);
 			} else if (melonKey) {
 				keyPreview = maskKey(melonKey);
 				authType = "api_key";
@@ -817,8 +840,6 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { ok: true };
 	});
 
-
-
 	// Transcript from ground truth: pi session .jsonl (context-aware, compaction-safe).
 	app.get("/transcript", async (req, reply) => {
 		const q = req.query as any;
@@ -830,11 +851,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			const sm = SessionManager.open(file);
 			const ctx = sm.buildContextEntries() as any[];
 			const clean = (t: string) =>
-				t
-					.split("\n[VISUALIZATION PROTOCOL")[0]
-					.split("\n[VIZ MODE IS ON")[0]
-					.split("\n[READ-ONLY MODE")[0]
-					.trim();
+				t.split("\n[VISUALIZATION PROTOCOL")[0].split("\n[VIZ MODE IS ON")[0].split("\n[READ-ONLY MODE")[0].trim();
 			const textOf = (content: any): string =>
 				(Array.isArray(content) ? content : [])
 					.filter((b: any) => b.type === "text")
@@ -941,8 +958,6 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const s = registry.get((req.params as any).cardId);
 		await s?.runtime.session.abort();
 	});
-
-
 
 	// Serve web UI in production (when web-dist exists next to server)
 	// Resolve web-dist relative to THIS script (not cwd — packaged apps launch from / or home).

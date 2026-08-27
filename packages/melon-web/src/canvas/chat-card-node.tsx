@@ -568,6 +568,22 @@ function ChatCardNodeInner({
         dbg('textarea-grow', `${before || 'auto'} -> ${el.style.height}`);
     }, []);
 
+    // Copy selected text with Ctrl+G / Cmd+G — works in the card without expanding.
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'g') return;
+            const el = document.activeElement;
+            if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA')) return;
+            const sel = window.getSelection()?.toString();
+            if (sel) {
+                e.preventDefault();
+                navigator.clipboard.writeText(sel).catch(() => {});
+            }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, []);
+
     const abortStream = () => {
         fetch(`/sessions/${id}/abort`, { method: 'POST' }).catch(() => {});
     };
@@ -738,7 +754,7 @@ function ChatCardNodeInner({
             <div
                 ref={scrollTo}
                 onScroll={(e) => handleMessagesScroll(e.currentTarget)}
-                className="nowheel h-full space-y-4 overflow-y-auto px-4 py-3"
+                className="nodrag nowheel h-full select-text space-y-4 overflow-y-auto px-4 py-3"
             >
                 {card.messages.length === 0 && (
                     <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
