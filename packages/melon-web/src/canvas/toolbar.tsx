@@ -1,21 +1,17 @@
 import { useState } from 'react';
 import { useOnViewportChange, useReactFlow } from '@xyflow/react';
-import { Maximize, Moon, Sun, ZoomIn, ZoomOut } from 'lucide-react';
-import { useCanvasStore } from '@/store/canvas-store';
-import { getTheme, THEMES } from '@/theme/themes';
-import { useThemeStore } from '@/theme/theme-store';
+import { Maximize, ZoomIn, ZoomOut } from 'lucide-react'; // Moon, Sun disabled
+// import { useCanvasStore } from '@/store/canvas-store';  // DISABLED (scroll-pane)
+// import { getTheme, THEMES } from '@/theme/themes';  // DISABLED (theme toggle)
+// import { useThemeStore } from '@/theme/theme-store';  // DISABLED (theme toggle)
 
 export function Toolbar() {
     const { zoomIn, zoomOut, fitView, getZoom } = useReactFlow();
     const [zoom, setZoom] = useState(Math.round(getZoom() * 100));
-    const scrollAction = useCanvasStore((s) => s.scrollAction);
-    const setScrollAction = useCanvasStore((s) => s.setScrollAction);
-    const theme = getTheme(useThemeStore((s) => s.themeId));
-
-    const cycleTheme = () => {
-        const idx = THEMES.findIndex((t) => t.id === theme.id);
-        useThemeStore.getState().setTheme(THEMES[(idx + 1) % THEMES.length].id);
-    };
+    // const scrollAction = useCanvasStore((s) => s.scrollAction);  // DISABLED
+    // const setScrollAction = useCanvasStore((s) => s.setScrollAction);  // DISABLED
+    // const theme = getTheme(useThemeStore((s) => s.themeId));  // DISABLED
+    // const cycleTheme = () => { ... };  // DISABLED (theme toggle)
 
     useOnViewportChange({
         onChange: (v) => setZoom(Math.round(v.zoom * 100)),
@@ -42,6 +38,7 @@ export function Toolbar() {
             >
                 <Maximize className="size-4" />
             </button>
+            {/* DISABLED — theme toggle + scroll pane
             <div className="mx-1 h-5 w-px bg-border" />
             <button className={btn} onClick={cycleTheme} title={`Theme: ${theme.label}`}>
                 {theme.appearance === 'dark' ? <Moon className="size-4" /> : <Sun className="size-4" />}
@@ -58,6 +55,7 @@ export function Toolbar() {
                 <option value="pan">scroll = pan</option>
                 <option value="zoom">scroll = zoom</option>
             </select>
+            */}
         </div>
     );
 }
