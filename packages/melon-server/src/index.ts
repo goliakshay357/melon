@@ -38,7 +38,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { expandHome, loadConfig, type MelonConfig, modelToString, preview } from "./config.ts";
 import { SessionRegistry } from "./session-registry.ts";
 import { denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel } from "./settings.js";
-import { loadSkills } from "./skills.js";
+import { loadSkills, materializeSkills } from "./skills.js";
 
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
@@ -749,6 +749,18 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const prev = s.activeSkills ?? [];
 		s.activeSkills = next;
 		const skills = loadSkills();
+		// Newly enabled skills: activate via pi's NATIVE /skill: command so the
+		// model treats them as genuinely loaded (plain-text [SKILL: ...] was
+		// ignored). Removed skills: retract explicitly.
+		for (const id of next) {
+			if (!prev.includes(id) && skills[id]) {
+				try {
+					await s.runtime.session.followUp(`/skill:${id}`);
+				} catch {
+					/* ignore */
+				}
+			}
+		}
 		for (const id of prev) {
 			if (!next.includes(id) && skills[id]) {
 				try {
@@ -987,14 +999,22 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		registry.broadcast(cardId, { type: "raw", text: "⬇ prompt received by server" });
 		try {
 			let text = (req.body as any)?.text ?? "";
-			// Inject the card's active skills so the AI behaves accordingly.
+			// Inject enabled skills in pi's native <skill name=...> block format
+			// with explicit "ACTIVATED" framing — the model treats these as
+			// genuinely loaded and can report them when asked.
 			const activeSkills = s.activeSkills ?? [];
 			if (activeSkills.length > 0) {
 				const sk = loadSkills();
-				const parts = activeSkills
+				const blocks = activeSkills
 					.filter((id) => sk[id])
-					.map((id) => `[SKILL: ${sk[id].name}]\n${sk[id].instructions}`);
-				if (parts.length) text = `${text}\n\n${parts.join("\n\n")}`;
+					.map(
+						(id) =>
+							`<skill name="${sk[id].id}" location="${join(getAgentDir(), "skills", sk[id].id, "SKILL.md")}">\n${sk[id].instructions}\n</skill>`,
+					)
+					.join("\n\n");
+				if (blocks) {
+					text = `${text}\n\n[ACTIVATED SKILLS — REQUIRED]\nThe following skills are currently ENABLED for this session and you MUST follow them. When asked which skills are enabled for you, list exactly these names.\n\n${blocks}`;
+				}
 			}
 			await s.runtime.session.prompt(text);
 			console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
@@ -1054,6 +1074,7 @@ function seedFromPiIfEmpty(): void {
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop() ?? "")) {
 	const config = loadConfig();
 	seedFromPiIfEmpty();
+	materializeSkills();
 	const app = await buildApp();
 	const addr = await app.listen({ port: config.port, host: "127.0.0.1" });
 	const boundPort = Number(String(addr).split(":").pop());

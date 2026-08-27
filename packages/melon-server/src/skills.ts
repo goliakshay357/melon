@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, existsSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -47,6 +47,31 @@ Keep prose explanation around the blocks.`,
 DIAGRAM STYLE: prefer simple labeled box-and-arrow layouts (like Kubernetes architecture diagrams): components as labeled boxes, connections as arrows with plain-language labels. Use color only to distinguish roles (users, services, data stores).`,
 	},
 };
+
+/**
+ * Write every custom skill (built-ins + skills.json) as a real SKILL.md in
+ * <agentDir>/skills/<id>/SKILL.md — pi's resource loader discovers these, so
+ * `/skill:<id>` activates them natively and the model treats them as genuine.
+ * (Pi skills are already on disk; this only materializes melon-owned ones.)
+ */
+export function materializeSkills(): void {
+	const dir = join(getAgentDir(), "skills");
+	const all = loadSkills();
+	for (const sk of Object.values(all)) {
+		const skillDir = join(dir, sk.id);
+		const md = join(skillDir, "SKILL.md");
+		if (existsSync(md)) continue; // already materialized (or pi-owned) — keep on-disk content
+		try {
+			mkdirSync(skillDir, { recursive: true });
+			const front = [`---`, `name: ${sk.id}`, sk.description ? `description: '${sk.description.replace(/'/g, "")}'` : null, `---`]
+				.filter((x): x is string => x !== null)
+				.join("\n");
+			writeFileSync(md, `${front}\n\n${sk.instructions}\n`);
+		} catch {
+			/* skip */
+		}
+	}
+}
 
 /**
  * Skill registry.
