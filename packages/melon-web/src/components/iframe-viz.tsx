@@ -16,7 +16,11 @@ export const IframeViz = memo(function IframeViz({ code }: { code: string }) {
             if (e.source !== frameRef.current?.contentWindow) return;
             const d = e.data as { type?: string; height?: number };
             if (d?.type === 'melon-viz-height' && typeof d.height === 'number') {
-                setHeight(Math.min(Math.max(Math.round(d.height), 200), 700));
+                const h = Math.min(Math.max(Math.round(d.height), 200), 700);
+                // Ignore sub-3px changes: the height handshake is a feedback
+                // loop (report → resize → report); a threshold stops 1-2px
+                // wobble from re-rendering/jumping the iframe.
+                setHeight((prev) => (Math.abs(prev - h) < 3 ? prev : h));
             }
         };
         window.addEventListener('message', onMessage);
@@ -26,7 +30,13 @@ export const IframeViz = memo(function IframeViz({ code }: { code: string }) {
     const srcDoc = useMemo(() => {
         const dark = `<style>html,body{margin:0;background:${theme.tokens.vizBackground};color:${theme.tokens.vizForeground};overflow:hidden}</style>`;
         const reporter = `<script>
-            const report = () => parent.postMessage({ type: 'melon-viz-height', height: Math.ceil(document.documentElement.scrollHeight) }, '*');
+            let lastH = -1;
+            const report = () => {
+                const h = Math.ceil(document.documentElement.scrollHeight);
+                if (h === lastH) return; // no change — don't re-announce (stops the loop)
+                lastH = h;
+                parent.postMessage({ type: 'melon-viz-height', height: h }, '*');
+            };
             window.addEventListener('load', report);
             // Body doesn't exist yet when this runs (script is in <head>) — attach
             // the observer only once the document is ready, or observe() throws.
@@ -53,7 +63,12 @@ export const IframeViz = memo(function IframeViz({ code }: { code: string }) {
                 title="visualization"
                 sandbox="allow-scripts"
                 srcDoc={srcDoc}
-                style={{ height, width: '100%', backgroundColor: theme.tokens.vizBackground }}
+                style={{
+                    height,
+                    width: '100%',
+                    backgroundColor: theme.tokens.vizBackground,
+                    transition: 'height 150ms ease',
+                }}
                 className="block max-w-full border-0"
             />
         </div>
