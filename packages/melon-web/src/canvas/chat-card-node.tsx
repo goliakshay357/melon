@@ -443,6 +443,8 @@ function ChatCardNodeInner({
     const [view, setView] = useState<'chat' | 'trajectory'>('chat');
     const [openPicker, setOpenPicker] = useState<'model' | 'provider' | null>(null);
     const [editingTitle, setEditingTitle] = useState(false);
+    const dbg = (...args: unknown[]) => console.log('[ui-debug]', ...args);
+    useEffect(() => { dbg('card mounted', id); }, []);
     const scrollRef = useRef<HTMLDivElement>(null);
     const maxScrollRef = useRef<HTMLDivElement>(null);
     const atBottomRef = useRef(true); // user pinned to the newest output?
@@ -451,10 +453,12 @@ function ChatCardNodeInner({
 
     const handleMessagesScroll = (el: HTMLDivElement) => {
         const near = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+        dbg('scroll', `st=${el.scrollTop} sh=${el.scrollHeight} ch=${el.clientHeight} atBottom=${near}`);
         atBottomRef.current = near;
         setShowDown(!near); // React bails out when unchanged
     };
     const goToBottom = () => {
+        dbg('DOWN-ARROW clicked — jumping to bottom');
         atBottomRef.current = true;
         setShowDown(false);
         const el = scrollRef.current;
@@ -466,7 +470,8 @@ function ChatCardNodeInner({
     // Auto-follow ONLY while the user is at the bottom. If they scroll away,
     // new output must NOT yank them down — the ↓ button returns them instead.
     useEffect(() => {
-        if (!atBottomRef.current) return;
+        dbg('stream-change fired', `atBottom=${atBottomRef.current} msgs=${card?.messages.length}`);
+        if (!atBottomRef.current) return; // user scrolled away — DO NOT yank
         const el = scrollRef.current;
         if (el) el.scrollTop = el.scrollHeight;
         const el2 = maxScrollRef.current;
@@ -479,7 +484,9 @@ function ChatCardNodeInner({
     useEffect(() => {
         const attach = (el: HTMLDivElement | null) => {
             if (!el) return;
-            const ro = new ResizeObserver(() => {
+            const ro = new ResizeObserver((entries) => {
+                const cr = entries[0]?.contentRect;
+                dbg('viewport-resize', `ch=${cr?.height?.toFixed(0)} atBottom=${atBottomRef.current} ${atBottomRef.current ? '→ snap' : '→ leave'}`);
                 if (atBottomRef.current) el.scrollTop = el.scrollHeight;
             });
             ro.observe(el);
@@ -498,8 +505,10 @@ function ChatCardNodeInner({
     // made the footer bob up/down. useCallback stops that.
     const growTextarea = useCallback((el: HTMLTextAreaElement | null) => {
         if (!el) return;
+        const before = el.style.height;
         el.style.height = 'auto';
         el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+        dbg('textarea-grow', `${before || 'auto'} -> ${el.style.height}`);
     }, []);
 
     const abortStream = () => {
