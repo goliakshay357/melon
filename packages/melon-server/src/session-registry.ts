@@ -4,7 +4,6 @@ export interface AttachedSession {
 	runtime: any; // AgentSessionRuntime — typed loosely: internals shift across pi versions
 	clients: Set<FastifyReply>;
 	busy: boolean;
-	vizProtocolSent?: boolean;
 	lastViz?: boolean;
 	/** Skill ids currently active for this card's session. */
 	activeSkills?: string[];
