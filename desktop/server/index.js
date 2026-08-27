@@ -406,6 +406,10 @@ export async function buildApp(deps = {}) {
         catch (e) {
             return reply.code(400).send({ error: e.message });
         }
+        // Opening a folder registers it in the sidebar history. Without this,
+        // folders added via the native desktop dialog never reach the navbar
+        // (only canvas SAVES used to call touchFolder).
+        touchFolder(dir);
         const cvDir2 = canvasesDir(dir);
         const out = [];
         try {

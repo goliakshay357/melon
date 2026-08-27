@@ -28,7 +28,11 @@ export const IframeViz = memo(function IframeViz({ code }: { code: string }) {
         const reporter = `<script>
             const report = () => parent.postMessage({ type: 'melon-viz-height', height: Math.ceil(document.documentElement.scrollHeight) }, '*');
             window.addEventListener('load', report);
-            new ResizeObserver(report).observe(document.body);
+            // Body doesn't exist yet when this runs (script is in <head>) — attach
+            // the observer only once the document is ready, or observe() throws.
+            window.addEventListener('DOMContentLoaded', () => {
+                if (document.body) new ResizeObserver(report).observe(document.body);
+            });
             setTimeout(report, 50); setTimeout(report, 500);
         </scr` + `ipt>`;
         let doc = code;

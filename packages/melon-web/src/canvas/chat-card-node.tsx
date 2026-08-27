@@ -39,6 +39,63 @@ function Spinner() {
 }
 
 // ── 💭 Thinking ──────────────────────────────────────────────────────────
+type MessageShape = {
+    role: string;
+    text: string;
+    thinking?: string;
+    tools?: Array<{ callId: string; name: string; status: string; args?: string; output: string }>;
+};
+
+// MODULE-LEVEL + memoized: a stable component identity means React reconciles
+// messages on re-render instead of REMOUNTING them (which reloaded viz iframes
+// and made the chat bounce up/down while typing).
+const MessageBlocks = ReactMemo(function MessageBlocks({
+    m,
+    index,
+    cardId,
+    streaming,
+    totalMessages,
+}: {
+    m: MessageShape;
+    index: number;
+    cardId: string;
+    streaming: boolean;
+    totalMessages: number;
+}) {
+    if (m.role === 'user') {
+        return (
+            <div className="flex justify-end">
+                <div className="max-w-[92%] overflow-hidden rounded-xl bg-primary/10 px-3 py-1.5 text-xs leading-relaxed text-primary">
+                    {m.text}
+                </div>
+            </div>
+        );
+    }
+    const isStreamingTail = streaming && index === totalMessages - 1;
+    return (
+        <div className="min-w-0 space-y-2 border-l-2 border-secondary pl-3">
+            {m.thinking != null && (
+                <ThinkingBlock
+                    cardId={cardId}
+                    index={index}
+                    text={m.thinking}
+                    active={!m.text && streaming}
+                />
+            )}
+            {(m.tools ?? []).map((t) => (
+                <ToolRunBlock key={t.callId} cardId={cardId} run={t as never} />
+            ))}
+            {isStreamingTail ? (
+                <StreamText content={m.text} />
+            ) : (
+                <div className="rounded-lg bg-secondary/40 px-3 py-2">
+                    <MarkdownBlock content={m.text} />
+                </div>
+            )}
+        </div>
+    );
+});
+
 function ThinkingBlock({
     cardId,
     index,
@@ -672,40 +729,9 @@ function ChatCardNodeInner({
     );
 
     /** One assistant message = independent sibling blocks (DSH-style). */
-    const MessageBlocks = ({ m, index }: { m: { role: string; text: string; thinking?: string; tools?: Array<{ callId: string; name: string; status: string; args?: string; output: string }> }; index: number }) => {
-        if (m.role === 'user') {
-            return (
-                <div className="flex justify-end">
-                    <div className="max-w-[92%] overflow-hidden rounded-xl bg-primary/10 px-3 py-1.5 text-xs leading-relaxed text-primary">
-                        {m.text}
-                    </div>
-                </div>
-            );
-        }
-        const isStreamingTail = card.status === 'streaming' && index === card.messages.length - 1;
-        return (
-            <div className="min-w-0 space-y-2 border-l-2 border-secondary pl-3">
-                {m.thinking != null && (
-                    <ThinkingBlock
-                        cardId={id}
-                        index={index}
-                        text={m.thinking}
-                        active={!m.text && card.status === 'streaming'}
-                    />
-                )}
-                {(m.tools ?? []).map((t) => (
-                    <ToolRunBlock key={t.callId} cardId={id} run={t as never} />
-                ))}
-                {isStreamingTail ? (
-                    <StreamText content={m.text} />
-                ) : (
-                    <div className="rounded-lg bg-secondary/40 px-3 py-2">
-                        <MarkdownBlock content={m.text} />
-                    </div>
-                )}
-            </div>
-        );
-    };
+    // MessageBlocks now lives at module level (stable identity — an inline
+    // component here caused React to remount every message on each render,
+    // reloading viz iframes and making the chat bounce).
 
     const messagesBody = (scrollTo: React.RefObject<HTMLDivElement>) => (
         <div className="relative min-h-0 min-w-0 flex-1">
@@ -720,7 +746,14 @@ function ChatCardNodeInner({
                     </p>
                 )}
                 {card.messages.map((m, i) => (
-                    <MessageBlocks key={i} m={m} index={i} />
+                    <MessageBlocks
+                        key={i}
+                        m={m}
+                        index={i}
+                        cardId={id}
+                        streaming={card.status === 'streaming'}
+                        totalMessages={card.messages.length}
+                    />
                 ))}
                 {card.status === 'streaming' &&
                     (card.messages.length === 0 ||
