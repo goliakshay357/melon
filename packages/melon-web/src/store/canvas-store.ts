@@ -129,6 +129,7 @@ interface CanvasState {
 	setModel: (id: string, model: string) => void;
 	setCardError: (id: string, message: string) => void;
 	clearCardError: (id: string) => void;
+	setSkills: (id: string, skills: string[]) => void;
 	resizeCard: (id: string, width: number, height: number) => void;
 	undo: () => boolean;
 	deleteCards: (ids: string[]) => void;
@@ -345,6 +346,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			status: "idle",
 			messages: [],
 			debug: true,
+			skills: [],
 		};
 		set((s) => ({ cards: [...s.cards, card] }));
 		return card.id;
@@ -406,6 +408,25 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		set((s) => ({
 			cards: s.cards.map((c) => (c.id === id ? { ...c, ...patch } : c)),
 		}));
+	},
+
+	// Toggle a card's active skills (persists via autosave; live-switches if attached).
+	setSkills(id, skills) {
+		get().updateCard(id, { skills });
+		if (attached.has(id)) {
+			fetch(`/sessions/${id}/skills`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ skills }),
+			})
+				.then(async (r) => {
+					if (!r.ok) {
+						const d = await r.json().catch(() => ({} as any));
+						pushLog(id, `✗ skills update failed: ${d.error ?? r.status}`);
+					}
+				})
+				.catch((e) => pushLog(id, `✗ skills update failed: ${e instanceof Error ? e.message : e}`));
+		}
 	},
 
 	// Prominent on-card error banner.

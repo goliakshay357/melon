@@ -11,6 +11,7 @@ import { ArrowUp, BarChart3, Bug, ChevronDown, Copy, Minimize2, Plus, Square, X 
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { ModelPicker } from '@/components/model-picker';
+import { SkillsPicker } from '@/components/skills-picker';
 import { ProviderPicker } from '@/components/provider-picker';
 import type { TraceEvent } from '@/types/session-card';
 import { cn } from '@/lib/utils';
@@ -494,11 +495,10 @@ function ChatCardNodeInner({
     const forkCard = useCanvasStore((s) => s.forkCard);
     const deleteCards = useCanvasStore((s) => s.deleteCards);
     const sendMessage = useCanvasStore((s) => s.sendMessage);
-    const folder = useCanvasStore((s) => s.folder);
     const [draft, setDraft] = useState('');
     const [maximized, setMaximized] = useState(false);
     const [view, setView] = useState<'chat' | 'trajectory'>('chat');
-    const [openPicker, setOpenPicker] = useState<'model' | 'provider' | null>(null);
+    const [openPicker, setOpenPicker] = useState<'model' | 'provider' | 'skills' | null>(null);
     const [editingTitle, setEditingTitle] = useState(false);
     const dbg = (...args: unknown[]) => console.log('[ui-debug]', ...args);
     useEffect(() => { dbg('card mounted', id); }, []);
@@ -842,14 +842,12 @@ function ChatCardNodeInner({
                     className="nodrag nowheel block max-h-[120px] w-full resize-none bg-transparent px-3 pt-2.5 text-xs leading-relaxed outline-none placeholder:text-muted-foreground"
                 />
                 <div className="flex items-center gap-1 px-2 pb-1.5 pt-1">
-                    {folder && (
-                        <span
-                            className="truncate rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground"
-                            title={`Workspace: ${folder}`}
-                        >
-                            📁 {folder.split('/').pop()}
-                        </span>
-                    )}
+                    <SkillsPicker
+                        value={card.skills ?? []}
+                        onChange={(skills) => useCanvasStore.getState().setSkills(id, skills)}
+                        open={openPicker === 'skills'}
+                        onOpenChange={(o) => setOpenPicker(o ? 'skills' : null)}
+                    />
                     <ProviderPicker
                         model={card.model ?? ''}
                         onChange={(m) => useCanvasStore.getState().setModel(id, m)}

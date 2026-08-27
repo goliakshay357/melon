@@ -59,6 +59,8 @@ export interface SessionCard {
 	error?: string;
 	/** How full the model's context window is (from pi's getContextUsage). */
 	contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
+	/** Active skill ids for this card (injected into prompts). Default OFF. */
+	skills?: string[];
 	/** Visualization-first mode: agent explains with diagrams/scenes. */
 	vizMode?: boolean;
 	/** Workspace permission for the agent. */

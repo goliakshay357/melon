@@ -6,6 +6,8 @@ export interface AttachedSession {
 	busy: boolean;
 	vizProtocolSent?: boolean;
 	lastViz?: boolean;
+	/** Skill ids currently active for this card's session. */
+	activeSkills?: string[];
 }
 
 export class SessionRegistry {

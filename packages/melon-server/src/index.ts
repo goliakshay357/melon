@@ -38,6 +38,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { expandHome, loadConfig, type MelonConfig, modelToString, preview } from "./config.ts";
 import { SessionRegistry } from "./session-registry.ts";
 import { denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel } from "./settings.js";
+import { loadSkills } from "./skills.js";
 
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
@@ -124,7 +125,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			console.error("model switch failed:", (e as Error)?.message ?? e);
 		}
 		wireEvents(cardId, runtime);
-		registry.set(cardId, { runtime, clients: new Set(), busy: false });
+		registry.set(cardId, { runtime, clients: new Set(), busy: false, activeSkills: [] });
 		return runtime;
 	}
 
@@ -747,6 +748,39 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		model: getDefaultModel(config.defaultModel),
 	}));
 
+	// Available skills for the per-card toggle.
+	app.get("/skills", async () => ({
+		skills: Object.values(loadSkills()).map((sk) => ({
+			id: sk.id,
+			name: sk.name,
+			description: sk.description,
+		})),
+	}));
+
+	// Set a card's active skills + retract removed ones.
+	app.post("/sessions/:cardId/skills", async (req, reply) => {
+		const s = registry.get((req.params as any).cardId);
+		if (!s) return reply.code(404).send({ error: "unknown card" });
+		const next = Array.isArray((req.body as any)?.skills)
+			? ((req.body as any).skills as unknown[]).filter((x): x is string => typeof x === "string")
+			: [];
+		const prev = s.activeSkills ?? [];
+		s.activeSkills = next;
+		const skills = loadSkills();
+		for (const id of prev) {
+			if (!next.includes(id) && skills[id]) {
+				try {
+					await s.runtime.session.followUp(
+						`You are no longer following the "${skills[id].name}" skill. Ignore its instructions from now on.`,
+					);
+				} catch {
+					/* ignore */
+				}
+			}
+		}
+		return { ok: true, skills: next };
+	});
+
 	// Switch model on a live card session.
 	app.post("/sessions/:cardId/model", async (req, reply) => {
 		const s = registry.get((req.params as any).cardId);
@@ -974,6 +1008,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			if (!s.vizProtocolSent) {
 				s.vizProtocolSent = true;
 				text = text + "\n" + PROTOCOL;
+			}
+			// Inject the card's active skills so the AI behaves accordingly.
+			const activeSkills = s.activeSkills ?? [];
+			if (activeSkills.length > 0) {
+				const sk = loadSkills();
+				const parts = activeSkills
+					.filter((id) => sk[id])
+					.map((id) => `[SKILL: ${sk[id].name}]\n${sk[id].instructions}`);
+				if (parts.length) text = `${text}\n\n${parts.join("\n\n")}`;
 			}
 			await s.runtime.session.prompt(text);
 			console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
