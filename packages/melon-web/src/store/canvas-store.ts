@@ -345,7 +345,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			parentId,
 			status: "idle",
 			messages: [],
-			debug: true,
+			debug: false,
 			skills: [],
 		};
 		set((s) => ({ cards: [...s.cards, card] }));

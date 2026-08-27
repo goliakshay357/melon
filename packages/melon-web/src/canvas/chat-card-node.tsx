@@ -697,15 +697,15 @@ function ChatCardNodeInner({
             <button
                 className={cn(
                     'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
-                    card.debug !== false
+                    card.debug === true
                         ? 'bg-amber-500/15 text-amber-500 ring-1 ring-inset ring-amber-500/40'
                         : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
                 )}
                 onClick={(e) => {
                     e.stopPropagation();
-                    useCanvasStore.getState().updateCard(id, { debug: card.debug === false });
+                    useCanvasStore.getState().updateCard(id, { debug: !card.debug });
                 }}
-                title={card.debug !== false ? 'Debug console ON' : 'Debug console OFF'}
+                title={card.debug === true ? 'Debug console ON' : 'Debug console OFF'}
             >
                 <Bug className="size-3.5" />
                 DBG
@@ -929,7 +929,7 @@ function ChatCardNodeInner({
                     </div>
                 )}
                 {view === 'trajectory' ? trajectoryBody : messagesBody(scrollRef)}
-                {card.debug !== false && <DebugConsole logs={card.logs ?? []} />}
+                {card.debug === true && <DebugConsole logs={card.logs ?? []} />}
                 {footerInput}
             </div>
 
@@ -968,7 +968,7 @@ function ChatCardNodeInner({
                                 ) : (
                                     <>
                                         {messagesBody(maxScrollRef)}
-                                        {card.debug !== false && <DebugConsole logs={card.logs ?? []} />}
+                                        {card.debug === true && <DebugConsole logs={card.logs ?? []} />}
                                         {footerInput}
                                     </>
                                 )}
