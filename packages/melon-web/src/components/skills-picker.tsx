@@ -64,6 +64,10 @@ export function SkillsPicker({
                     value.length > 0 && 'bg-accent/15 text-accent ring-1 ring-inset ring-accent/40',
                 )}
                 title="Toggle skills for this card"
+                onMouseDown={(e) => {
+                    e.stopPropagation();
+                    if (open) onOpenChangeRef.current(false);
+                }}
                 onClick={(e) => {
                     e.stopPropagation();
                     onOpenChange(!open);

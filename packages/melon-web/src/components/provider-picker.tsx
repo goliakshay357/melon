@@ -107,6 +107,10 @@ export function ProviderPicker({
             <button
                 className="flex max-w-[140px] cursor-pointer items-center gap-1 truncate rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none transition-colors hover:text-foreground"
                 title={`Provider: ${current || 'none'}`}
+                onMouseDown={(e) => {
+                    e.stopPropagation();
+                    if (open) onOpenChangeRef.current(false);
+                }}
                 onClick={(e) => {
                     e.stopPropagation();
                     onOpenChange(!open);

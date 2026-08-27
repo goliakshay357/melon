@@ -17,6 +17,7 @@ export default defineConfig({
             "/healthz": "http://127.0.0.1:8788",
             "/pick-folder": "http://127.0.0.1:8788",
             "/folders": "http://127.0.0.1:8788",
+            "/skills": "http://127.0.0.1:8788",
         },
     },
     base: './',
