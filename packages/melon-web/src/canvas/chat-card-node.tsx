@@ -74,7 +74,7 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     }
     const isStreamingTail = streaming && index === totalMessages - 1;
     return (
-        <div className="min-w-0 space-y-2 border-l-2 border-secondary pl-3">
+        <div className="min-w-0 space-y-2 pl-1">
             {m.thinking != null && (
                 <ThinkingBlock
                     cardId={cardId}

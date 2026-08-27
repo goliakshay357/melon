@@ -21,6 +21,7 @@ import Fastify from "fastify";
 import { expandHome, loadConfig, modelToString, preview } from "./config.js";
 import { SessionRegistry } from "./session-registry.js";
 import { denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel } from "./settings.js";
+import { loadSkills, materializeSkills } from "./skills.js";
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
 function splitModel(model) {
@@ -37,23 +38,6 @@ async function getModelRuntime() {
 }
 export async function buildApp(deps = {}) {
     const config = loadConfig(deps.config);
-    const PROTOCOL = [
-        "",
-        "[VISUALIZATION PROTOCOL - melon canvas]",
-        "You explain on a visual canvas. When a visual genuinely aids understanding, include:",
-        "2. ```viz-html fenced blocks for interactive 3D/animated scenes.",
-        "viz-html contract (STRICT):",
-        "- ONE complete self-contained HTML document per block.",
-        '- Load three.js via <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js","three-orbit":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/controls/OrbitControls.js"}}</script> then import * as THREE from \'three\'.',
-        "- INTERACTION (MANDATORY for 3D scenes): the scene MUST be draggable and zoomable. Add OrbitControls: import { OrbitControls } from 'three-orbit'; then const controls = new OrbitControls(camera, renderer.domElement); controls.enableDamping = true; and call controls.update() inside the animation loop. The user must be able to DRAG to orbit/rotate and SCROLL (or pinch) to zoom.",
-        "- Inline all CSS/JS. Dark theme: background #161b22, readable colors.",
-        "- Animation via requestAnimationFrame; no external files.",
-        "- NEVER emit mermaid, flowchart, or ASCII-art diagrams (e.g. flowchart TB). They render badly. For diagrams use a viz-html scene instead; otherwise explain in prose.",
-        "- AUDIENCE (MANDATORY): explain from a PRODUCT MANAGER's point of view — the reader is a NON-DEVELOPER (a junior intern). Describe WHAT the system does: users, features, business flows, and how data moves between parts. NEVER show developer internals: function names, variables, file paths, code snippets, DB schemas, or API internals. If a technical term is unavoidable, give it a plain-language label.",
-        "- DIAGRAM STYLE: prefer simple labeled box-and-arrow layouts (like Kubernetes architecture diagrams): components as labeled boxes, connections as arrows with plain-language labels. Use color only to distinguish roles (users, services, data stores).",
-        "- VIEWPORT: your HTML renders in a frame ~380px wide x 320px tall (auto-height up to 700px). Design for that: vertical stacking, nothing critical below 300px height. ABSOLUTELY NO horizontal overflow — set body { overflow-x: hidden } and keep all elements within 100% width.",
-        "Keep prose explanation around the blocks.",
-    ].join("\n");
     const app = Fastify({ logger: false });
     await app.register(cors, { origin: true });
     const registry = new SessionRegistry();
@@ -91,7 +75,7 @@ export async function buildApp(deps = {}) {
             console.error("model switch failed:", e?.message ?? e);
         }
         wireEvents(cardId, runtime);
-        registry.set(cardId, { runtime, clients: new Set(), busy: false });
+        registry.set(cardId, { runtime, clients: new Set(), busy: false, activeSkills: [] });
         return runtime;
     }
     function wireEvents(cardId, runtime) {
@@ -645,7 +629,12 @@ export async function buildApp(deps = {}) {
         return { cwd: dir, canvases, loose };
     });
     // Melon folder history — the navigator's source of truth.
-    app.get("/folders", async () => ({ folders: loadFolderHistory() }));
+    app.get("/folders", async () => {
+        // Only list folders that still exist on disk — rm -rf'd folders vanish
+        // from the sidebar on the next refresh.
+        const folders = loadFolderHistory().filter((f) => statSync(f.cwd, { throwIfNoEntry: false })?.isDirectory() === true);
+        return { folders };
+    });
     app.post("/folders", async (req, reply) => {
         const cwd = req.body?.cwd;
         try {
@@ -722,6 +711,50 @@ export async function buildApp(deps = {}) {
         uptime: Math.round(process.uptime()),
         model: getDefaultModel(config.defaultModel),
     }));
+    // Available skills for the per-card toggle.
+    app.get("/skills", async () => ({
+        skills: Object.values(loadSkills()).map((sk) => ({
+            id: sk.id,
+            name: sk.name,
+            description: sk.description,
+        })),
+    }));
+    // Set a card's active skills + retract removed ones.
+    app.post("/sessions/:cardId/skills", async (req, reply) => {
+        const s = registry.get(req.params.cardId);
+        if (!s)
+            return reply.code(404).send({ error: "unknown card" });
+        const next = Array.isArray(req.body?.skills)
+            ? req.body.skills.filter((x) => typeof x === "string")
+            : [];
+        const prev = s.activeSkills ?? [];
+        s.activeSkills = next;
+        const skills = loadSkills();
+        // Newly enabled skills: activate via pi's NATIVE /skill: command so the
+        // model treats them as genuinely loaded (plain-text [SKILL: ...] was
+        // ignored). Removed skills: retract explicitly.
+        for (const id of next) {
+            if (!prev.includes(id) && skills[id]) {
+                try {
+                    await s.runtime.session.followUp(`/skill:${id}`);
+                }
+                catch {
+                    /* ignore */
+                }
+            }
+        }
+        for (const id of prev) {
+            if (!next.includes(id) && skills[id]) {
+                try {
+                    await s.runtime.session.followUp(`You are no longer following the "${skills[id].name}" skill. Ignore its instructions from now on.`);
+                }
+                catch {
+                    /* ignore */
+                }
+            }
+        }
+        return { ok: true, skills: next };
+    });
     // Switch model on a live card session.
     app.post("/sessions/:cardId/model", async (req, reply) => {
         const s = registry.get(req.params.cardId);
@@ -943,9 +976,19 @@ export async function buildApp(deps = {}) {
         registry.broadcast(cardId, { type: "raw", text: "⬇ prompt received by server" });
         try {
             let text = req.body?.text ?? "";
-            if (!s.vizProtocolSent) {
-                s.vizProtocolSent = true;
-                text = text + "\n" + PROTOCOL;
+            // Inject enabled skills in pi's native <skill name=...> block format
+            // with explicit "ACTIVATED" framing — the model treats these as
+            // genuinely loaded and can report them when asked.
+            const activeSkills = s.activeSkills ?? [];
+            if (activeSkills.length > 0) {
+                const sk = loadSkills();
+                const blocks = activeSkills
+                    .filter((id) => sk[id])
+                    .map((id) => `<skill name="${sk[id].id}" location="${join(getAgentDir(), "skills", sk[id].id, "SKILL.md")}">\n${sk[id].instructions}\n</skill>`)
+                    .join("\n\n");
+                if (blocks) {
+                    text = `${text}\n\n[ACTIVATED SKILLS — REQUIRED]\nThe following skills are currently ENABLED for this session and you MUST follow them. When asked which skills are enabled for you, list exactly these names.\n\n${blocks}`;
+                }
             }
             await s.runtime.session.prompt(text);
             console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
@@ -1004,6 +1047,7 @@ function seedFromPiIfEmpty() {
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop() ?? "")) {
     const config = loadConfig();
     seedFromPiIfEmpty();
+    materializeSkills();
     const app = await buildApp();
     const addr = await app.listen({ port: config.port, host: "127.0.0.1" });
     const boundPort = Number(String(addr).split(":").pop());

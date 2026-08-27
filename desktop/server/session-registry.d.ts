@@ -3,8 +3,9 @@ export interface AttachedSession {
     runtime: any;
     clients: Set<FastifyReply>;
     busy: boolean;
-    vizProtocolSent?: boolean;
     lastViz?: boolean;
+    /** Skill ids currently active for this card's session. */
+    activeSkills?: string[];
 }
 export declare class SessionRegistry {
     private readonly sessions;
