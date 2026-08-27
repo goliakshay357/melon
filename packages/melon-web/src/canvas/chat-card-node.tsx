@@ -458,6 +458,14 @@ function ChatCardNodeInner({
         if (!el) return;
         el.style.height = 'auto';
         el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
+        // The taller footer shrinks the messages viewport, which can push the
+        // newest output out of view. If we're at/near the bottom, snap back.
+        for (const ref of [scrollRef, maxScrollRef]) {
+            const sb = ref.current;
+            if (sb && sb.scrollHeight - sb.scrollTop - sb.clientHeight < 120) {
+                sb.scrollTop = sb.scrollHeight;
+            }
+        }
     };
 
     const abortStream = () => {
