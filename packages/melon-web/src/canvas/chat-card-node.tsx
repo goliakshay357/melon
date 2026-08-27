@@ -665,19 +665,9 @@ function ChatCardNodeInner({
     const footerInput = (
         <div className={cn('shrink-0 border-t border-border p-2', maximized && 'px-4')}>
             {(card.queue?.length ?? 0) > 0 && (
-                <div className="mb-1.5 space-y-0.5">
-                    <p className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
-                        ⏳ queued ({card.queue!.length}) — sends when current run finishes
-                    </p>
-                    {card.queue!.map((q, qi) => (
-                        <div
-                            key={qi}
-                            className="truncate rounded-md bg-secondary/70 px-2 py-1 text-[10px] text-muted-foreground"
-                        >
-                            {q}
-                        </div>
-                    ))}
-                </div>
+                <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-amber-500/90">
+                    ⏳ {card.queue!.length} queued — sends after current run finishes
+                </p>
             )}
             <div className="rounded-xl border border-input bg-background focus-within:border-ring">
                 <textarea

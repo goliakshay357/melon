@@ -205,13 +205,6 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					registry.broadcast(cardId, { type: "raw", text: `context overflow — summarizing and retrying: ${event.errorMessage ?? "context limit"}` });
 				} else if (event.type === "compaction_start") {
 					registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
-				} else if (event.type === "queue_update") {
-					const q = event as any;
-					if (q.steering || q.followUp)
-						registry.broadcast(cardId, {
-							type: "raw",
-							text: `queued: ${q.steering ?? ""}${q.followUp ?? ""}`,
-						});
 				} else if (event.type === "agent_end") {
 					registry.broadcast(cardId, { type: "status", status: "idle" });
 					const msgs = event.messages ?? [];

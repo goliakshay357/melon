@@ -703,20 +703,39 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					}
 				};
 
-				const ensureTool = (run: Partial<ToolRun> & { callId: string; name?: string }, immediate = false) => {
-					patchLastAssistant((m) => {
-						const tools = [...(m.tools ?? [])];
-						const i = tools.findIndex((t) => t.callId === run.callId);
-						if (i >= 0) tools[i] = { ...tools[i], ...run } as ToolRun;
-						else
-							tools.push({
-								name: "tool",
-								status: "running",
-								output: "",
-								...run,
-							} as ToolRun);
-						return { ...m, tools };
-					}, immediate);
+				const ensureTool = (run: Partial<ToolRun> & { callId: string; name?: string }, _immediate = false) => {
+					// Direct, targeted update: find the assistant message that CONTAINS this
+					// tool by callId. Tool events can arrive AFTER a new output segment has
+					// opened — updating only the last message would leave the real tool
+					// stuck on "running" forever (the visible bug).
+					useCanvasStore.setState((s) => ({
+						cards: s.cards.map((c) => {
+							if (c.id !== cardId) return c;
+							let found = false;
+							const messages = c.messages.map((m) => {
+								if (m.role !== "assistant" || found) return m;
+								if (!m.tools?.some((t) => t.callId === run.callId)) return m;
+								found = true;
+								const tools = [...m.tools];
+								const i = tools.findIndex((t) => t.callId === run.callId);
+								if (i >= 0) tools[i] = { ...tools[i], ...run } as ToolRun;
+								return { ...m, tools };
+							});
+							if (found) return { ...c, messages };
+							// First sighting — attach to the last assistant message (or open one).
+							const msgs = [...c.messages];
+							const last = msgs[msgs.length - 1];
+							if (last?.role === "assistant") {
+								msgs[msgs.length - 1] = {
+									...last,
+									tools: [...(last.tools ?? []), { name: "tool", status: "running", output: "", ...run } as ToolRun],
+								};
+							} else {
+								msgs.push({ role: "assistant", text: "", tools: [{ name: "tool", status: "running", output: "", ...run } as ToolRun] });
+							}
+							return { ...c, messages: msgs };
+						}),
+					}));
 				};
 
 				const appendToLastAssistant = (patch: { text?: string; thinking?: string }) => {
