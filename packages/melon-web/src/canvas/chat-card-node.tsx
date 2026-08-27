@@ -518,21 +518,24 @@ function ChatCardNodeInner({
                     {card.title}
                 </span>
             )}
-            <button
-                className={cn(
-                    'nodrag rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
-                    view === 'trajectory'
-                        ? 'bg-accent/15 text-accent ring-1 ring-inset ring-accent/40'
-                        : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-                )}
-                onClick={(e) => {
-                    e.stopPropagation();
-                    setView(view === 'trajectory' ? 'chat' : 'trajectory');
-                }}
-                title="Trajectory debugger"
-            >
-                🧭
-            </button>
+            {/* TRAJECTORY DISABLED — re-enable later by changing {false && ...} to {true && ...} */}
+            {false && (
+                <button
+                    className={cn(
+                        'nodrag rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
+                        view === 'trajectory'
+                            ? 'bg-accent/15 text-accent ring-1 ring-inset ring-accent/40'
+                            : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                    )}
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        setView(view === 'trajectory' ? 'chat' : 'trajectory');
+                    }}
+                    title="Trajectory debugger"
+                >
+                    🧭
+                </button>
+            )}
             <button
                 className={cn(
                     'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
