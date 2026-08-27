@@ -165,8 +165,50 @@ const DIMMED: Theme = {
 	},
 };
 
+
+const GITHUB_DARK: Theme = {
+	id: "github-dark",
+	label: "GitHub",
+	appearance: "dark",
+	vars: {
+		...BASE_VARS,
+		"--background": "216 28% 7%" /* #0d1117 */,
+		"--foreground": "210 17% 82%" /* #c9d1d9 */,
+		"--card": "215 21% 11%" /* #161b22 */,
+		"--card-foreground": "210 17% 82%",
+		"--primary": "212 100% 67%" /* #58a6ff */,
+		"--primary-foreground": "216 28% 7%",
+		"--secondary": "215 15% 15%" /* #21262d */,
+		"--secondary-foreground": "210 17% 82%",
+		"--muted": "215 15% 15%",
+		"--muted-foreground": "212 9% 58%" /* #8b949e */,
+		"--accent": "212 100% 67%" /* #58a6ff */,
+		"--accent-foreground": "216 28% 7%",
+		"--border": "212 12% 21%" /* #30363d */,
+		"--input": "215 15% 15%",
+		"--ring": "212 100% 67%",
+		"--success": "128 49% 49%" /* #3fb950 */,
+		"--warning": "41 72% 48%" /* #d29922 */,
+		"--danger": "4 100% 72%" /* #ff7b72 */,
+		"--surface": "215 21% 11%",
+		"--surface-foreground": "210 17% 82%",
+	},
+	tokens: {
+		success: "#3fb950",
+		warning: "#d29922",
+		danger: "#ff7b72",
+		info: "#58a6ff",
+		purple: "#bc8cff",
+		comment: "#8b949e",
+		canvasDot: "#30363d",
+		minimapNode: "#30363d",
+		vizBackground: "#0d1117",
+		vizForeground: "#c9d1d9",
+	},
+};
+
 /** Registry order = order shown in Settings and cycled by the toolbar toggle. */
-export const THEMES: Theme[] = [DRACULA, LIGHT, DIMMED];
+export const THEMES: Theme[] = [DRACULA, GITHUB_DARK, LIGHT, DIMMED];
 
 export const DEFAULT_THEME_ID = DRACULA.id;
 
