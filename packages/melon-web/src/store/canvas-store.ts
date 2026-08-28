@@ -18,6 +18,8 @@ const streams = new Map<
 		thinkingEventId?: string;
 		thinkingStartTs?: number;
 		toolNames?: Map<string, string>;
+		/** User pressed stop — freeze the display, ignore further deltas. */
+		stopRequested?: boolean;
 	}
 >();
 const attached = new Set<string>(); // cardIds with an existing server-side session
@@ -130,6 +132,7 @@ interface CanvasState {
 	setCardError: (id: string, message: string) => void;
 	clearCardError: (id: string) => void;
 	setSkills: (id: string, skills: string[]) => void;
+	abortCard: (id: string) => void;
 	resizeCard: (id: string, width: number, height: number) => void;
 	undo: () => boolean;
 	deleteCards: (ids: string[]) => void;
@@ -427,6 +430,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				})
 				.catch((e) => pushLog(id, `✗ skills update failed: ${e instanceof Error ? e.message : e}`));
 		}
+	},
+
+	// Stop generation: freeze the display immediately, then abort server-side.
+	abortCard(id) {
+		const st = streams.get(id);
+		if (st) st.stopRequested = true;
+		pushLog(id, "⏹ stop requested — pausing output");
+		fetch(`/sessions/${id}/abort`, { method: "POST" }).catch(() => {});
 	},
 
 	// Prominent on-card error banner.

@@ -585,7 +585,7 @@ function ChatCardNodeInner({
     }, []);
 
     const abortStream = () => {
-        fetch(`/sessions/${id}/abort`, { method: 'POST' }).catch(() => {});
+        useCanvasStore.getState().abortCard(id);
     };
 
     useEffect(() => {
