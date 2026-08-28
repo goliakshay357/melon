@@ -1016,9 +1016,19 @@ export async function buildApp(deps = {}) {
             s.busy = false;
         }
     });
-    app.post("/sessions/:cardId/abort", async (req) => {
+    app.post("/sessions/:cardId/abort", async (req, reply) => {
         const s = registry.get(req.params.cardId);
-        await s?.runtime.session.abort();
+        if (!s)
+            return reply.code(404).send({ error: "unknown card" });
+        registry.broadcast(req.params.cardId, { type: "raw", text: "⏹ stop requested (server)" });
+        try {
+            await s.runtime.session.abort();
+            registry.broadcast(req.params.cardId, { type: "raw", text: "■ generation stopped" });
+        }
+        catch (e) {
+            console.error(`[${req.params.cardId}] abort threw:`, e.message);
+        }
+        return { ok: true };
     });
     // Serve web UI in production (when web-dist exists next to server)
     // Resolve web-dist relative to THIS script (not cwd — packaged apps launch from / or home).
