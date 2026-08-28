@@ -38,8 +38,12 @@ export function SkillsPicker({
             .then((d) => {
                 setSkills(d.skills ?? []);
                 setFailed(false);
+                console.log('[skills-debug] fetch ok:', (d.skills ?? []).length, (d.skills ?? []).map((x: any) => x.id));
             })
-            .catch(() => setFailed(true));
+            .catch((e) => {
+                setFailed(true);
+                console.log('[skills-debug] fetch FAILED:', e);
+            });
     }, [open]);
 
     useEffect(() => {

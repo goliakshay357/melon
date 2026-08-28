@@ -46,9 +46,12 @@ export function materializeSkills(): void {
 	const target = join(getAgentDir(), "skills");
 	try {
 		cpSync(bundled, target, { recursive: true, force: false });
-	} catch {
-		/* bundled dir missing (dev without build) — fall through */
+		console.error(`[skills-debug] materialized ${bundled} -> ${target}`);
+	} catch (e) {
+		console.error(`[skills-debug] materialize FAILED from ${bundled}:`, (e as Error).message);
 	}
+	const all = loadSkills();
+	console.error(`[skills-debug] loadSkills sees ${Object.keys(all).length}: ${Object.keys(all).join(", ")}`);
 }
 
 /**

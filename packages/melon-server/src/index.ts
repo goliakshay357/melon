@@ -731,13 +731,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	}));
 
 	// Available skills for the per-card toggle.
-	app.get("/skills", async () => ({
-		skills: Object.values(loadSkills()).map((sk) => ({
+	app.get("/skills", async () => {
+		const skills = Object.values(loadSkills()).map((sk) => ({
 			id: sk.id,
 			name: sk.name,
 			description: sk.description,
-		})),
-	}));
+		}));
+		console.error(`[skills-debug] /skills returning ${skills.length}: ${skills.map((s) => s.id).join(", ")}`);
+		return { skills };
+	});
 
 	// Set a card's active skills + retract removed ones.
 	app.post("/sessions/:cardId/skills", async (req, reply) => {
