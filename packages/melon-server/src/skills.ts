@@ -1,4 +1,4 @@
-import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync, cpSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
@@ -45,8 +45,23 @@ export function materializeSkills(): void {
 	const bundled = join(dirname(fileURLToPath(import.meta.url)), "skills");
 	const target = join(getAgentDir(), "skills");
 	try {
-		cpSync(bundled, target, { recursive: true, force: false });
-		console.error(`[skills-debug] materialized ${bundled} -> ${target}`);
+		// IMPORTANT: fs.cpSync does NOT work with asar archives (directory ops
+		// aren't asar-patched). Read each bundled SKILL.md (readFileSync is
+		// asar-safe) and write it to the agent dir individually.
+		let copied = 0;
+		const entries = readdirSync(bundled, { withFileTypes: true });
+		for (const entry of entries) {
+			if (!entry.isDirectory()) continue;
+			const src = join(bundled, entry.name, "SKILL.md");
+			if (!existsSync(src)) continue;
+			const dstDir = join(target, entry.name);
+			const dst = join(dstDir, "SKILL.md");
+			if (existsSync(dst)) continue;
+			mkdirSync(dstDir, { recursive: true });
+			writeFileSync(dst, readFileSync(src, "utf8"));
+			copied++;
+		}
+		console.error(`[skills-debug] materialized ${copied} skills from ${bundled} -> ${target}`);
 	} catch (e) {
 		console.error(`[skills-debug] materialize FAILED from ${bundled}:`, (e as Error).message);
 	}
