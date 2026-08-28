@@ -732,13 +732,25 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 
 	// Available skills for the per-card toggle.
 	app.get("/skills", async () => {
-		const skills = Object.values(loadSkills()).map((sk) => ({
+		const all = loadSkills();
+		const skills = Object.values(all).map((sk) => ({
 			id: sk.id,
 			name: sk.name,
 			description: sk.description,
 		}));
+		// Debug payload — lets the UI/console dump exactly what the server sees.
+		const bundled = join(dirname(fileURLToPath(import.meta.url)), "skills");
+		const agentSkills = join(getAgentDir(), "skills");
+		const debug = {
+			appSkillsDir: bundled,
+			appSkillsExists: existsSync(bundled),
+			agentSkillsDir: agentSkills,
+			agentSkillsExists: existsSync(agentSkills),
+			count: Object.keys(all).length,
+			ids: Object.keys(all),
+		};
 		console.error(`[skills-debug] /skills returning ${skills.length}: ${skills.map((s) => s.id).join(", ")}`);
-		return { skills };
+		return { skills, debug };
 	});
 
 	// Set a card's active skills + retract removed ones.
