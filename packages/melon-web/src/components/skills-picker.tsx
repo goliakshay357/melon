@@ -25,6 +25,7 @@ export function SkillsPicker({
 }) {
     const [skills, setSkills] = useState<SkillInfo[]>([]);
     const [query, setQuery] = useState('');
+    const [failed, setFailed] = useState(false);
     const ref = useRef<HTMLDivElement>(null);
     const onOpenChangeRef = useRef(onOpenChange);
     onOpenChangeRef.current = onOpenChange;
@@ -34,8 +35,11 @@ export function SkillsPicker({
         setQuery('');
         fetch('/skills')
             .then((r) => r.json())
-            .then((d) => setSkills(d.skills ?? []))
-            .catch(() => {});
+            .then((d) => {
+                setSkills(d.skills ?? []);
+                setFailed(false);
+            })
+            .catch(() => setFailed(true));
     }, [open]);
 
     useEffect(() => {
@@ -107,7 +111,10 @@ export function SkillsPicker({
                     <p className="px-2 pb-1 pt-1 text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
                         Skills (default off)
                     </p>
-                    {skills.length === 0 && (
+                    {failed && (
+                        <p className="px-2 py-1 text-[11px] text-red-400">couldn't load skills — server down?</p>
+                    )}
+                    {!failed && skills.length === 0 && (
                         <p className="px-2 py-1 text-[11px] text-muted-foreground">no skills found</p>
                     )}
                     {filtered.length === 0 && skills.length > 0 && (
