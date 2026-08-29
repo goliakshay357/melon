@@ -50,7 +50,9 @@ export function ProviderPicker({
 
     useEffect(() => {
         const onDown = (e: MouseEvent) => {
-            if (ref.current && !ref.current.contains(e.target as Node)) onOpenChangeRef.current(false);
+            const t = e.target as Element;
+            if (ref.current && !ref.current.contains(t) && !t.closest?.('[data-melon-picker-root]'))
+                onOpenChangeRef.current(false);
         };
         const onEsc = (e: KeyboardEvent) => {
             if (e.key === 'Escape') onOpenChangeRef.current(false);
@@ -103,7 +105,7 @@ export function ProviderPicker({
     };
 
     return (
-        <div ref={ref} className="relative">
+        <div ref={ref} data-melon-picker-root className="relative">
             <button
                 className="flex max-w-[140px] cursor-pointer items-center gap-1 truncate rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none transition-colors hover:text-foreground"
                 title={`Provider: ${current || 'none'}`}
