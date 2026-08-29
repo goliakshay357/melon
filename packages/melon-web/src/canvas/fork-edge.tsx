@@ -160,7 +160,7 @@ export function ForkEdge(props: EdgeProps) {
         if (kind && tgt) {
             const prev = tgt.edgeToParent ?? {};
             if (kind === 'corner') {
-                const w = live.corners && live.corners.length ? [...live.corners] : null;
+                const w = live.corners && live.corners.length ? [...live.corners] : undefined;
                 updateCard(tgt.id, { edgeToParent: { ...prev, waypoints: w } });
             } else if (kind === 'source') {
                 const box = srcBox;
