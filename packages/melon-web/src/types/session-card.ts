@@ -65,6 +65,8 @@ export interface SessionCard {
 	contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
 	/** Active skill ids for this card (injected into prompts). Default OFF. */
 	skills?: string[];
+	/** Manual mind-map arrow endpoints (which side the arrow attaches to). */
+	edgeToParent?: { sourceSide?: "top" | "bottom" | "left" | "right"; targetSide?: "top" | "bottom" | "left" | "right" };
 	/** Visualization-first mode: agent explains with diagrams/scenes. */
 	vizMode?: boolean;
 	/** Workspace permission for the agent. */

@@ -151,6 +151,10 @@ export function Canvas() {
                     source: c.parentId as string,
                     target: c.id,
                     type: 'fork',
+                    data: {
+                        sourceSide: c.edgeToParent?.sourceSide,
+                        targetSide: c.edgeToParent?.targetSide,
+                    },
                 })),
         [cards],
     );
