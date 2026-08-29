@@ -5,7 +5,52 @@ import { gfm } from '@milkdown/preset-gfm';
 import { history } from '@milkdown/plugin-history';
 import { listener, listenerCtx, ListenerManager } from '@milkdown/plugin-listener';
 import { Milkdown, MilkdownProvider, useEditor } from '@milkdown/react';
+import { $inputRule } from '@milkdown/utils';
+import { InputRule } from '@milkdown/prose/inputrules';
+import { wrapInList } from 'prosemirror-schema-list';
 import { useActiveTheme } from '@/theme/theme-store';
+
+// Bare `[ ]` / `[x]` → task item, even when NOT inside a list (wraps the
+// line in a bulleted task list). Standard `- [ ]` still works via GFM.
+const bareTaskListRule = $inputRule(() =>
+    new InputRule(/^\[(?<checked>\s|x)\]\s$/, (state, match, start, end) => {
+        const checked = Boolean(match.groups?.checked === "x");
+        const pos = state.doc.resolve(start);
+        let depth = 0;
+        let node = pos.node(depth);
+        while (node && node.type.name !== "list_item") {
+            depth--;
+            node = pos.node(depth);
+        }
+        // Already inside a list → flip the current item into a task.
+        if (node && node.type.name === "list_item") {
+            const tr = state.tr.deleteRange(start, end);
+            return tr.setNodeMarkup(pos.before(depth), undefined, { ...node.attrs, checked });
+        }
+        // Not in a list → delete the checkbox text, then wrap the line in a bullet list.
+        const tr = state.tr.deleteRange(start, end);
+        const st = state.apply(tr);
+        const bullet = st.schema.nodes.bulleted_list;
+        if (!bullet) return null;
+        let wrapped: any = null;
+        wrapInList(bullet)(st, (t: any) => {
+            wrapped = t;
+        });
+        if (!wrapped) return null;
+        // Mark the freshly wrapped item as a task.
+        const cur = wrapped.doc.resolve(wrapped.mapping.map(start));
+        let d = 0;
+        let n = cur.node(d);
+        while (n && n.type.name !== "list_item") {
+            d--;
+            n = cur.node(d);
+        }
+        if (n && n.type.name === "list_item") {
+            return wrapped.setNodeMarkup(cur.before(d), undefined, { ...n.attrs, checked });
+        }
+        return wrapped;
+    }),
+);
 
 function EditorInner({
     content,
@@ -40,6 +85,7 @@ function EditorInner({
                 })
                 .use(commonmark)
                 .use(gfm)
+                .use(bareTaskListRule)
                 .use(history)
                 .use(listener),
         [],
