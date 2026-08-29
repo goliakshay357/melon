@@ -3,6 +3,7 @@ import {
     applyNodeChanges,
     Background,
     BackgroundVariant,
+    Position,
     ReactFlow,
     SelectionMode,
     useKeyPress,
@@ -142,16 +143,41 @@ export function Canvas() {
     }, [cards]);
 
     // Fork lineage → edges. Single source of truth: card.parentId.
+    // Each edge picks the NEAREST pair of sides (left/right/top/bottom) from the
+    // two cards' current positions, so arrows auto-route as cards move.
     const edges = useMemo<Edge[]>(
         () =>
             cards
                 .filter((c) => c.parentId)
-                .map((c) => ({
-                    id: `${c.parentId}->${c.id}`,
-                    source: c.parentId as string,
-                    target: c.id,
-                    type: 'fork',
-                })),
+                .map((c) => {
+                    const src = cards.find((x) => x.id === c.parentId);
+                    const sw = src?.size?.width ?? 380;
+                    const sh = src?.size?.height ?? 260;
+                    const tw = c.size?.width ?? 380;
+                    const th = c.size?.height ?? 260;
+                    const srcCx = (src?.position.x ?? 0) + sw / 2;
+                    const srcCy = (src?.position.y ?? 0) + sh / 2;
+                    const tgtCx = c.position.x + tw / 2;
+                    const tgtCy = c.position.y + th / 2;
+                    const dx = tgtCx - srcCx;
+                    const dy = tgtCy - srcCy;
+                    const [sourcePosition, targetPosition] =
+                        Math.abs(dx) > Math.abs(dy)
+                            ? dx >= 0
+                                ? [Position.Right, Position.Left]
+                                : [Position.Left, Position.Right]
+                            : dy >= 0
+                              ? [Position.Bottom, Position.Top]
+                              : [Position.Top, Position.Bottom];
+                    return {
+                        id: `${c.parentId}->${c.id}`,
+                        source: c.parentId as string,
+                        target: c.id,
+                        type: 'fork',
+                        sourcePosition,
+                        targetPosition,
+                    };
+                }),
         [cards],
     );
 

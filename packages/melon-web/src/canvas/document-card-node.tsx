@@ -97,7 +97,13 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
                 onResizeEnd={(_e, params) => useCanvasStore.getState().resizeCard(id, params.width, params.height)}
             />
             <Handle type="target" position={Position.Top} className="!opacity-0" />
+            <Handle type="target" position={Position.Bottom} className="!opacity-0" />
+            <Handle type="target" position={Position.Left} className="!opacity-0" />
+            <Handle type="target" position={Position.Right} className="!opacity-0" />
+            <Handle type="source" position={Position.Top} className="!opacity-0" />
             <Handle type="source" position={Position.Bottom} className="!opacity-0" />
+            <Handle type="source" position={Position.Left} className="!opacity-0" />
+            <Handle type="source" position={Position.Right} className="!opacity-0" />
             {header}
             <div className="nodrag min-h-0 flex-1">
                 <DocumentEditor content={card.documentContent ?? ''} onChange={updateDoc} />

@@ -907,7 +907,13 @@ function ChatCardNodeInner({
                 />
 
                 <Handle type="target" position={Position.Top} className="!opacity-0" />
+                <Handle type="target" position={Position.Bottom} className="!opacity-0" />
+                <Handle type="target" position={Position.Left} className="!opacity-0" />
+                <Handle type="target" position={Position.Right} className="!opacity-0" />
+                <Handle type="source" position={Position.Top} className="!opacity-0" />
                 <Handle type="source" position={Position.Bottom} className="!opacity-0" />
+                <Handle type="source" position={Position.Left} className="!opacity-0" />
+                <Handle type="source" position={Position.Right} className="!opacity-0" />
 
                 {header(false)}
                 {card.error && (
