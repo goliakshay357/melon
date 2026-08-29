@@ -79,17 +79,13 @@
 .md-body strong { font-weight: 600; }
 .md-body img { max-width: 100%; }
 
-/* Mind-map edges: hover highlight */
+/* Mind-map edges: subtle, no glow on selection */
 .react-flow__edge path {
     stroke-width: 2;
-    transition: stroke-width 120ms ease, stroke 120ms ease;
+    transition: stroke-width 120ms ease;
 }
 .react-flow__edge:hover path {
-    stroke-width: 3;
-}
-.react-flow__edge.selected path {
-    stroke-width: 3;
-    filter: drop-shadow(0 0 3px rgba(189, 147, 249, 0.6));
+    stroke-width: 2.5;
 }
 
 /* ── Milkdown / ProseMirror document editor (dark, minimal) ── */
@@ -142,10 +138,10 @@
 .milkdown .ProseMirror .ProseMirror-selectednode { outline: 2px solid #58a6ff; }
 .milkdown .ProseMirror ::selection { background: rgba(88, 166, 255, 0.35); }
 
-/* Mind-map edge endpoint dots: subtle by default, bright on hover */
+/* Mind-map edge endpoint dots: BOTH ends always visible for adjusting */
 .melon-endpoint {
-    opacity: 0.25;
-    transition: opacity 120ms ease, r 120ms ease;
+    opacity: 0.6;
+    transition: opacity 120ms ease;
 }
 .react-flow__edge:hover .melon-endpoint,
 .melon-endpoint:hover {
