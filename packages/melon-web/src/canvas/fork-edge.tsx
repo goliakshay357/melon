@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { BaseEdge, getBezierPath, Position, useReactFlow, type EdgeProps } from '@xyflow/react';
+import { BaseEdge, getSmoothStepPath, useReactFlow, type EdgeProps } from '@xyflow/react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useActiveTheme } from '@/theme/theme-store';
 
@@ -15,40 +15,72 @@ interface Box {
     h: number;
 }
 
-/** Point along a card's side, t = 0..1 (left→right / top→bottom). */
-function pointAlong(box: Box, side: Side, t: number): Pt {
-    const c = Math.min(Math.max(t, 0), 1);
+function sideFromAngle(px: number, py: number, box: Box): Side {
+    const cx = box.x + box.w / 2;
+    const cy = box.y + box.h / 2;
+    const nx = (px - cx) / (box.w / 2);
+    const ny = (py - cy) / (box.h / 2);
+    return Math.abs(nx) > Math.abs(ny) ? (nx >= 0 ? 'right' : 'left') : ny >= 0 ? 'bottom' : 'top';
+}
+
+function midOf(box: Box, side: Side): Pt {
+    const cx = box.x + box.w / 2;
+    const cy = box.y + box.h / 2;
     switch (side) {
-        case 'top': return { x: box.x + box.w * c, y: box.y };
-        case 'bottom': return { x: box.x + box.w * c, y: box.y + box.h };
-        case 'left': return { x: box.x, y: box.y + box.h * c };
-        case 'right': return { x: box.x + box.w, y: box.y + box.h * c };
+        case 'top': return { x: cx, y: box.y };
+        case 'bottom': return { x: cx, y: box.y + box.h };
+        case 'left': return { x: box.x, y: cy };
+        case 'right': return { x: box.x + box.w, y: cy };
     }
 }
 
-/** Nearest side of a card + the 0..1 position along that side. */
-function sideAndT(px: number, py: number, box: Box): { side: Side; t: number } {
-    const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
-    const d = {
-        top: Math.abs(py - box.y),
-        bottom: Math.abs(py - (box.y + box.h)),
-        left: Math.abs(px - box.x),
-        right: Math.abs(px - (box.x + box.w)),
-    };
-    const side = (Object.keys(d) as Side[]).sort((a, b) => d[a] - d[b])[0];
-    switch (side) {
-        case 'top': return { side, t: clamp((px - box.x) / box.w, 0, 1) };
-        case 'bottom': return { side, t: clamp((px - box.x) / box.w, 0, 1) };
-        case 'left': return { side, t: clamp((py - box.y) / box.h, 0, 1) };
-        case 'right': return { side, t: clamp((py - box.y) / box.h, 0, 1) };
+function routeThrough(s: Pt, t: Pt, waypoints: Pt[]): Pt[] {
+    const pts: Pt[] = [s];
+    let prev = s;
+    for (const w of waypoints) {
+        pts.push({ x: w.x, y: prev.y });
+        pts.push(w);
+        prev = w;
     }
+    pts.push({ x: t.x, y: prev.y });
+    pts.push(t);
+    return pts;
+}
+
+function roundedOrtho(points: Pt[], r: number): string {
+    if (points.length < 2) return '';
+    let d = `M ${points[0].x} ${points[0].y}`;
+    for (let i = 1; i < points.length - 1; i++) {
+        const p = points[i - 1];
+        const c = points[i];
+        const n = points[i + 1];
+        const dx1 = Math.sign(c.x - p.x);
+        const dy1 = Math.sign(c.y - p.y);
+        const dx2 = Math.sign(n.x - c.x);
+        const dy2 = Math.sign(n.y - c.y);
+        const rad = Math.min(r, Math.abs(c.x - p.x) / 2, Math.abs(c.y - p.y) / 2, Math.abs(n.x - c.x) / 2, Math.abs(n.y - c.y) / 2);
+        const a1 = { x: c.x - dx1 * rad, y: c.y - dy1 * rad };
+        const a2 = { x: c.x + dx2 * rad, y: c.y + dy2 * rad };
+        d += ` L ${a1.x} ${a1.y} Q ${c.x} ${c.y} ${a2.x} ${a2.y}`;
+    }
+    const last = points[points.length - 1];
+    d += ` L ${last.x} ${last.y}`;
+    return d;
+}
+
+function cornersFromPath(d: string): Pt[] {
+    const pts: Pt[] = [];
+    const re = /Q\s*(-?[\d.]+)[,\s]+(-?[\d.]+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(d)) !== null) pts.push({ x: +m[1], y: +m[2] });
+    return pts.filter((p, i) => i === 0 || Math.abs(p.x - pts[i - 1].x) > 1 || Math.abs(p.y - pts[i - 1].y) > 1);
 }
 
 /**
- * ChartDB-style mind-map edge: a smooth bezier curve between two cards.
- * Endpoints SLIDE continuously along the card perimeter (drag a dot) and the
- * curve re-bends live under the cursor. Drag is local/real-time (no store
- * writes, no canvas re-render → no flicker) and persists on release.
+ * Mind-map edge (orthogonal, clean): smooth step path, bottom→top default.
+ * Endpoint dots re-attach to any side; corner handles reshape the line.
+ * Drag is LOCAL + REAL-TIME (no store writes, no canvas re-render → no lag),
+ * and persists on release.
  */
 export function ForkEdge(props: EdgeProps) {
     const theme = useActiveTheme();
@@ -57,9 +89,8 @@ export function ForkEdge(props: EdgeProps) {
     const updateCard = useCanvasStore((s) => s.updateCard);
     const data = (props.data ?? {}) as {
         sourceSide?: Side;
-        sourceT?: number;
         targetSide?: Side;
-        targetT?: number;
+        waypoints?: Pt[];
     };
 
     const src = cards.find((c) => c.id === props.source);
@@ -72,71 +103,87 @@ export function ForkEdge(props: EdgeProps) {
         : null;
 
     const sourceSide = data.sourceSide ?? 'bottom';
-    const sourceT = data.sourceT ?? 0.5;
     const targetSide = data.targetSide ?? 'top';
-    const targetT = data.targetT ?? 0.5;
+    const persistedWaypoints = data.waypoints ?? null;
 
-    const sp = srcBox ? pointAlong(srcBox, sourceSide, sourceT) : { x: props.sourceX, y: props.sourceY };
-    const tp = tgtBox ? pointAlong(tgtBox, targetSide, targetT) : { x: props.targetX, y: props.targetY };
+    const sp = srcBox ? midOf(srcBox, sourceSide) : { x: props.sourceX, y: props.sourceY };
+    const tp = tgtBox ? midOf(tgtBox, targetSide) : { x: props.targetX, y: props.targetY };
 
     // LIVE drag state — local only, zero store writes while dragging.
-    const [live, setLive] = useState<{ sp?: Pt; tp?: Pt }>({});
-    const dragging = useRef<'source' | 'target' | null>(null);
-    const pending = useRef<{ sourceSide: Side; sourceT: number; targetSide: Side; targetT: number } | null>(null);
+    const [live, setLive] = useState<{ sp?: Pt; tp?: Pt; corners?: Pt[] }>({});
+    const dragging = useRef<'source' | 'target' | 'corner' | null>(null);
+    const cornerIdx = useRef(-1);
 
     const effSp = live.sp ?? sp;
     const effTp = live.tp ?? tp;
+    const effCorners = live.corners ?? persistedWaypoints;
 
-    const [path] = getBezierPath({
-        sourceX: effSp.x,
-        sourceY: effSp.y,
-        sourcePosition: sourceSide as Position,
-        targetX: effTp.x,
-        targetY: effTp.y,
-        targetPosition: targetSide as Position,
-        curvature: 0.22,
-    });
+    let path: string;
+    let corners: Pt[];
+    if (effCorners && effCorners.length > 0) {
+        corners = effCorners;
+        path = roundedOrtho(routeThrough(effSp, effTp, effCorners), 8);
+    } else {
+        [path] = getSmoothStepPath({
+            sourceX: effSp.x,
+            sourceY: effSp.y,
+            targetX: effTp.x,
+            targetY: effTp.y,
+            borderRadius: 8,
+            offset: 24,
+        });
+        corners = cornersFromPath(path);
+    }
 
     const onMove = (e: React.PointerEvent) => {
         const kind = dragging.current;
         if (!kind) return;
+        const flow = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+
+        if (kind === 'corner') {
+            const base = effCorners && effCorners.length ? [...effCorners] : corners.length ? [...corners] : [];
+            if (base[cornerIdx.current]) {
+                base[cornerIdx.current] = { x: flow.x, y: flow.y };
+                setLive((l) => ({ ...l, corners: base }));
+            }
+            return;
+        }
         const box = kind === 'source' ? srcBox : tgtBox;
         if (!box) return;
-        const flow = screenToFlowPosition({ x: e.clientX, y: e.clientY });
-        const { side, t } = sideAndT(flow.x, flow.y, box);
-        const p = pointAlong(box, side, t);
-        pending.current = {
-            sourceSide: sourceSide,
-            sourceT: sourceT,
-            targetSide: targetSide,
-            targetT: targetT,
-            ...(pending.current ?? {}),
-        };
-        if (kind === 'source') {
-            pending.current = { ...pending.current, sourceSide: side, sourceT: t };
-            setLive((l) => ({ ...l, sp: p }));
-        } else {
-            pending.current = { ...pending.current, targetSide: side, targetT: t };
-            setLive((l) => ({ ...l, tp: p }));
-        }
+        const side = sideFromAngle(flow.x, flow.y, box);
+        if (kind === 'source') setLive((l) => ({ ...l, sp: midOf(box, side) }));
+        else setLive((l) => ({ ...l, tp: midOf(box, side) }));
     };
 
     const onUp = () => {
         const kind = dragging.current;
-        if (kind && tgt && pending.current) {
+        if (kind && tgt) {
             const prev = tgt.edgeToParent ?? {};
-            updateCard(tgt.id, { edgeToParent: { ...prev, ...pending.current } });
+            if (kind === 'corner') {
+                const w = live.corners && live.corners.length ? [...live.corners] : null;
+                updateCard(tgt.id, { edgeToParent: { ...prev, waypoints: w } });
+            } else if (kind === 'source') {
+                const box = srcBox;
+                if (box && live.sp) {
+                    updateCard(tgt.id, { edgeToParent: { ...prev, sourceSide: sideFromAngle(live.sp.x, live.sp.y, box) } });
+                }
+            } else if (kind === 'target') {
+                const box = tgtBox;
+                if (box && live.tp) {
+                    updateCard(tgt.id, { edgeToParent: { ...prev, targetSide: sideFromAngle(live.tp.x, live.tp.y, box) } });
+                }
+            }
         }
         dragging.current = null;
-        pending.current = null;
+        cornerIdx.current = -1;
         setLive({});
     };
 
-    const startDrag = (e: React.PointerEvent, kind: 'source' | 'target') => {
+    const startDrag = (e: React.PointerEvent, kind: 'source' | 'target' | 'corner', idx = -1) => {
         e.stopPropagation();
         e.preventDefault();
         dragging.current = kind;
-        pending.current = null;
+        cornerIdx.current = idx;
     };
 
     useEffect(
@@ -151,7 +198,7 @@ export function ForkEdge(props: EdgeProps) {
             className="melon-endpoint nopan nodrag"
             cx={p.x}
             cy={p.y}
-            r={7}
+            r={8}
             fill={theme.tokens.purple}
             stroke="#0d1117"
             strokeWidth={1.5}
@@ -160,7 +207,25 @@ export function ForkEdge(props: EdgeProps) {
             onPointerMove={onMove}
             onPointerUp={onUp}
         >
-            <title>Drag to slide along the card</title>
+            <title>Drag to re-attach this end</title>
+        </circle>
+    );
+
+    const cornerDot = (p: Pt, i: number) => (
+        <circle
+            className="melon-corner nopan nodrag"
+            cx={p.x}
+            cy={p.y}
+            r={6}
+            fill="#0d1117"
+            stroke={theme.tokens.purple}
+            strokeWidth={1.5}
+            style={{ cursor: 'move', touchAction: 'none', pointerEvents: 'all' }}
+            onPointerDown={(e) => startDrag(e, 'corner', i)}
+            onPointerMove={onMove}
+            onPointerUp={onUp}
+        >
+            <title>Drag to reshape the line</title>
         </circle>
     );
 
@@ -184,6 +249,7 @@ export function ForkEdge(props: EdgeProps) {
                 markerEnd="url(#melon-arrowhead)"
                 style={{ stroke: `${theme.tokens.purple}99`, strokeWidth: 2 }}
             />
+            {corners.map((c, i) => cornerDot(c, i))}
             {dot(effSp, 'source')}
             {dot(effTp, 'target')}
         </>
