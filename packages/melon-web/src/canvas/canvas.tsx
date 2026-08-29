@@ -204,6 +204,7 @@ export function Canvas() {
                 nodeTypes={nodeTypes}
                 edgeTypes={edgeTypes}
                 defaultEdgeOptions={{ type: 'fork' }}
+                edgesReconnectable={false}
                 panOnScroll={scrollAction === 'pan'}
                 zoomOnScroll={scrollAction === 'zoom'}
                 snapToGrid={shiftPressed}

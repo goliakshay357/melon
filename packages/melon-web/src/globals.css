@@ -141,3 +141,13 @@
 .milkdown .ProseMirror img { max-width: 100%; border-radius: 6px; }
 .milkdown .ProseMirror .ProseMirror-selectednode { outline: 2px solid #58a6ff; }
 .milkdown .ProseMirror ::selection { background: rgba(88, 166, 255, 0.35); }
+
+/* Mind-map edge endpoint dots: subtle by default, bright on hover */
+.melon-endpoint {
+    opacity: 0.25;
+    transition: opacity 120ms ease, r 120ms ease;
+}
+.react-flow__edge:hover .melon-endpoint,
+.melon-endpoint:hover {
+    opacity: 1;
+}
