@@ -163,6 +163,12 @@ export function Canvas() {
         setNodes((nds) => applyNodeChanges(changes, nds));
     }, []);
 
+    // Sync position to the store DURING drag so connected edges follow live.
+    const onNodeDrag = useCallback(
+        (_e: unknown, node: AppNode) => moveCard(node.id, node.position),
+        [moveCard],
+    );
+
     const onNodeDragStop = useCallback(
         (_e: unknown, node: AppNode) => moveCard(node.id, node.position),
         [moveCard],
@@ -196,6 +202,7 @@ export function Canvas() {
                 nodes={nodes}
                 edges={edges}
                 onNodesChange={onNodesChange}
+                onNodeDrag={onNodeDrag}
                 onNodeDragStop={onNodeDragStop}
                 onNodesDelete={onNodesDelete}
                 minZoom={0.1}
