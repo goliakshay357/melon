@@ -5,6 +5,7 @@ import {
     FolderOpen,
     FolderPlus,
     Layers,
+    MessageSquare,
     PanelLeftClose,
     PanelLeftOpen,
     Plus,
@@ -187,16 +188,17 @@ export function Sidebar() {
                         </>
                     )}
                     <button
-                        className={cn(
-                            'mt-auto rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
-                            activeView !== 'canvas' && 'bg-secondary text-foreground',
-                        )}
-                        title={activeView === 'canvas' ? 'Settings' : 'Back to canvas'}
+                        className="mt-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                        title={activeView === 'canvas' ? 'Settings' : 'Back to chat'}
                         onClick={() =>
                             activeView === 'canvas' ? openView('themes') : setActiveView('canvas')
                         }
                     >
-                        <Settings className="size-4" />
+                        {activeView === 'canvas' ? (
+                            <Settings className="size-4" />
+                        ) : (
+                            <MessageSquare className="size-4" />
+                        )}
                     </button>
                 </>
             ) : (
@@ -500,16 +502,17 @@ export function Sidebar() {
                             {folder && `📁 …${folder.split('/').slice(-2).join('/')}`}
                         </span>
                         <button
-                            className={cn(
-                                'shrink-0 rounded-md p-1 transition-colors hover:bg-secondary hover:text-foreground',
-                                activeView !== 'canvas' && 'bg-secondary text-foreground',
-                            )}
-                            title={activeView === 'canvas' ? 'Settings' : 'Back to canvas'}
+                            className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                            title={activeView === 'canvas' ? 'Settings' : 'Back to chat'}
                             onClick={() =>
                                 activeView === 'canvas' ? openView('themes') : setActiveView('canvas')
                             }
                         >
-                            <Settings className="size-3.5" />
+                            {activeView === 'canvas' ? (
+                                <Settings className="size-3.5" />
+                            ) : (
+                                <MessageSquare className="size-3.5" />
+                            )}
                         </button>
                     </div>
 

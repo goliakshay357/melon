@@ -249,7 +249,6 @@ export function Canvas() {
                 <Background variant={BackgroundVariant.Dots} gap={16} size={1} color={theme.tokens.canvasDot} />
             </ReactFlow>
 
-            <Sidebar />
             {/* <TopBar /> DISABLED — re-enable later */}
             <Toolbar />
 
@@ -289,7 +288,10 @@ export function Canvas() {
 
             </div>
 
-            {/* Settings PAGE (never a dialog) — navbar stays visible on the left */}
+            {/* Navbar — ALWAYS visible; its body swaps between canvas/settings */}
+            <Sidebar />
+
+            {/* Settings PAGE (never a dialog) — fills the content area right of the navbar */}
             {activeView !== 'canvas' && (
                 <div
                     className="absolute inset-y-0 right-0 transition-[left] duration-200"
