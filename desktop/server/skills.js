@@ -1,8 +1,14 @@
-import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
+export function skillsDir() {
+    return join(getAgentDir(), "skills");
+}
+function skillPath(id) {
+    return join(skillsDir(), id, "SKILL.md");
+}
 function parseSkillMd(id, md) {
     const m = md.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
     const front = m ? m[1] : "";
@@ -12,6 +18,13 @@ function parseSkillMd(id, md) {
     const name = front.match(/name:\s*(.+)/)?.[1]?.trim() ?? id;
     const description = front.match(/description:\s*(.+)/)?.[1]?.trim();
     return { id, name, description, instructions: body };
+}
+function serializeSkillMd(name, description, instructions) {
+    const lines = ["---", `name: ${name}`];
+    if (description)
+        lines.push(`description: '${description.replace(/'/g, "")}'`);
+    lines.push("---");
+    return `${lines.join("\n")}\n\n${instructions.trim()}\n`;
 }
 function readSkillDir(dir, into) {
     try {
@@ -30,24 +43,40 @@ function readSkillDir(dir, into) {
         /* no such dir */
     }
 }
+/** Deleted-skill denylist, so a deleted bundled skill isn't re-materialized on restart. */
+function deletedFile() {
+    return join(getAgentDir(), "melon", "deleted-skills.json");
+}
+function loadDeleted() {
+    try {
+        return new Set(JSON.parse(readFileSync(deletedFile(), "utf8")));
+    }
+    catch {
+        return new Set();
+    }
+}
+function saveDeleted(ids) {
+    mkdirSync(join(getAgentDir(), "melon"), { recursive: true });
+    writeFileSync(deletedFile(), JSON.stringify([...ids], null, 2));
+}
 /**
  * Default skills SHIP WITH THE APP in <compiled>/skills/ (bundled from
  * assets/skills by the build). On every startup we copy them into the agent
- * dir so a fresh laptop gets them without any manual setup. User-editable
- * overrides live in <agentDir>/melon/skills.json.
+ * dir so a fresh laptop gets them without manual setup — unless the user
+ * deleted that skill (denylisted).
  */
 export function materializeSkills() {
     const bundled = join(dirname(fileURLToPath(import.meta.url)), "skills");
-    const target = join(getAgentDir(), "skills");
+    const target = skillsDir();
+    const deleted = loadDeleted();
     try {
-        // IMPORTANT: fs.cpSync does NOT work with asar archives (directory ops
-        // aren't asar-patched). Read each bundled SKILL.md (readFileSync is
-        // asar-safe) and write it to the agent dir individually.
         let copied = 0;
         const entries = readdirSync(bundled, { withFileTypes: true });
         for (const entry of entries) {
             if (!entry.isDirectory())
                 continue;
+            if (deleted.has(entry.name))
+                continue; // user deleted it — don't resurrect
             const src = join(bundled, entry.name, "SKILL.md");
             if (!existsSync(src))
                 continue;
@@ -59,39 +88,48 @@ export function materializeSkills() {
             writeFileSync(dst, readFileSync(src, "utf8"));
             copied++;
         }
-        console.error(`[skills-debug] materialized ${copied} skills from ${bundled} -> ${target}`);
+        console.error(`[skills] materialized ${copied} bundled skills`);
     }
-    catch (e) {
-        console.error(`[skills-debug] materialize FAILED from ${bundled}:`, e.message);
+    catch {
+        /* bundled dir missing — fine in dev */
     }
-    const all = loadSkills();
-    console.error(`[skills-debug] loadSkills sees ${Object.keys(all).length}: ${Object.keys(all).join(", ")}`);
 }
 /**
- * Skill registry (later sources override earlier):
- * 1. pi skills: ~/.pi/agent/skills/<id>/SKILL.md (fallback when pi is installed)
- * 2. materialized melon skills: <agentDir>/skills/<id>/SKILL.md (ships with the app)
- * 3. custom overrides: <agentDir>/melon/skills.json
+ * Skill registry — .md files are the SINGLE source of truth.
+ * 1. pi skills (~/.pi/agent/skills) as read-only fallback.
+ * 2. melon skills (~/.melon/agent/skills) — editable, ships + user-created.
  */
 export function loadSkills() {
     const all = {};
     readSkillDir(join(homedir(), ".pi", "agent", "skills"), all);
-    readSkillDir(join(getAgentDir(), "skills"), all);
-    try {
-        const custom = JSON.parse(readFileSync(join(getAgentDir(), "melon", "skills.json"), "utf8"));
-        for (const [id, s] of Object.entries(custom)) {
-            const c = s;
-            all[id] = {
-                id,
-                name: c.name ?? id,
-                description: c.description,
-                instructions: String(c.instructions ?? ""),
-            };
-        }
-    }
-    catch {
-        /* no custom skills file */
-    }
+    readSkillDir(skillsDir(), all);
     return all;
+}
+/** Read one skill's full .md (raw text + parsed fields). */
+export function readSkill(id) {
+    const p = skillPath(id);
+    if (!existsSync(p))
+        return null;
+    const raw = readFileSync(p, "utf8");
+    const s = parseSkillMd(id, raw);
+    return s ? { ...s, raw } : null;
+}
+/** Create or update a skill .md file. */
+export function saveSkill(id, name, description, instructions) {
+    mkdirSync(join(skillsDir(), id), { recursive: true });
+    writeFileSync(skillPath(id), serializeSkillMd(name, description, instructions));
+    // Re-creating clears it from the delete denylist.
+    const deleted = loadDeleted();
+    if (deleted.has(id)) {
+        deleted.delete(id);
+        saveDeleted(deleted);
+    }
+}
+/** Delete a skill (and denylist it so bundled ones don't return on restart). */
+export function deleteSkill(id) {
+    rmSync(join(skillsDir(), id), { recursive: true, force: true });
+    const deleted = loadDeleted();
+    deleted.add(id);
+    saveDeleted(deleted);
 }
 //# sourceMappingURL=skills.js.map

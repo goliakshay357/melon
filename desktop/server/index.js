@@ -21,7 +21,7 @@ import Fastify from "fastify";
 import { expandHome, loadConfig, modelToString, preview } from "./config.js";
 import { SessionRegistry } from "./session-registry.js";
 import { denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel } from "./settings.js";
-import { loadSkills, materializeSkills } from "./skills.js";
+import { loadSkills, materializeSkills, readSkill, saveSkill, deleteSkill } from "./skills.js";
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
 function splitModel(model) {
@@ -41,9 +41,19 @@ export async function buildApp(deps = {}) {
     const app = Fastify({ logger: false });
     await app.register(cors, { origin: true });
     const registry = new SessionRegistry();
-    async function createRuntimeFor(sessionManager) {
+    async function createRuntimeFor(sessionManager, enabledSkills = []) {
         const factory = async ({ cwd, sessionManager: sm, sessionStartEvent, }) => {
-            const services = await createAgentSessionServices({ cwd });
+            // Restrict the skill CATALOG to only the card's enabled skills, so the
+            // model's system prompt doesn't list (and self-invoke) everything.
+            const enabledSet = new Set(enabledSkills);
+            const skillsOverride = (result) => ({
+                ...result,
+                skills: (result.skills ?? []).filter((sk) => enabledSet.has(sk.name)),
+            });
+            const services = await createAgentSessionServices({
+                cwd,
+                resourceLoaderOptions: { skillsOverride },
+            });
             return {
                 ...(await createAgentSessionFromServices({
                     services,
@@ -59,8 +69,8 @@ export async function buildApp(deps = {}) {
             sessionManager,
         });
     }
-    async function attachSession(cardId, sessionManager, explicitModel) {
-        const runtime = await createRuntimeFor(sessionManager);
+    async function attachSession(cardId, sessionManager, explicitModel, skills = []) {
+        const runtime = await createRuntimeFor(sessionManager, skills);
         try {
             const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
             const [provider, id] = splitModel(wanted);
@@ -75,7 +85,7 @@ export async function buildApp(deps = {}) {
             console.error("model switch failed:", e?.message ?? e);
         }
         wireEvents(cardId, runtime);
-        registry.set(cardId, { runtime, clients: new Set(), busy: false, activeSkills: [] });
+        registry.set(cardId, { runtime, clients: new Set(), busy: false, activeSkills: skills });
         return runtime;
     }
     function wireEvents(cardId, runtime) {
@@ -308,7 +318,8 @@ export async function buildApp(deps = {}) {
         catch (e) {
             return reply.code(400).send({ error: e.message });
         }
-        const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model);
+        const skills = Array.isArray(body?.skills) ? body.skills.filter((x) => typeof x === "string") : [];
+        const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model, skills);
         return {
             cardId,
             sessionId: runtime.session.sessionId,
@@ -323,7 +334,8 @@ export async function buildApp(deps = {}) {
         const sessionFile = body?.sessionFile;
         if (!sessionFile)
             return reply.code(400).send({ error: "sessionFile required" });
-        const runtime = await attachSession(cardId, SessionManager.open(sessionFile), body?.model);
+        const skills = Array.isArray(body?.skills) ? body.skills.filter((x) => typeof x === "string") : [];
+        const runtime = await attachSession(cardId, SessionManager.open(sessionFile), body?.model, skills);
         return {
             cardId,
             sessionId: runtime.session.sessionId,
@@ -733,6 +745,43 @@ export async function buildApp(deps = {}) {
         console.error(`[skills-debug] /skills returning ${skills.length}: ${skills.map((s) => s.id).join(", ")}`);
         return { skills, debug };
     });
+    // Skill manager CRUD.
+    app.get("/skills/:id", async (req, reply) => {
+        const id = req.params.id;
+        const sk = readSkill(id);
+        if (!sk)
+            return reply.code(404).send({ error: `unknown skill: ${id}` });
+        return { id: sk.id, name: sk.name, description: sk.description, instructions: sk.instructions, raw: sk.raw };
+    });
+    app.post("/skills", async (req, reply) => {
+        const b = req.body;
+        const id = String(b?.id ?? "").trim();
+        const name = String(b?.name ?? "").trim();
+        const description = b?.description ? String(b.description).trim() : undefined;
+        const instructions = String(b?.instructions ?? "").trim();
+        if (!id || !name || !instructions)
+            return reply.code(400).send({ error: "id, name and instructions are required" });
+        if (!/^[a-z0-9-]+$/.test(id))
+            return reply.code(400).send({ error: "id must be lowercase letters, numbers and dashes" });
+        saveSkill(id, name, description, instructions);
+        return { ok: true, id };
+    });
+    app.put("/skills/:id", async (req, reply) => {
+        const id = req.params.id;
+        const b = req.body;
+        const name = String(b?.name ?? "").trim();
+        const description = b?.description ? String(b.description).trim() : undefined;
+        const instructions = String(b?.instructions ?? "").trim();
+        if (!name || !instructions)
+            return reply.code(400).send({ error: "name and instructions are required" });
+        saveSkill(id, name, description, instructions);
+        return { ok: true, id };
+    });
+    app.delete("/skills/:id", async (req, reply) => {
+        const id = req.params.id;
+        deleteSkill(id);
+        return { ok: true, id };
+    });
     // Set a card's active skills + retract removed ones.
     app.post("/sessions/:cardId/skills", async (req, reply) => {
         const s = registry.get(req.params.cardId);
@@ -744,19 +793,8 @@ export async function buildApp(deps = {}) {
         const prev = s.activeSkills ?? [];
         s.activeSkills = next;
         const skills = loadSkills();
-        // Newly enabled skills: activate via pi's NATIVE /skill: command so the
-        // model treats them as genuinely loaded (plain-text [SKILL: ...] was
-        // ignored). Removed skills: retract explicitly.
-        for (const id of next) {
-            if (!prev.includes(id) && skills[id]) {
-                try {
-                    await s.runtime.session.followUp(`/skill:${id}`);
-                }
-                catch {
-                    /* ignore */
-                }
-            }
-        }
+        // Catalog is frozen after session start; the AI self-invokes enabled
+        // skills on demand. Only retract skills toggled OFF.
         for (const id of prev) {
             if (!next.includes(id) && skills[id]) {
                 try {
@@ -989,21 +1027,9 @@ export async function buildApp(deps = {}) {
         console.log(`[${cardId}] prompt:start "${String(req.body?.text).slice(0, 60)}"`);
         registry.broadcast(cardId, { type: "raw", text: "⬇ prompt received by server" });
         try {
-            let text = req.body?.text ?? "";
-            // Inject enabled skills in pi's native <skill name=...> block format
-            // with explicit "ACTIVATED" framing — the model treats these as
-            // genuinely loaded and can report them when asked.
-            const activeSkills = s.activeSkills ?? [];
-            if (activeSkills.length > 0) {
-                const sk = loadSkills();
-                const blocks = activeSkills
-                    .filter((id) => sk[id])
-                    .map((id) => `<skill name="${sk[id].id}" location="${join(getAgentDir(), "skills", sk[id].id, "SKILL.md")}">\n${sk[id].instructions}\n</skill>`)
-                    .join("\n\n");
-                if (blocks) {
-                    text = `${text}\n\n[ACTIVATED SKILLS — REQUIRED]\nThe following skills are currently ENABLED for this session and you MUST follow them. When asked which skills are enabled for you, list exactly these names.\n\n${blocks}`;
-                }
-            }
+            const text = req.body?.text ?? "";
+            // Skills are activated via pi's native /skill: followUp on toggle —
+            // NOT appended per-prompt (that bloated the context window).
             await s.runtime.session.prompt(text);
             console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
         }
