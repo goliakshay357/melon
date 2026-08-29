@@ -42,8 +42,6 @@ function findOpenSpot(cards: SessionCard[], sourceId: string, w: number, h: numb
 	const src = cards.find((c) => c.id === sourceId);
 	if (!src) return { x: 0, y: 0 };
 	const gap = 36;
-	const sw = src.size?.width ?? 380;
-	const sh = src.size?.height ?? 260;
 	const occupied: Box[] = cards
 		.filter((c) => c.id !== sourceId)
 		.map((c) => ({
