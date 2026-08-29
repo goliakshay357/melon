@@ -297,7 +297,7 @@ export function Canvas() {
                     className="absolute inset-y-0 right-0 transition-[left] duration-200"
                     style={{ left: sidebarCollapsed ? 48 : 260 }}
                 >
-                    <SettingsPage initialTab={activeView === 'themes' ? 'themes' : 'skills'} />
+                    <SettingsPage />
                 </div>
             )}
         </div>
