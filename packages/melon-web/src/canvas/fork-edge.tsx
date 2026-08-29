@@ -11,27 +11,12 @@ interface Box {
     h: number;
 }
 
-/**
- * Which side a point is on, judged by its DIRECTION from the card center
- * (normalized by half-dims). Stable — no jitter near corners.
- */
 function sideFromAngle(px: number, py: number, box: Box): Side {
     const cx = box.x + box.w / 2;
     const cy = box.y + box.h / 2;
     const nx = (px - cx) / (box.w / 2);
     const ny = (py - cy) / (box.h / 2);
     return Math.abs(nx) > Math.abs(ny) ? (nx >= 0 ? 'right' : 'left') : ny >= 0 ? 'bottom' : 'top';
-}
-
-/** Point ON a card's side, following the pointer's projection along that side. */
-function boundaryPoint(px: number, py: number, box: Box, side: Side) {
-    const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
-    switch (side) {
-        case 'top': return { x: clamp(px, box.x, box.x + box.w), y: box.y };
-        case 'bottom': return { x: clamp(px, box.x, box.x + box.w), y: box.y + box.h };
-        case 'left': return { x: box.x, y: clamp(py, box.y, box.y + box.h) };
-        case 'right': return { x: box.x + box.w, y: clamp(py, box.y, box.y + box.h) };
-    }
 }
 
 function midOf(box: Box, side: Side) {
@@ -46,10 +31,10 @@ function midOf(box: Box, side: Side) {
 }
 
 /**
- * Mind-map edge. Default: smooth orthogonal path bottom→top.
- * Two endpoint dots (visible on hover): drag a dot around its card to
- * re-attach the arrow to any side. The dot follows your pointer along that
- * side live; on release it snaps to the side midpoint. Choice persists.
+ * Mind-map edge — default smooth orthogonal path bottom→top with ONE arrowhead
+ * at the target end. BOTH ends have a draggable dot: grab either dot and move
+ * it around its card to re-attach that end to any side. Dragging is handled on
+ * the WINDOW (not SVG capture) so it works reliably in both directions.
  */
 export function ForkEdge(props: EdgeProps) {
     const theme = useActiveTheme();
@@ -70,11 +55,10 @@ export function ForkEdge(props: EdgeProps) {
     const sourceSide = data.sourceSide ?? 'bottom';
     const targetSide = data.targetSide ?? 'top';
 
-    const dragPos = useRef<{ source?: { x: number; y: number }; target?: { x: number; y: number } }>({});
     const dragging = useRef<'source' | 'target' | null>(null);
 
-    const sp = dragPos.current.source ?? (srcBox ? midOf(srcBox, sourceSide) : { x: props.sourceX, y: props.sourceY });
-    const tp = dragPos.current.target ?? (tgtBox ? midOf(tgtBox, targetSide) : { x: props.targetX, y: props.targetY });
+    const sp = srcBox ? midOf(srcBox, sourceSide) : { x: props.sourceX, y: props.sourceY };
+    const tp = tgtBox ? midOf(tgtBox, targetSide) : { x: props.targetX, y: props.targetY };
 
     const [path] = getSmoothStepPath({
         sourceX: sp.x,
@@ -85,55 +69,49 @@ export function ForkEdge(props: EdgeProps) {
         offset: 24,
     });
 
-    const onPointerDown = (e: React.PointerEvent, kind: 'source' | 'target') => {
+    // Window-level drag so BOTH endpoints behave identically (no SVG capture quirks).
+    useEffect(() => {
+        if (!dragging.current) return;
+        const onMove = (e: PointerEvent) => {
+            const kind = dragging.current;
+            if (!kind) return;
+            const box = kind === 'source' ? srcBox : tgtBox;
+            if (!box || !tgt) return;
+            const flow = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+            const side = sideFromAngle(flow.x, flow.y, box);
+            const prev = tgt.edgeToParent ?? {};
+            updateCard(tgt.id, {
+                edgeToParent:
+                    kind === 'source' ? { ...prev, sourceSide: side } : { ...prev, targetSide: side },
+            });
+        };
+        const onUp = () => {
+            dragging.current = null;
+        };
+        window.addEventListener('pointermove', onMove);
+        window.addEventListener('pointerup', onUp);
+        return () => {
+            window.removeEventListener('pointermove', onMove);
+            window.removeEventListener('pointerup', onUp);
+        };
+    }, [dragging, srcBox, tgtBox, tgt, updateCard, screenToFlowPosition]);
+
+    const startDrag = (e: React.PointerEvent, kind: 'source' | 'target') => {
         e.stopPropagation();
         dragging.current = kind;
-        (e.target as Element).setPointerCapture(e.pointerId);
     };
-    const onPointerMove = (e: React.PointerEvent) => {
-        const kind = dragging.current;
-        if (!kind) return;
-        const box = kind === 'source' ? srcBox : tgtBox;
-        if (!box || !tgt) return;
-        const flow = screenToFlowPosition({ x: e.clientX, y: e.clientY });
-        const side = sideFromAngle(flow.x, flow.y, box);
-        dragPos.current[kind] = boundaryPoint(flow.x, flow.y, box, side);
-        const prev = tgt.edgeToParent ?? {};
-        updateCard(tgt.id, {
-            edgeToParent: kind === 'source' ? { ...prev, sourceSide: side } : { ...prev, targetSide: side },
-        });
-    };
-    const onPointerUp = (e: React.PointerEvent) => {
-        dragging.current = null;
-        dragPos.current = {};
-        try {
-            (e.target as Element).releasePointerCapture(e.pointerId);
-        } catch {
-            /* ignore */
-        }
-    };
-
-    useEffect(
-        () => () => {
-            dragging.current = null;
-            dragPos.current = {};
-        },
-        [],
-    );
 
     const dot = (p: { x: number; y: number }, kind: 'source' | 'target') => (
         <circle
             className="melon-endpoint nopan nodrag"
             cx={p.x}
             cy={p.y}
-            r={7}
+            r={9}
             fill={theme.tokens.purple}
             stroke="#0d1117"
             strokeWidth={1.5}
-            style={{ cursor: 'grab', touchAction: 'none' }}
-            onPointerDown={(e) => onPointerDown(e, kind)}
-            onPointerMove={onPointerMove}
-            onPointerUp={onPointerUp}
+            style={{ cursor: 'grab', touchAction: 'none', pointerEvents: 'all' }}
+            onPointerDown={(e) => startDrag(e, kind)}
         >
             <title>Drag to re-attach this end</title>
         </circle>
@@ -149,7 +127,7 @@ export function ForkEdge(props: EdgeProps) {
                     refY="5"
                     markerWidth="4.5"
                     markerHeight="4.5"
-                    orient="auto-start-reverse"
+                    orient="auto"
                 >
                     <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill={theme.tokens.purple} />
                 </marker>
