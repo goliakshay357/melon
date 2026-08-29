@@ -13,20 +13,24 @@ import {
 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { askText, confirmAction } from '@/components/dialogs';
-import { SettingsDialog } from '@/components/settings-dialog';
 import { cn } from '@/lib/utils';
+import { Sparkles, Palette } from 'lucide-react';
 
 
 
 export function Sidebar() {
-    const [collapsed, setCollapsed] = useState(false);
+    const collapsed = useCanvasStore((s) => s.sidebarCollapsed);
+    const setCollapsed = useCanvasStore((s) => s.setSidebarCollapsed);
     const [folders, setFolders] = useState<Array<{ cwd: string; lastOpenedAt: string }>>([]);
     const [tree, setTree] = useState<Record<string, { canvases: any[]; loose: any[] }>>({});
     const [openFolders, setOpenFolders] = useState<Set<string>>(new Set());
     const [openCanvasSessions, setOpenCanvasSessions] = useState<Set<string>>(new Set());
     const [pickingNative, setPickingNative] = useState(false);
-    const [settingsOpen, setSettingsOpen] = useState(false);
-    const [recent, setRecent] = useState<Array<{ id: string; name: string; cwd: string; folderName: string; modified: string }>>([]);
+    const activeView = useCanvasStore((s) => s.activeView);
+    const setActiveView = useCanvasStore((s) => s.setActiveView);
+    const openView = (v: 'skills' | 'themes') => {
+        setActiveView(v);
+    };    const [recent, setRecent] = useState<Array<{ id: string; name: string; cwd: string; folderName: string; modified: string }>>([]);
 
     const folder = useCanvasStore((s) => s.folder);
     const canvasId = useCanvasStore((s) => s.canvasId);
@@ -159,9 +163,12 @@ export function Sidebar() {
                         <PanelLeftOpen className="size-4" />
                     </button>
                     <button
-                        className="mt-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                        className={cn(
+                            'mt-auto rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
+                            activeView !== 'canvas' && 'bg-secondary text-foreground',
+                        )}
                         title="Settings"
-                        onClick={() => setSettingsOpen(true)}
+                        onClick={() => openView('skills')}
                     >
                         <Settings className="size-4" />
                     </button>
@@ -431,17 +438,45 @@ export function Sidebar() {
                             {folder && `📁 …${folder.split('/').slice(-2).join('/')}`}
                         </span>
                         <button
-                            className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                            className={cn(
+                                'shrink-0 rounded-md p-1 transition-colors hover:bg-secondary hover:text-foreground',
+                                activeView !== 'canvas' && 'bg-secondary text-foreground',
+                            )}
                             title="Settings"
-                            onClick={() => setSettingsOpen(true)}
+                            onClick={() => openView('skills')}
                         >
                             <Settings className="size-3.5" />
+                        </button>
+                    </div>
+
+                    {/* Pages: Skills / Themes */}
+                    <div className="flex shrink-0 flex-col gap-0.5 border-t border-border px-2 py-2">
+                        <button
+                            onClick={() => openView('skills')}
+                            className={cn(
+                                'flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-xs transition-colors',
+                                activeView === 'skills'
+                                    ? 'bg-secondary font-medium text-card-foreground'
+                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                            )}
+                        >
+                            <Sparkles className="size-3.5 shrink-0" /> Skills
+                        </button>
+                        <button
+                            onClick={() => openView('themes')}
+                            className={cn(
+                                'flex items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-xs transition-colors',
+                                activeView === 'themes'
+                                    ? 'bg-secondary font-medium text-card-foreground'
+                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                            )}
+                        >
+                            <Palette className="size-3.5 shrink-0" /> Themes
                         </button>
                     </div>
                 </>
             )}
 
-            <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
         </div>
     );
 }

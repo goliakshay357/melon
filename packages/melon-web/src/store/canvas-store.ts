@@ -129,8 +129,16 @@ export interface CanvasMeta {
 	modified?: string;
 }
 
+export type AppView = "canvas" | "skills" | "themes";
+
 interface CanvasState {
 	cards: SessionCard[];
+	/** Which page fills the content area. Canvas stays mounted underneath. */
+	activeView: AppView;
+	setActiveView: (v: AppView) => void;
+	/** Navbar collapse state — the settings page offsets by the navbar width. */
+	sidebarCollapsed: boolean;
+	setSidebarCollapsed: (v: boolean) => void;
 	folder: string | null; // real directory this canvas belongs to
 	canvasId: string | null;
 	canvasName: string;
@@ -188,6 +196,10 @@ const loc = loadLastLocation();
 
 export const useCanvasStore = create<CanvasState>((set, get) => ({
 	cards: [],
+	activeView: "canvas" as AppView,
+	setActiveView: (v) => set({ activeView: v }),
+	sidebarCollapsed: false,
+	setSidebarCollapsed: (v) => set({ sidebarCollapsed: v }),
 	folder: loc.folder,
 	canvasId: loc.canvasId,
 	canvasName: "",

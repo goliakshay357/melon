@@ -19,6 +19,7 @@ import { Sidebar } from './sidebar';
 // import { TopBar } from './topbar';  // DISABLED — re-enable later
 import { useCanvasStore } from '@/store/canvas-store';
 import { useActiveTheme } from '@/theme/theme-store';
+import { SettingsPage } from '@/settings/settings-page';
 
 type AppNode = ChatCardNodeType | DocumentCardNodeType;
 
@@ -39,6 +40,8 @@ export function Canvas() {
     const shiftPressed = useKeyPress('Shift');
     const { screenToFlowPosition, fitView } = useReactFlow();
     const wrapperRef = useRef<HTMLDivElement>(null);
+    const activeView = useCanvasStore((s) => s.activeView);
+    const sidebarCollapsed = useCanvasStore((s) => s.sidebarCollapsed);
 
     // Reopen last session of work on refresh.
     const restoredRef = useRef(false);
@@ -72,6 +75,7 @@ export function Canvas() {
 	// Cmd/Ctrl+Z restores the last deleted/added card (ignored while typing).
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
+			if (useCanvasStore.getState().activeView !== 'canvas') return;
 			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
 				const tag = (e.target as HTMLElement)?.tagName;
 				if (tag === 'INPUT' || tag === 'TEXTAREA') return;
@@ -207,6 +211,9 @@ export function Canvas() {
     // Hero input when the canvas is empty — the "what do you want to understand?" moment.
     return (
         <div className="relative h-full w-full" ref={wrapperRef}>
+            {/* Canvas layer — stays mounted so streams/iframes survive page swaps;
+                hidden while a Settings page fills the content area. */}
+            <div className={`absolute inset-0 ${activeView !== 'canvas' ? 'invisible' : ''}`}>
             <ReactFlow
                 onlyRenderVisibleElements
                 nodes={nodes}
@@ -280,6 +287,17 @@ export function Canvas() {
                 </div>
             )}
 
+            </div>
+
+            {/* Settings PAGE (never a dialog) — navbar stays visible on the left */}
+            {activeView !== 'canvas' && (
+                <div
+                    className="absolute inset-y-0 right-0 transition-[left] duration-200"
+                    style={{ left: sidebarCollapsed ? 48 : 260 }}
+                >
+                    <SettingsPage initialTab={activeView === 'themes' ? 'themes' : 'skills'} />
+                </div>
+            )}
         </div>
     );
 }
