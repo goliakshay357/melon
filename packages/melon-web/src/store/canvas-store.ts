@@ -33,6 +33,35 @@ function pushUndo(cards: SessionCard[]) {
 
 let eventIdCounter = 0;
 
+interface Box { left: number; right: number; top: number; bottom: number; }
+function boxesOverlap(a: Box, b: Box): boolean {
+	return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+}
+/** Nearest free position for a new card, so it never lands on top of another. */
+function findOpenSpot(cards: SessionCard[], sourceId: string, w: number, h: number): { x: number; y: number } {
+	const src = cards.find((c) => c.id === sourceId);
+	if (!src) return { x: 0, y: 0 };
+	const gap = 36;
+	const occupied: Box[] = cards
+		.filter((c) => c.id !== sourceId)
+		.map((c) => ({
+			left: c.position.x,
+			right: c.position.x + (c.size?.width ?? 380),
+			top: c.position.y,
+			bottom: c.position.y + (c.size?.height ?? 260),
+		}));
+	const spots: Array<{ x: number; y: number }> = [];
+	// Column to the right first (mind-map flow), row by row.
+	for (let i = 0; i < 6; i++) spots.push({ x: src.position.x + (src.size?.width ?? 380) + gap, y: src.position.y + i * (h + gap) });
+	// Then rows straight below.
+	for (let i = 1; i <= 4; i++) spots.push({ x: src.position.x, y: src.position.y + i * (h + gap) });
+	for (const s of spots) {
+		const box: Box = { left: s.x, right: s.x + w, top: s.y, bottom: s.y + h };
+		if (!occupied.some((o) => boxesOverlap(box, o))) return s;
+	}
+	return { x: src.position.x + (src.size?.width ?? 380) + gap, y: src.position.y };
+}
+
 /** Structured trajectory event — feeds the waterfall view. */
 function pushEvent(
 	cardId: string,
@@ -133,6 +162,7 @@ interface CanvasState {
 	clearCardError: (id: string) => void;
 	setSkills: (id: string, skills: string[]) => void;
 	abortCard: (id: string) => void;
+	addLinkedCard: (sourceId: string) => void;
 	resizeCard: (id: string, width: number, height: number) => void;
 	undo: () => boolean;
 	deleteCards: (ids: string[]) => void;
@@ -432,6 +462,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				})
 				.catch((e) => pushLog(id, `✗ skills update failed: ${e instanceof Error ? e.message : e}`));
 		}
+	},
+
+	// Branch a linked card beside the source, in the nearest free space.
+	addLinkedCard(sourceId) {
+		const pos = findOpenSpot(get().cards, sourceId, 380, 260);
+		get().addCard(pos, sourceId);
 	},
 
 	// Stop generation: freeze the display immediately, then abort server-side.

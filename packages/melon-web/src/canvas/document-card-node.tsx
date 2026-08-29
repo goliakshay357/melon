@@ -20,10 +20,7 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
 
     // Branch a linked card from this document → the mind-map arrow starts here.
     const addLinkedCard = () => {
-        useCanvasStore.getState().addCard(
-            { x: card.position.x + 320, y: card.position.y + 100 },
-            id,
-        );
+        useCanvasStore.getState().addLinkedCard(id);
     };
 
     const header = (

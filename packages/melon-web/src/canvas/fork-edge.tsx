@@ -24,13 +24,13 @@ export function ForkEdge(props: EdgeProps) {
                 <marker
                     id="melon-arrowhead"
                     viewBox="0 0 10 10"
-                    refX="8"
+                    refX="7.5"
                     refY="5"
-                    markerWidth="7"
-                    markerHeight="7"
+                    markerWidth="4.5"
+                    markerHeight="4.5"
                     orient="auto-start-reverse"
                 >
-                    <path d="M 0 1.5 L 9 5 L 0 8.5 z" fill={theme.tokens.purple} />
+                    <path d="M 1 1.5 L 9 5 L 1 8.5 z" fill={theme.tokens.purple} stroke={theme.tokens.purple} strokeWidth="0.6" />
                 </marker>
             </defs>
             <BaseEdge
