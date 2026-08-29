@@ -146,16 +146,26 @@ export function Canvas() {
         () =>
             cards
                 .filter((c) => c.parentId)
-                .map((c) => ({
-                    id: `${c.parentId}->${c.id}`,
-                    source: c.parentId as string,
-                    target: c.id,
-                    type: 'fork',
-                    data: {
-                        sourceSide: c.edgeToParent?.sourceSide,
-                        targetSide: c.edgeToParent?.targetSide,
-                    },
-                })),
+                .map((c) => {
+                    const parent = cards.find((x) => x.id === c.parentId);
+                    return {
+                        id: `${c.parentId}->${c.id}`,
+                        source: c.parentId as string,
+                        target: c.id,
+                        type: 'fork',
+                        data: {
+                            sourceSide: c.edgeToParent?.sourceSide,
+                            sourceT: c.edgeToParent?.sourceT,
+                            targetSide: c.edgeToParent?.targetSide,
+                            targetT: c.edgeToParent?.targetT,
+                            // Pass positions so React Flow re-renders the edge on ANY card move.
+                            srcBox: parent
+                                ? { x: parent.position.x, y: parent.position.y, w: parent.size?.width ?? 380, h: parent.size?.height ?? 260 }
+                                : null,
+                            tgtBox: { x: c.position.x, y: c.position.y, w: c.size?.width ?? 380, h: c.size?.height ?? 260 },
+                        },
+                    };
+                }),
         [cards],
     );
 

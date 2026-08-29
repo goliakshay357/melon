@@ -57,16 +57,22 @@ export function ForkEdge(props: EdgeProps) {
         sourceT?: number;
         targetSide?: Side;
         targetT?: number;
+        srcBox?: Box | null;
+        tgtBox?: Box | null;
     };
 
     const src = cards.find((c) => c.id === props.source);
     const tgt = cards.find((c) => c.id === props.target);
-    const srcBox: Box | null = src
-        ? { x: src.position.x, y: src.position.y, w: src.size?.width ?? 380, h: src.size?.height ?? 260 }
-        : null;
-    const tgtBox: Box | null = tgt
-        ? { x: tgt.position.x, y: tgt.position.y, w: tgt.size?.width ?? 380, h: tgt.size?.height ?? 260 }
-        : null;
+    const srcBox: Box | null =
+        (data as any).srcBox ??
+        (src
+            ? { x: src.position.x, y: src.position.y, w: src.size?.width ?? 380, h: src.size?.height ?? 260 }
+            : null);
+    const tgtBox: Box | null =
+        (data as any).tgtBox ??
+        (tgt
+            ? { x: tgt.position.x, y: tgt.position.y, w: tgt.size?.width ?? 380, h: tgt.size?.height ?? 260 }
+            : null);
 
     // AUTO sides: derive the natural connection sides from the cards'
     // relative positions, re-evaluated live as cards move. A manual drag
