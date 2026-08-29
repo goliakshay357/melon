@@ -773,6 +773,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { id: sk.id, name: sk.name, description: sk.description, instructions: sk.instructions, raw: sk.raw };
 	});
 
+	const VALID_SKILL_ID = /^[a-z0-9-]+$/;
+
 	app.post("/skills", async (req, reply) => {
 		const b = req.body as any;
 		const id = String(b?.id ?? "").trim();
@@ -780,13 +782,18 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const description = b?.description ? String(b.description).trim() : undefined;
 		const instructions = String(b?.instructions ?? "").trim();
 		if (!id || !name || !instructions) return reply.code(400).send({ error: "id, name and instructions are required" });
-		if (!/^[a-z0-9-]+$/.test(id)) return reply.code(400).send({ error: "id must be lowercase letters, numbers and dashes" });
+		if (!VALID_SKILL_ID.test(id) || id.length > 64)
+			return reply.code(400).send({ error: "id must be lowercase letters, numbers and dashes (max 64)" });
+		// Create must never silently overwrite — update goes through PUT.
+		if (readSkill(id)) return reply.code(409).send({ error: `A skill named "${id}" already exists — pick another id.` });
 		saveSkill(id, name, description, instructions);
 		return { ok: true, id };
 	});
 
 	app.put("/skills/:id", async (req, reply) => {
 		const id = (req.params as any).id;
+		if (!VALID_SKILL_ID.test(id) || id.length > 64)
+			return reply.code(400).send({ error: "invalid skill id" });
 		const b = req.body as any;
 		const name = String(b?.name ?? "").trim();
 		const description = b?.description ? String(b.description).trim() : undefined;
@@ -798,6 +805,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 
 	app.delete("/skills/:id", async (req, reply) => {
 		const id = (req.params as any).id;
+		if (!VALID_SKILL_ID.test(id) || id.length > 64)
+			return reply.code(400).send({ error: "invalid skill id" });
 		deleteSkill(id);
 		return { ok: true, id };
 	});

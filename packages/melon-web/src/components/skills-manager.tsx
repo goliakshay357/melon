@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Plus, Pencil, Trash2, Search, ArrowLeft } from 'lucide-react';
+import { Plus, Pencil, Trash2, Search, Copy, ArrowLeft } from 'lucide-react';
 import { confirmAction } from '@/components/dialogs';
+import { useCanvasStore } from '@/store/canvas-store';
 import { cn } from '@/lib/utils';
 
 interface SkillRow {
@@ -9,16 +10,33 @@ interface SkillRow {
     description?: string;
 }
 
+export interface SkillPrefill {
+    name: string;
+    description?: string;
+    instructions: string;
+}
+
+/** id-safe slug from a display name: "My Cool Skill" → "my-cool-skill". */
+const slugify = (s: string) =>
+    s
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '')
+        .slice(0, 64);
+
 /* ────────────────────────────────────────────────────────────
    Browse view — searchable list of all skills
    ──────────────────────────────────────────────────────────── */
 export function SkillsManager({
     onEdit,
     onCreate,
+    onDuplicate,
     refreshKey,
 }: {
     onEdit: (id: string) => void;
     onCreate: () => void;
+    onDuplicate: (sk: SkillRow) => void;
     refreshKey: number;
 }) {
     const [skills, setSkills] = useState<SkillRow[]>([]);
@@ -51,7 +69,18 @@ export function SkillsManager({
             description: 'This removes the .md file permanently.',
         });
         if (!ok) return;
-        await fetch(`/skills/${sk.id}`, { method: 'DELETE' }).catch(() => {});
+        const res = await fetch(`/skills/${sk.id}`, { method: 'DELETE' }).catch(() => null);
+        if (res?.ok) {
+            // Prune the deleted skill from every card's toggle state so no
+            // stale id lingers in the canvas.
+            useCanvasStore.setState((st) => ({
+                cards: st.cards.map((c) =>
+                    c.skills?.includes(sk.id)
+                        ? { ...c, skills: c.skills.filter((s) => s !== sk.id) }
+                        : c,
+                ),
+            }));
+        }
         load();
     };
 
@@ -95,6 +124,13 @@ export function SkillsManager({
                         </div>
                         <button
                             className="shrink-0 rounded p-1 text-muted-foreground opacity-0 hover:bg-secondary hover:text-foreground group-hover:opacity-100"
+                            title="Duplicate"
+                            onClick={() => onDuplicate(sk)}
+                        >
+                            <Copy className="size-3.5" />
+                        </button>
+                        <button
+                            className="shrink-0 rounded p-1 text-muted-foreground opacity-0 hover:bg-secondary hover:text-foreground group-hover:opacity-100"
                             title="Edit"
                             onClick={() => onEdit(sk.id)}
                         >
@@ -123,24 +159,38 @@ export function SkillsManager({
 }
 
 /* ────────────────────────────────────────────────────────────
-   Editor view — takes over the dialog. skillId=null → create.
+   Editor view — skillId=null → create (optionally from a
+   duplicated skill via `initial`).
    ──────────────────────────────────────────────────────────── */
 export function SkillEditor({
     skillId,
+    initial,
     onBack,
+    onDirtyChange,
 }: {
     skillId: string | null;
+    initial?: SkillPrefill;
     onBack: () => void;
+    onDirtyChange?: (dirty: boolean) => void;
 }) {
     const isNew = skillId === null;
-    const [id, setId] = useState('');
-    const [name, setName] = useState('');
-    const [description, setDescription] = useState('');
-    const [instructions, setInstructions] = useState('');
+    const [id, setId] = useState(initial ? slugify(initial.name) : '');
+    const [name, setName] = useState(initial?.name ?? '');
+    const [description, setDescription] = useState(initial?.description ?? '');
+    const [instructions, setInstructions] = useState(initial?.instructions ?? '');
     const [saving, setSaving] = useState(false);
     const [loading, setLoading] = useState(!isNew);
     const [error, setError] = useState('');
-    const taRef = useRef<HTMLTextAreaElement>(null);
+
+    const idTouched = useRef(false);
+    const snapshot = useRef(
+        JSON.stringify({
+            id: initial ? slugify(initial.name) : '',
+            name: initial?.name ?? '',
+            description: initial?.description ?? '',
+            instructions: initial?.instructions ?? '',
+        }),
+    );
 
     useEffect(() => {
         if (isNew) return;
@@ -150,6 +200,12 @@ export function SkillEditor({
                 setName(d.name ?? skillId);
                 setDescription(d.description ?? '');
                 setInstructions(d.instructions ?? '');
+                snapshot.current = JSON.stringify({
+                    id: '',
+                    name: d.name ?? skillId,
+                    description: d.description ?? '',
+                    instructions: d.instructions ?? '',
+                });
                 setLoading(false);
             })
             .catch(() => {
@@ -157,6 +213,18 @@ export function SkillEditor({
                 setLoading(false);
             });
     }, [skillId, isNew]);
+
+    const dirty =
+        !loading &&
+        JSON.stringify({ id, name, description, instructions }) !== snapshot.current;
+    useEffect(() => {
+        onDirtyChange?.(dirty);
+    }, [dirty]);
+
+    const setNameAndSlug = (v: string) => {
+        setName(v);
+        if (!idTouched.current && isNew) setId(slugify(v));
+    };
 
     const save = async () => {
         if (!name.trim() || !instructions.trim()) {
@@ -187,18 +255,30 @@ export function SkillEditor({
         onBack();
     };
 
+    const back = async () => {
+        if (dirty) {
+            const ok = await confirmAction({
+                title: 'Discard changes?',
+                description: 'Your edits to this skill will not be saved.',
+            });
+            if (!ok) return;
+        }
+        onBack();
+    };
+
     return (
         <div className="flex min-h-0 flex-1 flex-col">
             {/* Header */}
             <div className="flex shrink-0 items-center gap-2">
                 <button
                     className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-secondary hover:text-foreground"
-                    onClick={onBack}
+                    onClick={back}
                 >
                     <ArrowLeft className="size-3.5" /> Back
                 </button>
                 <p className="truncate text-xs font-medium text-card-foreground">
-                    {isNew ? 'New skill' : `Edit skill`}
+                    {isNew ? (initial ? 'Duplicate skill' : 'New skill') : 'Edit skill'}
+                    {dirty && <span className="ml-1.5 text-[10px] text-muted-foreground">• unsaved</span>}
                 </p>
                 <button
                     disabled={saving || loading}
@@ -217,14 +297,18 @@ export function SkillEditor({
                         {isNew && (
                             <input
                                 value={id}
-                                onChange={(e) => setId(e.target.value)}
+                                maxLength={64}
+                                onChange={(e) => {
+                                    idTouched.current = true;
+                                    setId(e.target.value);
+                                }}
                                 placeholder="id (e.g. my-skill)"
-                                className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs outline-none focus:border-ring"
+                                className="w-full rounded-md border border-input bg-background px-2 py-1.5 font-mono text-xs outline-none focus:border-ring"
                             />
                         )}
                         <input
                             value={name}
-                            onChange={(e) => setName(e.target.value)}
+                            onChange={(e) => setNameAndSlug(e.target.value)}
                             placeholder="Name"
                             className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-xs outline-none focus:border-ring"
                         />
@@ -238,11 +322,17 @@ export function SkillEditor({
                             )}
                         />
                     </div>
+                    {isNew && !idTouched.current && id && (
+                        <p className="mt-1 shrink-0 text-[10px] text-muted-foreground">
+                            id auto-generated from the name — edit it if you want a different one
+                        </p>
+                    )}
                     <textarea
-                        ref={taRef}
                         value={instructions}
                         onChange={(e) => setInstructions(e.target.value)}
-                        placeholder={'Instructions (markdown)…\n\nThis is what the AI reads when it decides to use the skill.'}
+                        placeholder={
+                            'Instructions (markdown)…\n\nThis is what the AI reads when it decides to use the skill.'
+                        }
                         spellCheck={false}
                         className="mt-2 min-h-0 flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 font-mono text-xs leading-relaxed outline-none focus:border-ring"
                     />

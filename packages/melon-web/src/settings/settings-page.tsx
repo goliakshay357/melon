@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react';
-import { SkillsManager, SkillEditor } from '@/components/skills-manager';
+import { useEffect, useRef, useState } from 'react';
+import { SkillsManager, SkillEditor, type SkillPrefill } from '@/components/skills-manager';
+import { confirmAction } from '@/components/dialogs';
 import { THEMES } from '@/theme/themes';
 import { useThemeStore } from '@/theme/theme-store';
 import { useCanvasStore } from '@/store/canvas-store';
@@ -16,15 +17,48 @@ export function SettingsPage() {
 
     const [editingId, setEditingId] = useState<string | null>(null);
     const [creating, setCreating] = useState(false);
+    const [prefill, setPrefill] = useState<SkillPrefill | undefined>(undefined);
     const [refreshKey, setRefreshKey] = useState(0);
+    const dirtyRef = useRef(false);
+    const setActiveView = useCanvasStore((s) => s.setActiveView);
 
-    // Leaving the skills section (e.g. navbar → Themes) closes the editor.
+    const closeEditor = () => {
+        setEditingId(null);
+        setCreating(false);
+        setPrefill(undefined);
+        setRefreshKey((k) => k + 1);
+    };
+
+    // Leaving the skills section while the editor is open: confirm if dirty.
     useEffect(() => {
-        if (section !== 'skills') {
-            setEditingId(null);
-            setCreating(false);
+        if (section === 'skills' || (!creating && editingId === null)) return;
+        if (dirtyRef.current) {
+            confirmAction({
+                title: 'Discard changes?',
+                description: 'Your edits to this skill will not be saved.',
+            }).then((ok) => {
+                if (ok) closeEditor();
+                else setActiveView('skills');
+            });
+        } else {
+            closeEditor();
         }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [section]);
+
+    const duplicate = async (sk: { id: string; name: string }) => {
+        const d = await fetch(`/skills/${sk.id}`)
+            .then((r) => r.json())
+            .catch(() => null);
+        if (!d) return;
+        setPrefill({
+            name: `${d.name ?? sk.name} copy`,
+            description: d.description ?? '',
+            instructions: d.instructions ?? '',
+        });
+        setEditingId(null);
+        setCreating(true);
+    };
 
     const themeId = useThemeStore((s) => s.themeId);
     const setTheme = useThemeStore((s) => s.setTheme);
@@ -39,18 +73,20 @@ export function SettingsPage() {
                         <div className="mx-auto flex h-full w-full max-w-3xl flex-col p-5">
                             <SkillEditor
                                 skillId={creating ? null : editingId}
-                                onBack={() => {
-                                    setEditingId(null);
-                                    setCreating(false);
-                                    setRefreshKey((k) => k + 1);
-                                }}
+                                initial={prefill}
+                                onBack={closeEditor}
+                                onDirtyChange={(d) => (dirtyRef.current = d)}
                             />
                         </div>
                     ) : (
                         <div className="mx-auto h-full w-full max-w-3xl p-5">
                             <SkillsManager
                                 onEdit={setEditingId}
-                                onCreate={() => setCreating(true)}
+                                onCreate={() => {
+                                    setPrefill(undefined);
+                                    setCreating(true);
+                                }}
+                                onDuplicate={duplicate}
                                 refreshKey={refreshKey}
                             />
                         </div>
