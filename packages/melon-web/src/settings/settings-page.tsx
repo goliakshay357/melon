@@ -79,7 +79,7 @@ export function SettingsPage() {
                             />
                         </div>
                     ) : (
-                        <div className="mx-auto h-full w-full max-w-3xl p-5">
+                        <div className="mx-auto flex h-full w-full max-w-3xl flex-col p-5">
                             <SkillsManager
                                 onEdit={setEditingId}
                                 onCreate={() => {

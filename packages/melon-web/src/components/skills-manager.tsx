@@ -86,15 +86,24 @@ export function SkillsManager({
 
     return (
         <div className="flex min-h-0 flex-1 flex-col">
-            {/* Search */}
-            <div className="relative shrink-0">
-                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                <input
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder="Search skills…"
-                    className="w-full rounded-md border border-input bg-background py-1.5 pl-8 pr-2 text-xs outline-none focus:border-ring"
-                />
+            {/* Toolbar: search + add */}
+            <div className="flex shrink-0 items-center gap-2">
+                <div className="relative flex-1">
+                    <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                    <input
+                        value={query}
+                        onChange={(e) => setQuery(e.target.value)}
+                        placeholder="Search skills…"
+                        className="w-full rounded-md border border-input bg-background py-1.5 pl-8 pr-2 text-xs outline-none focus:border-ring"
+                    />
+                </div>
+                <button
+                    className="flex shrink-0 items-center gap-1.5 rounded-md bg-primary px-2.5 py-1.5 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
+                    onClick={onCreate}
+                    title="Add skill"
+                >
+                    <Plus className="size-3.5" /> Add
+                </button>
             </div>
 
             {/* List */}
@@ -147,13 +156,6 @@ export function SkillsManager({
                 ))}
             </div>
 
-            {/* Add */}
-            <button
-                className="mt-2 flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-dashed border-border py-2 text-[11px] text-muted-foreground hover:border-ring hover:text-foreground"
-                onClick={onCreate}
-            >
-                <Plus className="size-3.5" /> Add skill
-            </button>
         </div>
     );
 }
