@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { BaseEdge, getSmoothStepPath, useReactFlow, type EdgeProps } from '@xyflow/react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useActiveTheme } from '@/theme/theme-store';
@@ -34,7 +34,16 @@ function midOf(box: Box, side: Side): Pt {
     }
 }
 
-/** Orthogonal polyline S → waypoints → T (axis-aligned bends). */
+function boundaryPoint(px: number, py: number, box: Box, side: Side): Pt {
+    const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
+    switch (side) {
+        case 'top': return { x: clamp(px, box.x, box.x + box.w), y: box.y };
+        case 'bottom': return { x: clamp(px, box.x, box.x + box.w), y: box.y + box.h };
+        case 'left': return { x: box.x, y: clamp(py, box.y, box.y + box.h) };
+        case 'right': return { x: box.x + box.w, y: clamp(py, box.y, box.y + box.h) };
+    }
+}
+
 function routeThrough(s: Pt, t: Pt, waypoints: Pt[]): Pt[] {
     const pts: Pt[] = [s];
     let prev = s;
@@ -48,7 +57,6 @@ function routeThrough(s: Pt, t: Pt, waypoints: Pt[]): Pt[] {
     return pts;
 }
 
-/** Build a smooth path with rounded corners through the given points. */
 function roundedOrtho(points: Pt[], r: number): string {
     if (points.length < 2) return '';
     let d = `M ${points[0].x} ${points[0].y}`;
@@ -76,20 +84,19 @@ function roundedOrtho(points: Pt[], r: number): string {
     return d;
 }
 
-/** Extract the corner control points from a smooth-step path string. */
 function cornersFromPath(d: string): Pt[] {
     const pts: Pt[] = [];
     const re = /Q\s*(-?[\d.]+)[,\s]+(-?[\d.]+)/g;
     let m: RegExpExecArray | null;
     while ((m = re.exec(d)) !== null) pts.push({ x: +m[1], y: +m[2] });
-    // Dedupe near-identical points.
     return pts.filter((p, i) => i === 0 || Math.abs(p.x - pts[i - 1].x) > 1 || Math.abs(p.y - pts[i - 1].y) > 1);
 }
 
 /**
- * Mind-map edge. Both ends have draggable dots (re-attach to any side) and
- * the LINE has draggable corner handles — drag a corner to reshape the arrow.
- * Default: smooth orthogonal bottom→top with one arrowhead at the target.
+ * Mind-map edge. Dragging is LOCAL + REAL-TIME (no store writes, no canvas
+ * re-render — only this edge updates), and persists on release.
+ * - Endpoint dots: re-attach either end to any card side.
+ * - Corner handles: reshape the line itself.
  */
 export function ForkEdge(props: EdgeProps) {
     const theme = useActiveTheme();
@@ -113,30 +120,36 @@ export function ForkEdge(props: EdgeProps) {
 
     const sourceSide = data.sourceSide ?? 'bottom';
     const targetSide = data.targetSide ?? 'top';
-    const waypoints = data.waypoints ?? null;
+    const persistedWaypoints = data.waypoints ?? null;
 
     const sp = srcBox ? midOf(srcBox, sourceSide) : { x: props.sourceX, y: props.sourceY };
     const tp = tgtBox ? midOf(tgtBox, targetSide) : { x: props.targetX, y: props.targetY };
 
+    // LIVE drag state — local only, zero store writes while dragging.
+    const [live, setLive] = useState<{ sp?: Pt; tp?: Pt; corners?: Pt[] }>({});
+    const dragging = useRef<'source' | 'target' | 'corner' | null>(null);
+    const cornerIdx = useRef(-1);
+
+    const effSp = live.sp ?? sp;
+    const effTp = live.tp ?? tp;
+    const effCorners = live.corners ?? persistedWaypoints;
+
     let path: string;
     let corners: Pt[];
-    if (waypoints && waypoints.length > 0) {
-        corners = waypoints;
-        path = roundedOrtho(routeThrough(sp, tp, waypoints), 8);
+    if (effCorners && effCorners.length > 0) {
+        corners = effCorners;
+        path = roundedOrtho(routeThrough(effSp, effTp, effCorners), 8);
     } else {
         [path] = getSmoothStepPath({
-            sourceX: sp.x,
-            sourceY: sp.y,
-            targetX: tp.x,
-            targetY: tp.y,
+            sourceX: effSp.x,
+            sourceY: effSp.y,
+            targetX: effTp.x,
+            targetY: effTp.y,
             borderRadius: 8,
             offset: 24,
         });
         corners = cornersFromPath(path);
     }
-
-    const dragging = useRef<'source' | 'target' | 'corner' | null>(null);
-    const cornerIdx = useRef(-1);
 
     const persist = (updates: { sourceSide?: Side; targetSide?: Side; waypoints?: Pt[] | null }) => {
         if (!tgt) return;
@@ -144,34 +157,64 @@ export function ForkEdge(props: EdgeProps) {
         updateCard(tgt.id, { edgeToParent: { ...prev, ...updates } });
     };
 
-    // Window-level drag — reliable for endpoints AND corners.
-    useEffect(() => {
-        if (!dragging.current) return;
-        const onMove = (e: PointerEvent) => {
-            const flow = screenToFlowPosition({ x: e.clientX, y: e.clientY });
-            const kind = dragging.current;
-            if (kind === 'corner') {
-                const cur = waypoints && waypoints.length ? [...waypoints] : corners.length ? [...corners] : [];
-                if (cur[cornerIdx.current]) cur[cornerIdx.current] = { x: flow.x, y: flow.y };
-                persist({ waypoints: cur.length ? cur : null });
-                return;
+    const onPointerMove = (e: React.PointerEvent) => {
+        const kind = dragging.current;
+        if (!kind) return;
+        const flow = screenToFlowPosition({ x: e.clientX, y: e.clientY });
+
+        if (kind === 'corner') {
+            const base = effCorners && effCorners.length ? [...effCorners] : corners.length ? [...corners] : [];
+            if (base[cornerIdx.current]) {
+                base[cornerIdx.current] = { x: flow.x, y: flow.y };
+                setLive((l) => ({ ...l, corners: base }));
             }
-            const box = kind === 'source' ? srcBox : tgtBox;
-            if (!box || !tgt) return;
+            return;
+        }
+        const box = kind === 'source' ? srcBox : tgtBox;
+        if (!box) return;
+        const side = sideFromAngle(flow.x, flow.y, box);
+        if (kind === 'source') {
+            setLive((l) => ({ ...l, sp: boundaryPoint(flow.x, flow.y, box, side) }));
+        } else {
+            setLive((l) => ({ ...l, tp: boundaryPoint(flow.x, flow.y, box, side) }));
+        }
+    };
+
+    const onPointerUp = () => {
+        const kind = dragging.current;
+        if (!kind) return;
+        const box = kind === 'source' ? srcBox : tgtBox;
+        // Commit the FINAL state to the store (persist) only on release.
+        if (kind === 'corner') {
+            const finalCorners = live.corners && live.corners.length ? [...live.corners] : null;
+            persist({ waypoints: finalCorners });
+        } else if (box) {
+            const flow = screenToFlowPosition({
+                x: (window as any).__melonDragLast?.x ?? 0,
+                y: (window as any).__melonDragLast?.y ?? 0,
+            });
             const side = sideFromAngle(flow.x, flow.y, box);
             persist(kind === 'source' ? { sourceSide: side } : { targetSide: side });
-        };
-        const onUp = () => {
-            dragging.current = null;
-            cornerIdx.current = -1;
-        };
-        window.addEventListener('pointermove', onMove);
-        window.addEventListener('pointerup', onUp);
-        return () => {
-            window.removeEventListener('pointermove', onMove);
-            window.removeEventListener('pointerup', onUp);
-        };
-    }, [dragging, srcBox, tgtBox, tgt, updateCard, screenToFlowPosition, waypoints, corners, persist]);
+        }
+        dragging.current = null;
+        cornerIdx.current = -1;
+        setLive({});
+    };
+
+    const startDrag = (e: React.PointerEvent, kind: 'source' | 'target' | 'corner', idx = -1) => {
+        e.stopPropagation();
+        e.preventDefault();
+        dragging.current = kind;
+        cornerIdx.current = idx;
+        // Remember the last pointer position for commit (pointer capture isn't needed).
+        const remember = (ev: PointerEvent) => ((window as any).__melonDragLast = { x: ev.clientX, y: ev.clientY });
+        window.addEventListener('pointermove', remember);
+        window.addEventListener(
+            'pointerup',
+            () => window.removeEventListener('pointermove', remember),
+            { once: true },
+        );
+    };
 
     useEffect(
         () => () => {
@@ -179,12 +222,6 @@ export function ForkEdge(props: EdgeProps) {
         },
         [],
     );
-
-    const startDrag = (e: React.PointerEvent, kind: 'source' | 'target' | 'corner', idx = -1) => {
-        e.stopPropagation();
-        dragging.current = kind;
-        cornerIdx.current = idx;
-    };
 
     const dot = (p: Pt, kind: 'source' | 'target') => (
         <circle
@@ -197,6 +234,8 @@ export function ForkEdge(props: EdgeProps) {
             strokeWidth={1.5}
             style={{ cursor: 'grab', touchAction: 'none', pointerEvents: 'all' }}
             onPointerDown={(e) => startDrag(e, kind)}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
         >
             <title>Drag to re-attach this end</title>
         </circle>
@@ -207,12 +246,14 @@ export function ForkEdge(props: EdgeProps) {
             className="melon-corner nopan nodrag"
             cx={p.x}
             cy={p.y}
-            r={5.5}
+            r={6}
             fill="#0d1117"
             stroke={theme.tokens.purple}
             strokeWidth={1.5}
             style={{ cursor: 'move', touchAction: 'none', pointerEvents: 'all' }}
             onPointerDown={(e) => startDrag(e, 'corner', i)}
+            onPointerMove={onPointerMove}
+            onPointerUp={onPointerUp}
         >
             <title>Drag to reshape the line</title>
         </circle>
@@ -239,8 +280,8 @@ export function ForkEdge(props: EdgeProps) {
                 style={{ stroke: `${theme.tokens.purple}99`, strokeWidth: 2 }}
             />
             {corners.map((c, i) => cornerDot(c, i))}
-            {dot(sp, 'source')}
-            {dot(tp, 'target')}
+            {dot(effSp, 'source')}
+            {dot(effTp, 'target')}
         </>
     );
 }
