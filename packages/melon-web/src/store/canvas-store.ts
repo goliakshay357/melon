@@ -668,8 +668,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					headers: { "content-type": "application/json" },
 					body: JSON.stringify(
 						sessionFile
-							? { cardId, sessionFile, model: card.model }
-							: { cardId, cwd: opts?.cwd ?? get().folder ?? undefined, model: card.model },
+							? { cardId, sessionFile, model: card.model, skills: card.skills ?? [] }
+							: { cardId, cwd: opts?.cwd ?? get().folder ?? undefined, model: card.model, skills: card.skills ?? [] },
 					),
 				});
 				if (!res.ok) throw new Error(`attach ${res.status}: ${await res.text()}`);
@@ -683,15 +683,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					model: info.model,
 				});
 				attached.add(cardId);
-				// Skills toggled BEFORE the card was attached never reached the
-				// server — sync them now so the first prompt carries them.
-				if ((card.skills ?? []).length > 0) {
-					fetch(`/sessions/${cardId}/skills`, {
-						method: "POST",
-						headers: { "content-type": "application/json" },
-						body: JSON.stringify({ skills: card.skills }),
-					}).catch(() => {});
-				}
 				pushLog(
 					cardId,
 					`✓ attached — model ${info.model ?? "?"}${info.sessionFile ? ` | ${info.sessionFile.split("/").pop()}` : ""}`,

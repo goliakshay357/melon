@@ -38,7 +38,7 @@ import Fastify, { type FastifyInstance } from "fastify";
 import { expandHome, loadConfig, type MelonConfig, modelToString, preview } from "./config.ts";
 import { SessionRegistry } from "./session-registry.ts";
 import { denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel } from "./settings.js";
-import { loadSkills, materializeSkills } from "./skills.js";
+import { loadSkills, materializeSkills, readSkill, saveSkill, deleteSkill, skillsDir } from "./skills.js";
 
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
@@ -65,7 +65,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 
 	const registry = new SessionRegistry();
 
-	async function createRuntimeFor(sessionManager: any): Promise<any> {
+	async function createRuntimeFor(sessionManager: any, enabledSkills: string[] = []): Promise<any> {
 		const factory: any = async ({
 			cwd,
 			sessionManager: sm,
@@ -75,7 +75,17 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			sessionManager: any;
 			sessionStartEvent?: unknown;
 		}) => {
-			const services = await createAgentSessionServices({ cwd });
+			// Restrict the skill CATALOG to only the card's enabled skills, so the
+			// model's system prompt doesn't list (and self-invoke) everything.
+			const enabledSet = new Set(enabledSkills);
+			const skillsOverride = (result: any) => ({
+				...result,
+				skills: (result.skills ?? []).filter((sk: any) => enabledSet.has(sk.name)),
+			});
+			const services = await createAgentSessionServices({
+				cwd,
+				resourceLoaderOptions: { skillsOverride },
+			});
 			return {
 				...(await createAgentSessionFromServices({
 					services,
@@ -92,8 +102,16 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		});
 	}
 
-	async function attachSession(cardId: string, sessionManager: any, explicitModel?: string): Promise<any> {
-		const runtime = await createRuntimeFor(sessionManager);
+	async function attachSession(cardId: string, sessionManager: any, explicitModel?: string, skills: string[] = []): Promise<any> {
+		const runtime = await createRuntimeFor(sessionManager, skills);
+		// Activate the enabled skills' CONTENT (catalog is already filtered above).
+		for (const id of skills) {
+			try {
+				await runtime.session.followUp(`/skill:${id}`);
+			} catch {
+				/* ignore */
+			}
+		}
 		try {
 			const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
 			const [provider, id] = splitModel(wanted);
@@ -107,7 +125,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			console.error("model switch failed:", (e as Error)?.message ?? e);
 		}
 		wireEvents(cardId, runtime);
-		registry.set(cardId, { runtime, clients: new Set(), busy: false, activeSkills: [] });
+		registry.set(cardId, { runtime, clients: new Set(), busy: false, activeSkills: skills });
 		return runtime;
 	}
 
@@ -325,7 +343,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		} catch (e) {
 			return reply.code(400).send({ error: (e as Error).message });
 		}
-		const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model);
+		const skills = Array.isArray(body?.skills) ? (body.skills as unknown[]).filter((x): x is string => typeof x === "string") : [];
+		const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model, skills);
 		return {
 			cardId,
 			sessionId: runtime.session.sessionId,
@@ -340,7 +359,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const cardId = body?.cardId ?? randomUUID();
 		const sessionFile = body?.sessionFile;
 		if (!sessionFile) return reply.code(400).send({ error: "sessionFile required" });
-		const runtime = await attachSession(cardId, SessionManager.open(sessionFile), body?.model);
+		const skills = Array.isArray(body?.skills) ? (body.skills as unknown[]).filter((x): x is string => typeof x === "string") : [];
+		const runtime = await attachSession(cardId, SessionManager.open(sessionFile), body?.model, skills);
 		return {
 			cardId,
 			sessionId: runtime.session.sessionId,
@@ -751,6 +771,43 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		};
 		console.error(`[skills-debug] /skills returning ${skills.length}: ${skills.map((s) => s.id).join(", ")}`);
 		return { skills, debug };
+	});
+
+	// Skill manager CRUD.
+	app.get("/skills/:id", async (req, reply) => {
+		const id = (req.params as any).id;
+		const sk = readSkill(id);
+		if (!sk) return reply.code(404).send({ error: `unknown skill: ${id}` });
+		return { id: sk.id, name: sk.name, description: sk.description, instructions: sk.instructions, raw: sk.raw };
+	});
+
+	app.post("/skills", async (req, reply) => {
+		const b = req.body as any;
+		const id = String(b?.id ?? "").trim();
+		const name = String(b?.name ?? "").trim();
+		const description = b?.description ? String(b.description).trim() : undefined;
+		const instructions = String(b?.instructions ?? "").trim();
+		if (!id || !name || !instructions) return reply.code(400).send({ error: "id, name and instructions are required" });
+		if (!/^[a-z0-9-]+$/.test(id)) return reply.code(400).send({ error: "id must be lowercase letters, numbers and dashes" });
+		saveSkill(id, name, description, instructions);
+		return { ok: true, id };
+	});
+
+	app.put("/skills/:id", async (req, reply) => {
+		const id = (req.params as any).id;
+		const b = req.body as any;
+		const name = String(b?.name ?? "").trim();
+		const description = b?.description ? String(b.description).trim() : undefined;
+		const instructions = String(b?.instructions ?? "").trim();
+		if (!name || !instructions) return reply.code(400).send({ error: "name and instructions are required" });
+		saveSkill(id, name, description, instructions);
+		return { ok: true, id };
+	});
+
+	app.delete("/skills/:id", async (req, reply) => {
+		const id = (req.params as any).id;
+		deleteSkill(id);
+		return { ok: true, id };
 	});
 
 	// Set a card's active skills + retract removed ones.

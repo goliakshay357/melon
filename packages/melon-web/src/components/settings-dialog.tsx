@@ -2,6 +2,7 @@ import * as RadixDialog from '@radix-ui/react-dialog';
 import { THEMES } from '@/theme/themes';
 import { useThemeStore } from '@/theme/theme-store';
 import { cn } from '@/lib/utils';
+import { SkillsManager } from '@/components/skills-manager';
 
 /**
  * Settings dialog. Sections stack vertically — add new ones below Appearance.
@@ -88,6 +89,13 @@ export function SettingsDialog({
                                 </button>
                             );
                         })}
+                    </div>
+                    {/* Skills manager */}
+                    <p className="mt-5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        Skills
+                    </p>
+                    <div className="mt-2">
+                        <SkillsManager />
                     </div>
                 </RadixDialog.Content>
             </RadixDialog.Portal>
