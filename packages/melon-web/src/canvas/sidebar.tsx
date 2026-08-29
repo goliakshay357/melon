@@ -5,7 +5,6 @@ import {
     FolderOpen,
     FolderPlus,
     Layers,
-    MessageSquare,
     PanelLeftClose,
     PanelLeftOpen,
     Plus,
@@ -166,13 +165,6 @@ export function Sidebar() {
                     {activeView !== 'canvas' && (
                         <>
                             <button
-                                className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                                title="Back to canvas"
-                                onClick={() => setActiveView('canvas')}
-                            >
-                                <MessageSquare className="size-4" />
-                            </button>
-                            <button
                                 className={cn(
                                     'rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
                                     activeView === 'skills' && 'bg-secondary text-foreground',
@@ -199,8 +191,10 @@ export function Sidebar() {
                             'mt-auto rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
                             activeView !== 'canvas' && 'bg-secondary text-foreground',
                         )}
-                        title="Settings"
-                        onClick={() => openView('skills')}
+                        title={activeView === 'canvas' ? 'Settings' : 'Back to canvas'}
+                        onClick={() =>
+                            activeView === 'canvas' ? openView('themes') : setActiveView('canvas')
+                        }
                     >
                         <Settings className="size-4" />
                     </button>
@@ -213,15 +207,6 @@ export function Sidebar() {
                         <span className="flex-1 text-sm font-semibold tracking-tight text-card-foreground">
                             Melon
                         </span>
-                        {activeView !== 'canvas' && (
-                            <button
-                                className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                                title="Back to canvas"
-                                onClick={() => setActiveView('canvas')}
-                            >
-                                <MessageSquare className="size-4" />
-                            </button>
-                        )}
                         <button
                             className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary"
                             onClick={() => setCollapsed(true)}
@@ -519,8 +504,10 @@ export function Sidebar() {
                                 'shrink-0 rounded-md p-1 transition-colors hover:bg-secondary hover:text-foreground',
                                 activeView !== 'canvas' && 'bg-secondary text-foreground',
                             )}
-                            title="Settings"
-                            onClick={() => openView('skills')}
+                            title={activeView === 'canvas' ? 'Settings' : 'Back to canvas'}
+                            onClick={() =>
+                                activeView === 'canvas' ? openView('themes') : setActiveView('canvas')
+                            }
                         >
                             <Settings className="size-3.5" />
                         </button>
