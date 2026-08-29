@@ -68,9 +68,30 @@ export function ForkEdge(props: EdgeProps) {
         ? { x: tgt.position.x, y: tgt.position.y, w: tgt.size?.width ?? 380, h: tgt.size?.height ?? 260 }
         : null;
 
-    const sourceSide = data.sourceSide ?? 'bottom';
+    // AUTO sides: derive the natural connection sides from the cards'
+    // relative positions, re-evaluated live as cards move. A manual drag
+    // (persisted sourceSide/targetSide) overrides the auto value.
+    const autoSides = (() => {
+        if (!srcBox || !tgtBox) return { sourceSide: 'bottom' as Side, targetSide: 'top' as Side };
+        const srcCx = srcBox.x + srcBox.w / 2;
+        const srcCy = srcBox.y + srcBox.h / 2;
+        const tgtCx = tgtBox.x + tgtBox.w / 2;
+        const tgtCy = tgtBox.y + tgtBox.h / 2;
+        const dx = tgtCx - srcCx;
+        const dy = tgtCy - srcCy;
+        if (Math.abs(dx) > Math.abs(dy)) {
+            return dx >= 0
+                ? { sourceSide: 'right' as Side, targetSide: 'left' as Side }
+                : { sourceSide: 'left' as Side, targetSide: 'right' as Side };
+        }
+        return dy >= 0
+            ? { sourceSide: 'bottom' as Side, targetSide: 'top' as Side }
+            : { sourceSide: 'top' as Side, targetSide: 'bottom' as Side };
+    })();
+
+    const sourceSide = data.sourceSide ?? autoSides.sourceSide;
     const sourceT = data.sourceT ?? 0.5;
-    const targetSide = data.targetSide ?? 'top';
+    const targetSide = data.targetSide ?? autoSides.targetSide;
     const targetT = data.targetT ?? 0.5;
 
     const sp = srcBox ? pointAlong(srcBox, sourceSide, sourceT) : { x: props.sourceX, y: props.sourceY };
