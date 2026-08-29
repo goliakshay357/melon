@@ -65,6 +65,19 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 
 	const registry = new SessionRegistry();
 
+/**
+ * System-prompt guardrail: the agent must not explore its own installation
+ * (Melon.app, app.asar, DMGs, packaged dist, ~/.melon, the pi SDK) — a real
+ * failure mode where the model "reads its own codebase" instead of the
+ * user's project.
+ */
+const MELON_GUARDRAIL = [
+	"Environment boundaries (always apply):",
+	"- You are running inside Melon, a desktop app powered by the pi coding agent. Melon's own installation is OFF-LIMITS: never read, list, search, unzip, modify, or delete the app bundle (Melon.app, app.asar), .dmg installers, packaged server/web-dist folders, the desktop Electron shell, ~/.melon/agent internals, or the installed @earendil-works/pi-coding-agent package — even to 'understand the environment'.",
+	"- Work only inside the current project directory and paths the user explicitly gives you.",
+	"- If a task seems to require changing Melon itself (rare), ask the user first.",
+].join("\n");
+
 	async function createRuntimeFor(sessionManager: any, enabledSkills: string[] = []): Promise<any> {
 		const factory: any = async ({
 			cwd,
@@ -82,9 +95,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				...result,
 				skills: (result.skills ?? []).filter((sk: any) => enabledSet.has(sk.name)),
 			});
+			// Keep the agent OUT of its own installation. One-time system-prompt
+			// addition (not per-prompt, no context bloat).
+			const appendSystemPromptOverride = (base: string[]) => [
+				...base,
+				MELON_GUARDRAIL,
+			];
 			const services = await createAgentSessionServices({
 				cwd,
-				resourceLoaderOptions: { skillsOverride },
+				resourceLoaderOptions: { skillsOverride, appendSystemPromptOverride },
 			});
 			return {
 				...(await createAgentSessionFromServices({
