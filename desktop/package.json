@@ -1,6 +1,6 @@
 {
     "name": "melon",
-    "version": "0.3.0",
+    "version": "0.3.1",
     "private": true,
     "description": "Melon canvas \u2014 desktop shell (Electron)",
     "main": "main.mjs",

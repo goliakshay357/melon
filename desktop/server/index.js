@@ -41,6 +41,18 @@ export async function buildApp(deps = {}) {
     const app = Fastify({ logger: false });
     await app.register(cors, { origin: true });
     const registry = new SessionRegistry();
+    /**
+     * System-prompt guardrail: the agent must not explore its own installation
+     * (Melon.app, app.asar, DMGs, packaged dist, ~/.melon, the pi SDK) — a real
+     * failure mode where the model "reads its own codebase" instead of the
+     * user's project.
+     */
+    const MELON_GUARDRAIL = [
+        "Environment boundaries (always apply):",
+        "- You are running inside Melon, a desktop app powered by the pi coding agent. Melon's own installation is OFF-LIMITS: never read, list, search, unzip, modify, or delete the app bundle (Melon.app, app.asar), .dmg installers, packaged server/web-dist folders, the desktop Electron shell, ~/.melon/agent internals, or the installed @earendil-works/pi-coding-agent package — even to 'understand the environment'.",
+        "- Work only inside the current project directory and paths the user explicitly gives you.",
+        "- If a task seems to require changing Melon itself (rare), ask the user first.",
+    ].join("\n");
     async function createRuntimeFor(sessionManager, enabledSkills = []) {
         const factory = async ({ cwd, sessionManager: sm, sessionStartEvent, }) => {
             // Restrict the skill CATALOG to only the card's enabled skills, so the
@@ -50,9 +62,15 @@ export async function buildApp(deps = {}) {
                 ...result,
                 skills: (result.skills ?? []).filter((sk) => enabledSet.has(sk.name)),
             });
+            // Keep the agent OUT of its own installation. One-time system-prompt
+            // addition (not per-prompt, no context bloat).
+            const appendSystemPromptOverride = (base) => [
+                ...base,
+                MELON_GUARDRAIL,
+            ];
             const services = await createAgentSessionServices({
                 cwd,
-                resourceLoaderOptions: { skillsOverride },
+                resourceLoaderOptions: { skillsOverride, appendSystemPromptOverride },
             });
             return {
                 ...(await createAgentSessionFromServices({
@@ -753,6 +771,7 @@ export async function buildApp(deps = {}) {
             return reply.code(404).send({ error: `unknown skill: ${id}` });
         return { id: sk.id, name: sk.name, description: sk.description, instructions: sk.instructions, raw: sk.raw };
     });
+    const VALID_SKILL_ID = /^[a-z0-9-]+$/;
     app.post("/skills", async (req, reply) => {
         const b = req.body;
         const id = String(b?.id ?? "").trim();
@@ -761,13 +780,18 @@ export async function buildApp(deps = {}) {
         const instructions = String(b?.instructions ?? "").trim();
         if (!id || !name || !instructions)
             return reply.code(400).send({ error: "id, name and instructions are required" });
-        if (!/^[a-z0-9-]+$/.test(id))
-            return reply.code(400).send({ error: "id must be lowercase letters, numbers and dashes" });
+        if (!VALID_SKILL_ID.test(id) || id.length > 64)
+            return reply.code(400).send({ error: "id must be lowercase letters, numbers and dashes (max 64)" });
+        // Create must never silently overwrite — update goes through PUT.
+        if (readSkill(id))
+            return reply.code(409).send({ error: `A skill named "${id}" already exists — pick another id.` });
         saveSkill(id, name, description, instructions);
         return { ok: true, id };
     });
     app.put("/skills/:id", async (req, reply) => {
         const id = req.params.id;
+        if (!VALID_SKILL_ID.test(id) || id.length > 64)
+            return reply.code(400).send({ error: "invalid skill id" });
         const b = req.body;
         const name = String(b?.name ?? "").trim();
         const description = b?.description ? String(b.description).trim() : undefined;
@@ -779,6 +803,8 @@ export async function buildApp(deps = {}) {
     });
     app.delete("/skills/:id", async (req, reply) => {
         const id = req.params.id;
+        if (!VALID_SKILL_ID.test(id) || id.length > 64)
+            return reply.code(400).send({ error: "invalid skill id" });
         deleteSkill(id);
         return { ok: true, id };
     });

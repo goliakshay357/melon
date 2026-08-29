@@ -9,18 +9,27 @@ export function skillsDir() {
 function skillPath(id) {
     return join(skillsDir(), id, "SKILL.md");
 }
+function unquote(v) {
+    const t = v.trim();
+    if (t.length >= 2 && ((t.startsWith("'") && t.endsWith("'")) || (t.startsWith('"') && t.endsWith('"'))))
+        return t.slice(1, -1).trim();
+    return t;
+}
 function parseSkillMd(id, md) {
     const m = md.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
     const front = m ? m[1] : "";
     const body = m ? m[2].trim() : md.trim();
     if (!body)
         return null;
-    const name = front.match(/name:\s*(.+)/)?.[1]?.trim() ?? id;
-    const description = front.match(/description:\s*(.+)/)?.[1]?.trim();
-    return { id, name, description, instructions: body };
+    const name = unquote(front.match(/name:\s*(.+)/)?.[1] ?? "") || id;
+    const description = front.match(/description:\s*(.+)/)?.[1];
+    return { id, name, description: description ? unquote(description) : undefined, instructions: body };
 }
 function serializeSkillMd(name, description, instructions) {
-    const lines = ["---", `name: ${name}`];
+    // Keep the frontmatter valid YAML: strip quotes from the unquoted name
+    // value and replace colons (which would break the scalar).
+    const safeName = name.replace(/['"]/g, "").replace(/:/g, "-").trim();
+    const lines = ["---", `name: ${safeName}`];
     if (description)
         lines.push(`description: '${description.replace(/'/g, "")}'`);
     lines.push("---");
