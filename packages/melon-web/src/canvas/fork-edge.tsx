@@ -170,8 +170,15 @@ export function ForkEdge(props: EdgeProps) {
         else setLive((l) => ({ ...l, tp: midOf(box, side) }));
     };
 
-    const onUp = () => {
+    const onUp = (e?: React.PointerEvent) => {
         const kind = dragging.current;
+        if (e) {
+            try {
+                (e.target as Element).releasePointerCapture?.(e.pointerId);
+            } catch {
+                /* ignore */
+            }
+        }
         if (kind && tgt) {
             const prev = tgt.edgeToParent ?? {};
             if (kind === 'corner') {
@@ -199,6 +206,9 @@ export function ForkEdge(props: EdgeProps) {
         e.preventDefault();
         dragging.current = kind;
         cornerIdx.current = idx;
+        // Capture the pointer so move events keep flowing even when the cursor
+        // leaves the dot — this was the "lines barely moving" bug.
+        (e.target as Element).setPointerCapture?.(e.pointerId);
     };
 
     useEffect(
