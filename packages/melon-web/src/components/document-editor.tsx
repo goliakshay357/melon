@@ -6,7 +6,6 @@ import { listener, listenerCtx, ListenerManager } from '@milkdown/plugin-listene
 import { Milkdown, MilkdownProvider, useEditor } from '@milkdown/react';
 import { useRef } from 'react';
 import { useActiveTheme } from '@/theme/theme-store';
-import '@milkdown/theme-nord/style.css';
 
 function EditorInner({
     content,
