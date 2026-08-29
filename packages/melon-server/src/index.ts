@@ -104,14 +104,6 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 
 	async function attachSession(cardId: string, sessionManager: any, explicitModel?: string, skills: string[] = []): Promise<any> {
 		const runtime = await createRuntimeFor(sessionManager, skills);
-		// Activate the enabled skills' CONTENT (catalog is already filtered above).
-		for (const id of skills) {
-			try {
-				await runtime.session.followUp(`/skill:${id}`);
-			} catch {
-				/* ignore */
-			}
-		}
 		try {
 			const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
 			const [provider, id] = splitModel(wanted);
@@ -820,18 +812,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const prev = s.activeSkills ?? [];
 		s.activeSkills = next;
 		const skills = loadSkills();
-		// Newly enabled skills: activate via pi's NATIVE /skill: command so the
-		// model treats them as genuinely loaded (plain-text [SKILL: ...] was
-		// ignored). Removed skills: retract explicitly.
-		for (const id of next) {
-			if (!prev.includes(id) && skills[id]) {
-				try {
-					await s.runtime.session.followUp(`/skill:${id}`);
-				} catch {
-					/* ignore */
-				}
-			}
-		}
+		// Catalog is frozen after session start; the AI self-invokes enabled
+		// skills on demand. Only retract skills toggled OFF.
 		for (const id of prev) {
 			if (!next.includes(id) && skills[id]) {
 				try {
