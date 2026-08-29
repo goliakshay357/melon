@@ -15,22 +15,32 @@ interface Box {
     h: number;
 }
 
-function sideFromAngle(px: number, py: number, box: Box): Side {
-    const cx = box.x + box.w / 2;
-    const cy = box.y + box.h / 2;
-    const nx = (px - cx) / (box.w / 2);
-    const ny = (py - cy) / (box.h / 2);
-    return Math.abs(nx) > Math.abs(ny) ? (nx >= 0 ? 'right' : 'left') : ny >= 0 ? 'bottom' : 'top';
+/** Point along a card side, t = 0..1. */
+function pointAlong(box: Box, side: Side, t: number): Pt {
+    const c = Math.min(Math.max(t, 0), 1);
+    switch (side) {
+        case 'top': return { x: box.x + box.w * c, y: box.y };
+        case 'bottom': return { x: box.x + box.w * c, y: box.y + box.h };
+        case 'left': return { x: box.x, y: box.y + box.h * c };
+        case 'right': return { x: box.x + box.w, y: box.y + box.h * c };
+    }
 }
 
-function midOf(box: Box, side: Side): Pt {
-    const cx = box.x + box.w / 2;
-    const cy = box.y + box.h / 2;
+/** Nearest side of a card + the 0..1 position along that side. */
+function sideAndT(px: number, py: number, box: Box): { side: Side; t: number } {
+    const clamp = (v: number, lo: number, hi: number) => Math.min(Math.max(v, lo), hi);
+    const d = {
+        top: Math.abs(py - box.y),
+        bottom: Math.abs(py - (box.y + box.h)),
+        left: Math.abs(px - box.x),
+        right: Math.abs(px - (box.x + box.w)),
+    };
+    const side = (Object.keys(d) as Side[]).sort((a, b) => d[a] - d[b])[0];
     switch (side) {
-        case 'top': return { x: cx, y: box.y };
-        case 'bottom': return { x: cx, y: box.y + box.h };
-        case 'left': return { x: box.x, y: cy };
-        case 'right': return { x: box.x + box.w, y: cy };
+        case 'top': return { side, t: clamp((px - box.x) / box.w, 0, 1) };
+        case 'bottom': return { side, t: clamp((px - box.x) / box.w, 0, 1) };
+        case 'left': return { side, t: clamp((py - box.y) / box.h, 0, 1) };
+        case 'right': return { side, t: clamp((py - box.y) / box.h, 0, 1) };
     }
 }
 
@@ -77,10 +87,10 @@ function cornersFromPath(d: string): Pt[] {
 }
 
 /**
- * Mind-map edge (orthogonal, clean): smooth step path, bottom→top default.
- * Endpoint dots re-attach to any side; corner handles reshape the line.
- * Drag is LOCAL + REAL-TIME (no store writes, no canvas re-render → no lag),
- * and persists on release.
+ * Mind-map edge (orthogonal, Miro-like): smooth step path with a single
+ * arrowhead. Endpoints SLIDE continuously along the card perimeter (real-time,
+ * pointer-captured). Corner handles reshape the line. Drag is local (no store
+ * writes, no canvas re-render) and persists on release.
  */
 export function ForkEdge(props: EdgeProps) {
     const theme = useActiveTheme();
@@ -89,7 +99,9 @@ export function ForkEdge(props: EdgeProps) {
     const updateCard = useCanvasStore((s) => s.updateCard);
     const data = (props.data ?? {}) as {
         sourceSide?: Side;
+        sourceT?: number;
         targetSide?: Side;
+        targetT?: number;
         waypoints?: Pt[];
     };
 
@@ -103,28 +115,19 @@ export function ForkEdge(props: EdgeProps) {
         : null;
 
     const sourceSide = data.sourceSide ?? 'bottom';
+    const sourceT = data.sourceT ?? 0.5;
     const targetSide = data.targetSide ?? 'top';
+    const targetT = data.targetT ?? 0.5;
     const persistedWaypoints = data.waypoints ?? null;
 
-    const sp = srcBox ? midOf(srcBox, sourceSide) : { x: props.sourceX, y: props.sourceY };
-    const tp = tgtBox ? midOf(tgtBox, targetSide) : { x: props.targetX, y: props.targetY };
+    const sp = srcBox ? pointAlong(srcBox, sourceSide, sourceT) : { x: props.sourceX, y: props.sourceY };
+    const tp = tgtBox ? pointAlong(tgtBox, targetSide, targetT) : { x: props.targetX, y: props.targetY };
 
     // LIVE drag state — local only, zero store writes while dragging.
     const [live, setLive] = useState<{ sp?: Pt; tp?: Pt; corners?: Pt[] }>({});
     const dragging = useRef<'source' | 'target' | 'corner' | null>(null);
     const cornerIdx = useRef(-1);
-
-    // ── observability: where is the lag? ──
-    const perf = useRef({ lastMove: 0, renders: 0, lastLog: 0 });
-    perf.current.renders += 1;
-    const now = performance.now();
-    // Log render rate once per second (not every render — too noisy).
-    if (now - perf.current.lastLog > 1000) {
-        const rps = (perf.current.renders / ((now - perf.current.lastLog) / 1000)).toFixed(0);
-        console.log(`[edge-perf] renders/sec=${rps} (total=${perf.current.renders})`);
-        perf.current.renders = 0;
-        perf.current.lastLog = now;
-    }
+    const pending = useRef<{ sourceSide: Side; sourceT: number; targetSide: Side; targetT: number } | null>(null);
 
     const effSp = live.sp ?? sp;
     const effTp = live.tp ?? tp;
@@ -150,9 +153,6 @@ export function ForkEdge(props: EdgeProps) {
     const onMove = (e: React.PointerEvent) => {
         const kind = dragging.current;
         if (!kind) return;
-        const mNow = performance.now();
-        if (perf.current.lastMove) console.log(`[edge-perf] move gap=${(mNow - perf.current.lastMove).toFixed(1)}ms`);
-        perf.current.lastMove = mNow;
         const flow = screenToFlowPosition({ x: e.clientX, y: e.clientY });
 
         if (kind === 'corner') {
@@ -165,9 +165,22 @@ export function ForkEdge(props: EdgeProps) {
         }
         const box = kind === 'source' ? srcBox : tgtBox;
         if (!box) return;
-        const side = sideFromAngle(flow.x, flow.y, box);
-        if (kind === 'source') setLive((l) => ({ ...l, sp: midOf(box, side) }));
-        else setLive((l) => ({ ...l, tp: midOf(box, side) }));
+        const { side, t } = sideAndT(flow.x, flow.y, box);
+        const p = pointAlong(box, side, t);
+        pending.current = {
+            sourceSide,
+            sourceT,
+            targetSide,
+            targetT,
+            ...(pending.current ?? {}),
+        };
+        if (kind === 'source') {
+            pending.current = { ...pending.current, sourceSide: side, sourceT: t };
+            setLive((l) => ({ ...l, sp: p }));
+        } else {
+            pending.current = { ...pending.current, targetSide: side, targetT: t };
+            setLive((l) => ({ ...l, tp: p }));
+        }
     };
 
     const onUp = (e?: React.PointerEvent) => {
@@ -181,23 +194,20 @@ export function ForkEdge(props: EdgeProps) {
         }
         if (kind && tgt) {
             const prev = tgt.edgeToParent ?? {};
+            const updates: Record<string, unknown> = {};
             if (kind === 'corner') {
-                const w = live.corners && live.corners.length ? [...live.corners] : undefined;
-                updateCard(tgt.id, { edgeToParent: { ...prev, waypoints: w } });
-            } else if (kind === 'source') {
-                const box = srcBox;
-                if (box && live.sp) {
-                    updateCard(tgt.id, { edgeToParent: { ...prev, sourceSide: sideFromAngle(live.sp.x, live.sp.y, box) } });
-                }
-            } else if (kind === 'target') {
-                const box = tgtBox;
-                if (box && live.tp) {
-                    updateCard(tgt.id, { edgeToParent: { ...prev, targetSide: sideFromAngle(live.tp.x, live.tp.y, box) } });
-                }
+                updates.waypoints = live.corners && live.corners.length ? [...live.corners] : undefined;
+            } else if (pending.current) {
+                updates.sourceSide = pending.current.sourceSide;
+                updates.sourceT = pending.current.sourceT;
+                updates.targetSide = pending.current.targetSide;
+                updates.targetT = pending.current.targetT;
             }
+            updateCard(tgt.id, { edgeToParent: { ...prev, ...updates } });
         }
         dragging.current = null;
         cornerIdx.current = -1;
+        pending.current = null;
         setLive({});
     };
 
@@ -206,8 +216,7 @@ export function ForkEdge(props: EdgeProps) {
         e.preventDefault();
         dragging.current = kind;
         cornerIdx.current = idx;
-        // Capture the pointer so move events keep flowing even when the cursor
-        // leaves the dot — this was the "lines barely moving" bug.
+        pending.current = null;
         (e.target as Element).setPointerCapture?.(e.pointerId);
     };
 
@@ -223,7 +232,7 @@ export function ForkEdge(props: EdgeProps) {
             className="melon-endpoint nopan nodrag"
             cx={p.x}
             cy={p.y}
-            r={8}
+            r={7}
             fill={theme.tokens.purple}
             stroke="#0d1117"
             strokeWidth={1.5}
@@ -232,7 +241,7 @@ export function ForkEdge(props: EdgeProps) {
             onPointerMove={onMove}
             onPointerUp={onUp}
         >
-            <title>Drag to re-attach this end</title>
+            <title>Drag to slide along the card</title>
         </circle>
     );
 

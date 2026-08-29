@@ -65,10 +65,12 @@ export interface SessionCard {
 	contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
 	/** Active skill ids for this card (injected into prompts). Default OFF. */
 	skills?: string[];
-	/** Manual mind-map arrow: side endpoints + line waypoints. */
+	/** Manual mind-map arrow: side + position along side (0..1), plus line waypoints. */
 	edgeToParent?: {
 		sourceSide?: "top" | "bottom" | "left" | "right";
+		sourceT?: number;
 		targetSide?: "top" | "bottom" | "left" | "right";
+		targetT?: number;
 		waypoints?: Array<{ x: number; y: number }>;
 	};
 	/** Visualization-first mode: agent explains with diagrams/scenes. */
