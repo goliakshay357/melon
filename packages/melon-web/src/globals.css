@@ -157,3 +157,15 @@
 .melon-corner:hover {
     opacity: 1;
 }
+
+/* ── Hide scrollbars app-wide (scrolling still works) ──
+   Covers: skills list, skill editor box, all dropdowns, chat, themes. */
+* {
+    scrollbar-width: none; /* Firefox */
+    -ms-overflow-style: none; /* old IE/Edge */
+}
+*::-webkit-scrollbar {
+    display: none; /* Chromium / Electron */
+    width: 0;
+    height: 0;
+}
