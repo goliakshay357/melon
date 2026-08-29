@@ -119,6 +119,7 @@ export function ForkEdge(props: EdgeProps) {
             fillOpacity={0.9}
             stroke="#0d1117"
             strokeWidth={1.5}
+            className="nopan nodrag"
             style={{ cursor: 'grab', touchAction: 'none' }}
             onPointerDown={(e) => startDrag(e, kind)}
             onPointerMove={onDrag}
