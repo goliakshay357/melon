@@ -465,9 +465,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	},
 
 	// Branch a linked card beside the source, in the nearest free space.
+	// Inherits the source's kind: document → document, chat → chat.
 	addLinkedCard(sourceId) {
+		const src = get().cards.find((c) => c.id === sourceId);
 		const pos = findOpenSpot(get().cards, sourceId, 380, 260);
-		get().addCard(pos, sourceId);
+		get().addCard(pos, sourceId, undefined, src?.kind ?? "chat");
 	},
 
 	// Stop generation: freeze the display immediately, then abort server-side.
