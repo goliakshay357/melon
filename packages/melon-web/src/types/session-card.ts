@@ -43,6 +43,10 @@ export interface ChatMessage {
  */
 export interface SessionCard {
 	id: string;
+	/** chat = AI conversation · document = Notion-like markdown editor */
+	kind?: "chat" | "document";
+	/** Raw markdown content for document cards. */
+	documentContent?: string;
 	title: string;
 	position: { x: number; y: number };
 	parentId: string | null;

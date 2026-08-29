@@ -124,7 +124,7 @@ interface CanvasState {
 	saveCanvas: () => Promise<void>;
 	scrollAction: ScrollAction;
 	setScrollAction: (a: ScrollAction) => void;
-	addCard: (position: { x: number; y: number }, parentId?: string | null, forcedId?: string) => string;
+	addCard: (position: { x: number; y: number }, parentId?: string | null, forcedId?: string, kind?: "chat" | "document") => string;
 	forkCard: (parentId: string) => Promise<string>;
 	moveCard: (id: string, position: { x: number; y: number }) => void;
 	updateCard: (id: string, patch: Partial<SessionCard>) => void;
@@ -338,7 +338,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		set({ scrollAction: a });
 	},
 
-	addCard(position, parentId = null, forcedId?: string) {
+	addCard(position, parentId = null, forcedId?: string, kind: "chat" | "document" = "chat") {
 		pushUndo(get().cards);
 		const parent = parentId ? get().cards.find((c) => c.id === parentId) : undefined;
 		const card: SessionCard = {
@@ -346,10 +346,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			title: parent ? `↳ ${parent.title}`.slice(0, 44) : "New card",
 			position,
 			parentId,
+			kind,
 			status: "idle",
 			messages: [],
 			debug: false,
 			skills: [],
+			documentContent: "",
 		};
 		set((s) => ({ cards: [...s.cards, card] }));
 		return card.id;

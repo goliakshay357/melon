@@ -1067,11 +1067,28 @@ function seedFromPiIfEmpty() {
         console.error("[melon] seed failed:", e?.message ?? e);
     }
 }
+// pi auto-retries model errors by default (429/overloaded/etc., up to 3x).
+// We want FAIL FAST: a model error ends the turn with the real message, no
+// silent retry loop. Write retry.enabled=false into the agent settings.
+function ensureRetryDisabled() {
+    const file = join(getAgentDir(), "settings.json");
+    try {
+        const cur = existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : {};
+        if (cur.retry?.enabled === false)
+            return;
+        writeFileSync(file, JSON.stringify({ ...cur, retry: { enabled: false } }, null, 2));
+        console.error("[melon] retries disabled — model errors fail fast");
+    }
+    catch (e) {
+        console.error("[melon] failed to disable retry:", e?.message ?? e);
+    }
+}
 // Run directly? (vs imported by tests)
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop() ?? "")) {
     const config = loadConfig();
     seedFromPiIfEmpty();
     materializeSkills();
+    ensureRetryDisabled();
     const app = await buildApp();
     const addr = await app.listen({ port: config.port, host: "127.0.0.1" });
     const boundPort = Number(String(addr).split(":").pop());

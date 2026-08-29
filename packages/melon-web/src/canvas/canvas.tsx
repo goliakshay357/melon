@@ -12,6 +12,7 @@ import {
     type OnNodesDelete,
 } from '@xyflow/react';
 import { ChatCardNode, type ChatCardNodeType } from './chat-card-node';
+import { DocumentCardNode, type DocumentCardNodeType } from './document-card-node';
 import { ForkEdge } from './fork-edge';
 import { Toolbar } from './toolbar';
 import { Sidebar } from './sidebar';
@@ -19,7 +20,7 @@ import { Sidebar } from './sidebar';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useActiveTheme } from '@/theme/theme-store';
 
-type AppNode = ChatCardNodeType;
+type AppNode = ChatCardNodeType | DocumentCardNodeType;
 
 export function Canvas() {
     const cards = useCanvasStore((s) => s.cards);
@@ -48,7 +49,7 @@ export function Canvas() {
         useCanvasStore.getState().startHealthPoll();
     }, []);
 
-    const nodeTypes = useMemo(() => ({ chatCard: ChatCardNode }), []);
+    const nodeTypes = useMemo(() => ({ chatCard: ChatCardNode, documentCard: DocumentCardNode }), []);
     const edgeTypes = useMemo(() => ({ fork: ForkEdge }), []);
 
 	// Autosave workspace (debounced).
@@ -122,7 +123,7 @@ export function Canvas() {
                     }
                     return {
                         id: c.id,
-                        type: 'chatCard' as const,
+                        type: (c.kind === 'document' ? 'documentCard' : 'chatCard') as AppNode['type'],
                         position: c.position,
                         data: { cardId: c.id },
                         style: { width, height },
@@ -233,7 +234,17 @@ export function Canvas() {
                         className="block w-full px-3 py-1.5 text-left text-card-foreground hover:bg-secondary"
                         onClick={newCardHere}
                     >
-                        New card here
+                        💬 New chat card
+                    </button>
+                    <button
+                        className="block w-full px-3 py-1.5 text-left text-card-foreground hover:bg-secondary"
+                        onClick={() => {
+                            if (!menu) return;
+                            addCard(screenToFlowPosition(menu), null, undefined, 'document');
+                            setMenu(null);
+                        }}
+                    >
+                        📄 New document
                     </button>
                     <button
                         className="block w-full px-3 py-1.5 text-left text-card-foreground hover:bg-secondary"
