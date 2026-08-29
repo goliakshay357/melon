@@ -147,3 +147,13 @@
 .melon-endpoint:hover {
     opacity: 1;
 }
+
+/* Line corner handles: subtle, bright on hover */
+.melon-corner {
+    opacity: 0.35;
+    transition: opacity 120ms ease;
+}
+.react-flow__edge:hover .melon-corner,
+.melon-corner:hover {
+    opacity: 1;
+}
