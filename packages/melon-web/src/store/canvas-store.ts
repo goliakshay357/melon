@@ -42,6 +42,10 @@ function findOpenSpot(cards: SessionCard[], sourceId: string, w: number, h: numb
 	const src = cards.find((c) => c.id === sourceId);
 	if (!src) return { x: 0, y: 0 };
 	const gap = 36;
+	const sw = src.size?.width ?? 380;
+	const sh = src.size?.height ?? 260;
+	const cx = src.position.x + sw / 2;
+	const cy = src.position.y + sh / 2;
 	const occupied: Box[] = cards
 		.filter((c) => c.id !== sourceId)
 		.map((c) => ({
@@ -50,16 +54,20 @@ function findOpenSpot(cards: SessionCard[], sourceId: string, w: number, h: numb
 			top: c.position.y,
 			bottom: c.position.y + (c.size?.height ?? 260),
 		}));
+	// Candidates on BOTH sides (right column + left column + rows below).
 	const spots: Array<{ x: number; y: number }> = [];
-	// Column to the right first (mind-map flow), row by row.
-	for (let i = 0; i < 6; i++) spots.push({ x: src.position.x + (src.size?.width ?? 380) + gap, y: src.position.y + i * (h + gap) });
-	// Then rows straight below.
+	for (let i = 0; i < 5; i++) {
+		spots.push({ x: src.position.x + sw + gap, y: src.position.y + i * (h + gap) });
+		spots.push({ x: src.position.x - w - gap, y: src.position.y + i * (h + gap) });
+	}
 	for (let i = 1; i <= 4; i++) spots.push({ x: src.position.x, y: src.position.y + i * (h + gap) });
+	// Nearest free spot wins (by distance to the source center).
+	spots.sort((a, b) => Math.hypot(a.x + w / 2 - cx, a.y + h / 2 - cy) - Math.hypot(b.x + w / 2 - cx, b.y + h / 2 - cy));
 	for (const s of spots) {
 		const box: Box = { left: s.x, right: s.x + w, top: s.y, bottom: s.y + h };
 		if (!occupied.some((o) => boxesOverlap(box, o))) return s;
 	}
-	return { x: src.position.x + (src.size?.width ?? 380) + gap, y: src.position.y };
+	return { x: src.position.x + sw + gap, y: src.position.y };
 }
 
 /** Structured trajectory event — feeds the waterfall view. */
