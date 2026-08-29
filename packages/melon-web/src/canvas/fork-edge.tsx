@@ -114,6 +114,18 @@ export function ForkEdge(props: EdgeProps) {
     const dragging = useRef<'source' | 'target' | 'corner' | null>(null);
     const cornerIdx = useRef(-1);
 
+    // ── observability: where is the lag? ──
+    const perf = useRef({ lastMove: 0, renders: 0, lastLog: 0 });
+    perf.current.renders += 1;
+    const now = performance.now();
+    // Log render rate once per second (not every render — too noisy).
+    if (now - perf.current.lastLog > 1000) {
+        const rps = (perf.current.renders / ((now - perf.current.lastLog) / 1000)).toFixed(0);
+        console.log(`[edge-perf] renders/sec=${rps} (total=${perf.current.renders})`);
+        perf.current.renders = 0;
+        perf.current.lastLog = now;
+    }
+
     const effSp = live.sp ?? sp;
     const effTp = live.tp ?? tp;
     const effCorners = live.corners ?? persistedWaypoints;
@@ -138,6 +150,9 @@ export function ForkEdge(props: EdgeProps) {
     const onMove = (e: React.PointerEvent) => {
         const kind = dragging.current;
         if (!kind) return;
+        const mNow = performance.now();
+        if (perf.current.lastMove) console.log(`[edge-perf] move gap=${(mNow - perf.current.lastMove).toFixed(1)}ms`);
+        perf.current.lastMove = mNow;
         const flow = screenToFlowPosition({ x: e.clientX, y: e.clientY });
 
         if (kind === 'corner') {
