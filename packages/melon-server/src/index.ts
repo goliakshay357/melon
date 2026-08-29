@@ -1012,24 +1012,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		console.log(`[${cardId}] prompt:start "${String((req.body as any)?.text).slice(0, 60)}"`);
 		registry.broadcast(cardId, { type: "raw", text: "⬇ prompt received by server" });
 		try {
-			let text = (req.body as any)?.text ?? "";
-			// Inject enabled skills in pi's native <skill name=...> block format
-			// with explicit "ACTIVATED" framing — the model treats these as
-			// genuinely loaded and can report them when asked.
-			const activeSkills = s.activeSkills ?? [];
-			if (activeSkills.length > 0) {
-				const sk = loadSkills();
-				const blocks = activeSkills
-					.filter((id) => sk[id])
-					.map(
-						(id) =>
-							`<skill name="${sk[id].id}" location="${join(getAgentDir(), "skills", sk[id].id, "SKILL.md")}">\n${sk[id].instructions}\n</skill>`,
-					)
-					.join("\n\n");
-				if (blocks) {
-					text = `${text}\n\n[ACTIVATED SKILLS — REQUIRED]\nThe following skills are currently ENABLED for this session and you MUST follow them. When asked which skills are enabled for you, list exactly these names.\n\n${blocks}`;
-				}
-			}
+			const text = (req.body as any)?.text ?? "";
+			// Skills are activated via pi's native /skill: followUp on toggle —
+			// NOT appended per-prompt (that bloated the context window).
 			await s.runtime.session.prompt(text);
 			console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
 		} catch (e) {
