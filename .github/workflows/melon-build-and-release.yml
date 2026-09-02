@@ -51,6 +51,12 @@ jobs:
       ref: ${{ steps.resolve.outputs.ref }}
       tag: ${{ steps.resolve.outputs.tag }}
     steps:
+      - name: Checkout (gives gh a .git dir — some gh paths probe git)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Resolve ref (branch or tag) and ensure tag exists
         id: resolve
         env:
@@ -67,12 +73,13 @@ jobs:
           fi
           TAG="v${VERSION}"
           if [ -z "${BRANCH}" ]; then
-            BRANCH="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)"
+            # Free from the event context — no gh/git probing needed.
+            BRANCH="${{ github.event.repository.default_branch }}"
           fi
           echo "Using branch=${BRANCH} tag=${TAG}"
-          
-          # Check if release already exists
-          if gh release view "${TAG}" >/dev/null 2>&1; then
+
+          # Check if release already exists (--repo: never probe local git)
+          if gh release view "${TAG}" --repo "${GH_REPO}" >/dev/null 2>&1; then
             echo "Release ${TAG} already exists — refusing to overwrite."
             exit 1
           fi
@@ -243,9 +250,9 @@ jobs:
           cd release-assets
           # If a release with this tag already exists (re-run), delete the draft
           # so we never publish duplicate/partial assets.
-          existing="$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          existing="$(gh release view "${RELEASE_TAG}" --repo "${GH_REPO}" --json isDraft --jq .isDraft 2>/dev/null || true)"
           if [ "${existing}" = "true" ]; then
-            gh release delete "${RELEASE_TAG}" --yes
+            gh release delete "${RELEASE_TAG}" --repo "${GH_REPO}" --yes
           fi
           if [ "${existing}" = "false" ]; then
             echo "::error::Release ${RELEASE_TAG} is already published. Bump the tag."
@@ -256,7 +263,7 @@ jobs:
             echo "::error::no release assets found"
             exit 1
           fi
-          gh release create "${RELEASE_TAG}" \
+          gh release create "${RELEASE_TAG}" --repo "${GH_REPO}" \
             --verify-tag \
             --draft \
             --title "Melon ${RELEASE_TAG}" \
@@ -275,7 +282,7 @@ jobs:
 
           # Sanity check: every local file appears in the release.
           expected="$(printf '%s\n' "${ASSETS[@]}" | sort)"
-          actual="$(gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name' | sort)"
+          actual="$(gh release view "${RELEASE_TAG}" --repo "${GH_REPO}" --json assets --jq '.assets[].name' | sort)"
           if [ "${expected}" != "${actual}" ]; then
             echo "::error::asset set mismatch"
             diff -u <(printf '%s\n' "${expected}") <(printf '%s\n' "${actual}") || true
@@ -297,7 +304,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          existing="$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          existing="$(gh release view "${RELEASE_TAG}" --repo "${GH_REPO}" --json isDraft --jq .isDraft 2>/dev/null || true)"
           if [ -z "${existing}" ]; then
             echo "::error::Release ${RELEASE_TAG} not found."
             exit 1
@@ -306,7 +313,7 @@ jobs:
             echo "Release ${RELEASE_TAG} is already public."
             exit 0
           fi
-          gh release edit "${RELEASE_TAG}" --draft=false
+          gh release edit "${RELEASE_TAG}" --repo "${GH_REPO}" --draft=false
           echo "Released ${RELEASE_TAG}"
 
   cleanup-on-failure:
@@ -324,8 +331,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          existing="$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          existing="$(gh release view "${RELEASE_TAG}" --repo "${GH_REPO}" --json isDraft --jq .isDraft 2>/dev/null || true)"
           if [ "${existing}" = "true" ]; then
-            gh release delete "${RELEASE_TAG}" --yes
+            gh release delete "${RELEASE_TAG}" --repo "${GH_REPO}" --yes
             echo "Deleted failed draft release ${RELEASE_TAG}"
           fi
