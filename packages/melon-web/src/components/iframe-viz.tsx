@@ -128,10 +128,6 @@ export const IframeViz = memo(function IframeViz({
         );
     }
 
-    // "Open in browser" URL for file mode (the /viz endpoint serves the
-    // exact same document the iframe shows).
-    const browserUrl = path ? `/viz?${new URLSearchParams({ path, ...(cwd ? { cwd } : {}) })}` : null;
-
     return (
         <div className="group/viz my-2 overflow-hidden rounded-lg border border-primary/40">
             {srcDoc != null ? (
@@ -165,7 +161,6 @@ export const IframeViz = memo(function IframeViz({
                                     openFullscreen(
                                         frameRef.current,
                                         path ? path.split('/').pop() ?? 'visualization' : 'visualization',
-                                        browserUrl,
                                     );
                                 }
                             }}

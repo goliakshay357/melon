@@ -11,16 +11,13 @@ interface VizFullscreenState {
     node: HTMLIFrameElement | null;
     /** Header info for the fullscreen chrome (title). */
     title: string;
-    /** Server URL to "open in browser" (file mode only). */
-    url: string | null;
-    open: (node: HTMLIFrameElement, title: string, url: string | null) => void;
+    open: (node: HTMLIFrameElement, title: string) => void;
     close: () => void;
 }
 
 export const useVizFullscreen = create<VizFullscreenState>((set) => ({
     node: null,
     title: '',
-    url: null,
-    open: (node, title, url) => set({ node, title, url }),
-    close: () => set({ node: null, title: '', url: null }),
+    open: (node, title) => set({ node, title }),
+    close: () => set({ node: null, title: '' }),
 }));

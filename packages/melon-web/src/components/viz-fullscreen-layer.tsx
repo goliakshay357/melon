@@ -1,6 +1,6 @@
 import { memo, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Maximize2, Minimize2 } from 'lucide-react';
+import { Minimize2 } from 'lucide-react';
 import { useActiveTheme } from '@/theme/theme-store';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useVizFullscreen } from './viz-fullscreen';
@@ -23,7 +23,7 @@ import { useVizFullscreen } from './viz-fullscreen';
  * document.body would otherwise sit above the settings page.
  */
 export const VizFullscreenLayer = memo(function VizFullscreenLayer() {
-    const { node, title, url, close } = useVizFullscreen();
+    const { node, title, close } = useVizFullscreen();
     const activeView = useCanvasStore((s) => s.activeView);
     const theme = useActiveTheme();
     const hostRef = useRef<HTMLDivElement | null>(null);
@@ -96,17 +96,6 @@ export const VizFullscreenLayer = memo(function VizFullscreenLayer() {
                 <span className="min-w-0 flex-1 truncate text-xs font-medium text-white/70">
                     {title || 'visualization'}
                 </span>
-                {url && (
-                    <a
-                        href={url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        title="Open in browser"
-                        className="flex items-center gap-1 rounded-md bg-white/10 px-2 py-1 text-[11px] text-white/80 transition-colors hover:bg-white/20 hover:text-white"
-                    >
-                        <Maximize2 className="size-3.5" /> browser
-                    </a>
-                )}
                 <button
                     onClick={close}
                     title="Close (Esc)"
