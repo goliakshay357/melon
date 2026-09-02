@@ -28,6 +28,7 @@ export const VizFullscreenLayer = memo(function VizFullscreenLayer() {
     const theme = useActiveTheme();
     const hostRef = useRef<HTMLDivElement | null>(null);
     const returnToRef = useRef<Element | null>(null); // where the node came from
+    const savedStyleRef = useRef<{ width: string; height: string } | null>(null);
 
     // Case 7: settings page opens while a viz is fullscreen — close it,
     // otherwise the portal floats over an unrelated view.
@@ -56,15 +57,21 @@ export const VizFullscreenLayer = memo(function VizFullscreenLayer() {
     useEffect(() => {
         if (!node || !hostRef.current) return;
         returnToRef.current = node.parentElement;
+        // Save the React-managed inline styles (height: 700px, width: 100%) so we
+        // can RESTORE them on close. Setting them to '' would wipe them and React
+        // (props unchanged) would never re-apply — the frame would collapse to the
+        // browser-default 300×150px "mobile size".
+        savedStyleRef.current = { width: node.style.width, height: node.style.height };
         hostRef.current.appendChild(node);
         node.style.width = '100%';
         node.style.height = '100%';
         return () => {
-            // un-promote: restore geometry and re-parent home.
-            node.style.width = '';
-            node.style.height = '';
+            // un-promote: restore the ORIGINAL inline styles exactly, then re-parent home.
+            node.style.width = savedStyleRef.current?.width ?? '';
+            node.style.height = savedStyleRef.current?.height ?? '';
             returnToRef.current?.appendChild(node);
             returnToRef.current = null;
+            savedStyleRef.current = null;
         };
     }, [node]);
 
