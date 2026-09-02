@@ -225,11 +225,12 @@ jobs:
 
   stage-release:
     name: Stage GitHub Release
-    needs: build
+    needs: [prepare, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
+      GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - name: Download all platform artifacts
@@ -302,11 +303,12 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
-    needs: stage-release
+    needs: [prepare, stage-release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
+      GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - name: Publish draft → public
@@ -328,12 +330,13 @@ jobs:
 
   cleanup-on-failure:
     name: Cleanup draft on failure
-    needs: [build, stage-release, publish-release]
+    needs: [prepare, build, stage-release, publish-release]
     if: ${{ always() && (needs.build.result == 'failure' || needs.stage-release.result == 'failure' || needs.publish-release.result == 'failure' || needs.publish-release.result == 'cancelled') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
     env:
+      GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
     steps:
       - name: Delete draft release
