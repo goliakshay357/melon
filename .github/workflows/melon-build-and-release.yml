@@ -213,7 +213,12 @@ jobs:
             exit 1
           fi
           echo "Found: $ARTIFACT"
-          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+          # Canonical, space-free release name (matrix.out) — electron-builder's
+          # defaults vary per target ("Melon Setup 0.3.2.exe" has SPACES, which
+          # breaks globs and word-splitting downstream).
+          OUT="${{ matrix.out }}"
+          cp "$ARTIFACT" "desktop/dist/${OUT}"
+          echo "artifact=desktop/dist/${OUT}" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -269,9 +274,18 @@ jobs:
             echo "::error::Release ${RELEASE_TAG} is already published. Bump the tag."
             exit 1
           fi
-          ASSETS=( $(ls Melon-*.dmg Melon-*.AppImage Melon-*.exe SHA256SUMS 2>/dev/null) )
+          # nullglob: unmatched patterns expand to nothing instead of erroring;
+          # loop guards against spaces. Never ls-in-subshell — GNU ls exits 2
+          # when ANY glob fails, killing the script under set -e before the
+          # no-assets guard can run.
+          shopt -s nullglob
+          ASSETS=()
+          for f in Melon-*.dmg Melon-*.AppImage Melon-*.exe SHA256SUMS; do
+            ASSETS+=("$f")
+          done
           if [ ${#ASSETS[@]} -eq 0 ]; then
             echo "::error::no release assets found"
+            ls -la
             exit 1
           fi
           gh release create "${RELEASE_TAG}" --repo "${GH_REPO}" \
