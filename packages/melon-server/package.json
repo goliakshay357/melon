@@ -1,6 +1,6 @@
 {
     "name": "@earendil-works/melon-server",
-    "version": "0.3.1",
+    "version": "0.3.2",
     "private": true,
     "type": "module",
     "description": "Melon canvas bridge: HTTP/SSE front-end over live pi sessions",

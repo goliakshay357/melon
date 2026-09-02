@@ -1,0 +1,321 @@
+name: Melon — Build & Release
+
+# Tag a release (e.g. `git tag v0.3.3 && git push origin v0.3.3`) and this
+# workflow:
+#   1. Builds Melon for every platform/arch in parallel
+#   2. Stages all assets into a DRAFT GitHub Release
+#   3. Publishes the draft when every job succeeds
+#   4. Cleans up the draft on any failure (no half-published releases)
+#
+# Manual trigger: Actions → "Melon — Build & Release" → Run workflow, pass
+# a `tag` (e.g. v0.3.3) to build & release an existing tag without re-tagging.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to build from (e.g., main, diagrams). Leave empty for the workflow default branch.'
+        required: false
+        type: string
+        default: ''
+      version:
+        description: 'Release version (e.g., 0.3.3). The tag "v<version>" is created if it does not exist.'
+        required: true
+        type: string
+        default: '0.0.0'
+      create_tag:
+        description: 'Create & push the v<version> tag from the chosen branch before building.'
+        required: false
+        type: choice
+        default: 'true'
+        options:
+          - 'true'
+          - 'false'
+
+permissions: {}
+
+concurrency:
+  group: melon-release-${{ github.event.inputs.version || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Resolve build ref & tag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      ref: ${{ steps.resolve.outputs.ref }}
+      tag: ${{ steps.resolve.outputs.tag }}
+    steps:
+      - name: Resolve ref (branch or tag) and ensure tag exists
+        id: resolve
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          BRANCH="${{ github.event.inputs.branch }}"
+          VERSION="${{ github.event.inputs.version }}"
+          CREATE_TAG="${{ github.event.inputs.create_tag }}"
+          if [ -z "${VERSION}" ] || [ "${VERSION}" = "0.0.0" ]; then
+            echo "::error::version is required (e.g., 0.3.3)"
+            exit 1
+          fi
+          TAG="v${VERSION}"
+          if [ -z "${BRANCH}" ]; then
+            # Default: current default branch (where workflow_dispatch was launched).
+            BRANCH="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)"
+          fi
+          echo "Using branch=${BRANCH} tag=${TAG}"
+          # Create the tag from the branch tip if requested and tag does not exist.
+          if [ "${CREATE_TAG}" = "true" ]; then
+            if gh release view "${TAG}" >/dev/null 2>&1; then
+              echo "Release ${TAG} already exists — refusing to overwrite."
+              exit 1
+            fi
+            if git ls-remote --tags origin "${TAG}" | grep -q "${TAG}"; then
+              echo "Tag ${TAG} already exists on origin — using it."
+            else
+              # Use the API to create the tag pointing at the branch HEAD.
+              SHA="$(gh api -H "Accept: application/vnd.github+json" "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" --jq .object.sha)"
+              echo "Branch ${BRANCH} HEAD = ${SHA}"
+              # Annotated tag
+              gh api -X POST \
+                -H "Accept: application/vnd.github+json" \
+                "/repos/${GITHUB_REPOSITORY}/git/refs" \
+                -f ref="refs/tags/${TAG}" \
+                -f sha="${SHA}" >/dev/null
+              echo "Created tag ${TAG} → ${SHA}"
+            fi
+          else
+            # No tag creation — just verify it exists.
+            if ! git ls-remote --tags origin "${TAG}" | grep -q "${TAG}"; then
+              echo "::error::Tag ${TAG} not found on origin and create_tag=false."
+              exit 1
+            fi
+          fi
+          echo "ref=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.os }}-${{ matrix.arch }})
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+            out: 'Melon-arm64.dmg'
+          - os: macos-latest
+            arch: x64
+            out: 'Melon-x64.dmg'
+          - os: ubuntu-latest
+            arch: x64
+            out: 'Melon.AppImage'
+          - os: windows-latest
+            arch: x64
+            out: 'Melon-x64.exe'
+          - os: windows-latest
+            arch: arm64
+            out: 'Melon-arm64.exe'
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Build web UI
+        run: npm --workspace packages/melon-web run build
+
+      - name: Build server
+        run: npm --workspace packages/melon-server run build
+
+      - name: Sync into desktop shell
+        run: |
+          rm -rf desktop/server desktop/web-dist
+          cp -R packages/melon-server/dist desktop/server
+          cp -R packages/melon-web/dist desktop/web-dist
+
+      - name: Build Melon (electron-builder, ${{ matrix.arch }})
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'  # no code-signing in CI
+        run: |
+          cd desktop
+          npx electron-builder \
+            --${{ matrix.os == 'macos-latest' && 'mac' || matrix.os == 'windows-latest' && 'win' || 'linux' }} \
+            --${{ matrix.arch }} \
+            --publish never
+
+      - name: Locate built artifact
+        id: locate
+        run: |
+          set -euo pipefail
+          # electron-builder writes to desktop/dist/<file>
+          find desktop/dist -maxdepth 2 -type f \( \
+            -name "*.dmg" -o -name "*.AppImage" -o -name "*.exe" \
+          \) -printf "%p %s\n" | tee /tmp/builds.txt
+          # Pick the file that matches the expected arch suffix
+          case "${{ matrix.os }}" in
+            macos-latest)  PREFIX="${{ matrix.arch == 'arm64' && 'arm64' || 'x64' }}" ;;
+            windows-latest) PREFIX="${{ matrix.arch }}" ;;
+            ubuntu-latest)  PREFIX="" ;;
+          esac
+          if [ -n "$PREFIX" ]; then
+            ARTIFACT="$(grep -E "/Melon[-_]?${PREFIX}" /tmp/builds.txt | head -1 | awk '{print $1}')"
+          else
+            ARTIFACT="$(grep -E '\.AppImage$' /tmp/builds.txt | head -1 | awk '{print $1}')"
+          fi
+          if [ -z "$ARTIFACT" ]; then
+            echo "::error::no artifact for arch=${{ matrix.arch }} on ${{ matrix.os }}"
+            cat /tmp/builds.txt
+            exit 1
+          fi
+          echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: melon-${{ matrix.os }}-${{ matrix.arch }}
+          path: ${{ steps.locate.outputs.artifact }}
+          if-no-files-found: error
+          retention-days: 14
+
+  stage-release:
+    name: Stage GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Download all platform artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: release-assets
+
+      - name: Stage assets + SHA256SUMS
+        run: |
+          set -euo pipefail
+          cd release-assets
+          # Flatten so the release gets one file per platform/arch.
+          find . -type f \
+            \( -name "*.dmg" -o -name "*.AppImage" -o -name "*.exe" \) \
+            -exec cp {} . \;
+          find . -mindepth 1 -type d -empty -delete
+          ls -la
+          # SHA256SUMS
+          shopt -s nullglob
+          sha256sum Melon-*.dmg Melon-*.AppImage Melon-*.exe 2>/dev/null > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd release-assets
+          # If a release with this tag already exists (re-run), delete the draft
+          # so we never publish duplicate/partial assets.
+          existing="$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [ "${existing}" = "true" ]; then
+            gh release delete "${RELEASE_TAG}" --yes
+          fi
+          if [ "${existing}" = "false" ]; then
+            echo "::error::Release ${RELEASE_TAG} is already published. Bump the tag."
+            exit 1
+          fi
+          ASSETS=( $(ls Melon-*.dmg Melon-*.AppImage Melon-*.exe SHA256SUMS 2>/dev/null) )
+          if [ ${#ASSETS[@]} -eq 0 ]; then
+            echo "::error::no release assets found"
+            exit 1
+          fi
+          gh release create "${RELEASE_TAG}" \
+            --verify-tag \
+            --draft \
+            --title "Melon ${RELEASE_TAG}" \
+            --notes "Automated multi-platform build.
+
+          | Platform | Architecture | Asset |
+          |----------|--------------|-------|
+          | macOS    | arm64 (Apple Silicon) | Melon-arm64.dmg |
+          | macOS    | x64   (Intel)         | Melon-x64.dmg |
+          | Linux    | x64                    | Melon.AppImage |
+          | Windows  | x64                    | Melon-x64.exe |
+          | Windows  | arm64                  | Melon-arm64.exe |
+
+          Verify: \`shasum -a 256 -c SHA256SUMS\` after download." \
+            "${ASSETS[@]}"
+
+          # Sanity check: every local file appears in the release.
+          expected="$(printf '%s\n' "${ASSETS[@]}" | sort)"
+          actual="$(gh release view "${RELEASE_TAG}" --json assets --jq '.assets[].name' | sort)"
+          if [ "${expected}" != "${actual}" ]; then
+            echo "::error::asset set mismatch"
+            diff -u <(printf '%s\n' "${expected}") <(printf '%s\n' "${actual}") || true
+            exit 1
+          fi
+          echo "Release ${RELEASE_TAG} staged as draft (assets: ${#ASSETS[@]})"
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: stage-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Publish draft → public
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          existing="$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [ -z "${existing}" ]; then
+            echo "::error::Release ${RELEASE_TAG} not found."
+            exit 1
+          fi
+          if [ "${existing}" = "false" ]; then
+            echo "Release ${RELEASE_TAG} is already public."
+            exit 0
+          fi
+          gh release edit "${RELEASE_TAG}" --draft=false
+          echo "Released ${RELEASE_TAG}"
+
+  cleanup-on-failure:
+    name: Cleanup draft on failure
+    needs: [build, stage-release, publish-release]
+    if: ${{ always() && (needs.build.result == 'failure' || needs.stage-release.result == 'failure' || needs.publish-release.result == 'failure' || needs.publish-release.result == 'cancelled') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+    steps:
+      - name: Delete draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          existing="$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft 2>/dev/null || true)"
+          if [ "${existing}" = "true" ]; then
+            gh release delete "${RELEASE_TAG}" --yes
+            echo "Deleted failed draft release ${RELEASE_TAG}"
+          fi
