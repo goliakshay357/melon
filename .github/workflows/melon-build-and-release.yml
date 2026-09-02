@@ -157,6 +157,15 @@ jobs:
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
+      - name: Install system deps (Linux — node-canvas needs cairo)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev
+
+      - name: Build pi workspace deps (ai, agent, coding-agent, …)
+        run: npm run build
+
       - name: Build web UI
         run: npm --workspace packages/melon-web run build
 
