@@ -16,6 +16,7 @@ import { DocumentCardNode, type DocumentCardNodeType } from './document-card-nod
 import { ForkEdge } from './fork-edge';
 import { Toolbar } from './toolbar';
 import { Sidebar } from './sidebar';
+import { VizFullscreenLayer } from '@/components/viz-fullscreen-layer';
 // import { TopBar } from './topbar';  // DISABLED — re-enable later
 import { useCanvasStore } from '@/store/canvas-store';
 import { useActiveTheme } from '@/theme/theme-store';
@@ -290,6 +291,10 @@ export function Canvas() {
 
             {/* Navbar — ALWAYS visible; its body swaps between canvas/settings */}
             <Sidebar />
+
+            {/* Fullscreen viz layer — one global portal (z-1000). Renders the
+                promoted iframe node from any card; auto-closes off-canvas. */}
+            <VizFullscreenLayer />
 
             {/* Settings PAGE (never a dialog) — fills the content area right of the navbar */}
             {activeView !== 'canvas' && (
