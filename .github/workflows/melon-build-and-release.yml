@@ -178,6 +178,10 @@ jobs:
           cp -R packages/melon-server/dist desktop/server
           cp -R packages/melon-web/dist desktop/web-dist
 
+      - name: Install desktop deps (electron + electron-builder at pinned versions)
+        run: npm ci
+        working-directory: desktop
+
       - name: Build Melon (electron-builder, ${{ matrix.arch }})
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'  # no code-signing in CI
