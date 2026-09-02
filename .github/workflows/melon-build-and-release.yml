@@ -11,9 +11,6 @@ name: Melon — Build & Release
 # a `tag` (e.g. v0.3.3) to build & release an existing tag without re-tagging.
 
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_dispatch:
     inputs:
       branch:
