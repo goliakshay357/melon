@@ -1,0 +1,23 @@
+{
+    "name": "@earendil-works/melon-server",
+    "version": "0.3.1",
+    "private": true,
+    "type": "module",
+    "description": "Melon canvas bridge: HTTP/SSE front-end over live pi sessions",
+    "main": "./dist/index.js",
+    "types": "./dist/index.d.ts",
+    "scripts": {
+        "clean": "shx rm -rf dist",
+        "build": "tsgo -p tsconfig.build.json && node -e \"require('fs').cpSync('assets/skills','dist/skills',{recursive:true})\"",
+        "dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+        "start": "MELON_CODING_AGENT_DIR=$HOME/.melon/agent node dist/index.js",
+        "test": "vitest --run",
+        "typecheck": "tsgo -p tsconfig.test.json"
+    },
+    "dependencies": {
+        "@earendil-works/pi-coding-agent": "*",
+        "@fastify/cors": "^10.0.2",
+        "@fastify/static": "10.1.3",
+        "fastify": "^5.2.1"
+    }
+}
