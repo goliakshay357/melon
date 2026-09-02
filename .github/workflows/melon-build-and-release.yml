@@ -194,6 +194,22 @@ jobs:
             --${{ matrix.arch }} \
             --publish never
 
+      - name: Verify binary arch matches the job (never ship a wrong-arch build)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          # electron-builder names the arm64 bundle dir mac-arm64 and the x64
+          # one plain mac. Verify with lipo — a Rosetta-wrong build shipped as
+          # Melon-arm64.dmg once and made the whole app laggy (GPU under
+          # Rosetta). Fail loudly instead.
+          if [ "${{ matrix.arch }}" = "arm64" ]; then DIR=desktop/dist/mac-arm64; WANT=arm64; else DIR=desktop/dist/mac; WANT=x86_64; fi
+          GOT="$(lipo -archs "$DIR/Melon.app/Contents/MacOS/Melon")"
+          echo "$DIR → $GOT (want $WANT)"
+          if [ "$GOT" != "$WANT" ]; then
+            echo "::error::arch mismatch: binary is $GOT, job builds $WANT"
+            exit 1
+          fi
+
       - name: Ad-hoc sign macOS app (unsigned bundles → Gatekeeper checks per launch = lag)
         if: runner.os == 'macOS'
         shell: bash
@@ -209,14 +225,19 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # Each matrix job runs on its own runner: desktop/dist holds exactly
-          # ONE artifact — no arch matching needed. Just pick by extension.
-          case "${{ matrix.os }}" in
-            macos-latest)   EXT="dmg" ;;
-            windows-latest) EXT="exe" ;;
-            ubuntu-latest)  EXT="AppImage" ;;
+          # Arch-aware pick: electron-builder names arm64 mac dmgs with an
+          # -arm64 suffix and x64 ones WITHOUT any suffix. Blind head -1 once
+          # grabbed the x64 dmg and renamed it Melon-arm64.dmg.
+          case "${{ matrix.os }}-${{ matrix.arch }}" in
+            macos-latest-arm64)
+              ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*-arm64.dmg" | head -1)" ;;
+            macos-latest-x64)
+              ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*.dmg" ! -name "*-arm64.dmg" | head -1)" ;;
+            windows-latest-*)
+              ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*.exe" | head -1)" ;;
+            ubuntu-latest-*)
+              ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*.AppImage" | head -1)" ;;
           esac
-          ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*.${EXT}" | head -1)"
           if [ -z "$ARTIFACT" ]; then
             echo "::error::no .${EXT} produced for arch=${{ matrix.arch }} on ${{ matrix.os }}"
             find desktop/dist -maxdepth 2 -type f || true
