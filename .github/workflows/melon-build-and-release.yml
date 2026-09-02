@@ -55,6 +55,7 @@ jobs:
         id: resolve
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           BRANCH="${{ github.event.inputs.branch }}"
@@ -66,37 +67,46 @@ jobs:
           fi
           TAG="v${VERSION}"
           if [ -z "${BRANCH}" ]; then
-            # Default: current default branch (where workflow_dispatch was launched).
             BRANCH="$(gh repo view --json defaultBranchRef --jq .defaultBranchRef.name)"
           fi
           echo "Using branch=${BRANCH} tag=${TAG}"
-          # Create the tag from the branch tip if requested and tag does not exist.
+          
+          # Check if release already exists
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Release ${TAG} already exists — refusing to overwrite."
+            exit 1
+          fi
+          
+          # Use curl directly to avoid gh CLI internal git dependencies
+          API="https://api.github.com/repos/${GH_REPO}"
+          AUTH="Authorization: Bearer ${GH_TOKEN}"
+          ACCEPT="Accept: application/vnd.github+json"
+          
           if [ "${CREATE_TAG}" = "true" ]; then
-            if gh release view "${TAG}" >/dev/null 2>&1; then
-              echo "Release ${TAG} already exists — refusing to overwrite."
-              exit 1
-            fi
-            if gh api --silent -H "Accept: application/vnd.github+json" "/repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            # Check if tag exists via GitHub API
+            TAG_RESP=$(curl -s -w "%{http_code}" -H "${AUTH}" -H "${ACCEPT}" "${API}/git/ref/tags/${TAG}" -o /tmp/tag.json)
+            if [ "${TAG_RESP}" = "200" ]; then
               echo "Tag ${TAG} already exists on origin — using it."
             else
-              # Use the API to create the tag pointing at the branch HEAD.
-              SHA="$(gh api -H "Accept: application/vnd.github+json" "/repos/${GITHUB_REPOSITORY}/git/ref/heads/${BRANCH}" --jq .object.sha)"
+              # Get branch HEAD SHA
+              SHA=$(curl -s -H "${AUTH}" -H "${ACCEPT}" "${API}/git/ref/heads/${BRANCH}" | jq -r .object.sha)
               echo "Branch ${BRANCH} HEAD = ${SHA}"
-              # Annotated tag
-              gh api -X POST \
-                -H "Accept: application/vnd.github+json" \
-                "/repos/${GITHUB_REPOSITORY}/git/refs" \
-                -f ref="refs/tags/${TAG}" \
-                -f sha="${SHA}" >/dev/null
+              
+              # Create tag (lightweight tag via refs endpoint)
+              curl -s -X POST -H "${AUTH}" -H "${ACCEPT}" \
+                "${API}/git/refs" \
+                -d "{\"ref\":\"refs/tags/${TAG}\",\"sha\":\"${SHA}\"}" >/dev/null
               echo "Created tag ${TAG} → ${SHA}"
             fi
           else
-            # No tag creation — just verify it exists.
-            if ! gh api --silent -H "Accept: application/vnd.github+json" "/repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
+            # Verify tag exists
+            TAG_RESP=$(curl -s -w "%{http_code}" -H "${AUTH}" -H "${ACCEPT}" "${API}/git/ref/tags/${TAG}" -o /dev/null)
+            if [ "${TAG_RESP}" != "200" ]; then
               echo "::error::Tag ${TAG} not found on origin and create_tag=false."
               exit 1
             fi
           fi
+          
           echo "ref=${TAG}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
