@@ -194,6 +194,16 @@ jobs:
             --${{ matrix.arch }} \
             --publish never
 
+      - name: Ad-hoc sign macOS app (unsigned bundles → Gatekeeper checks per launch = lag)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          for app in desktop/dist/mac*/Melon.app; do
+            [ -d "$app" ] || continue
+            codesign --force --deep --sign - "$app"
+            codesign --verify "$app" && echo "✓ ad-hoc signed: $app"
+          done
+
       - name: Locate built artifact
         id: locate
         shell: bash
