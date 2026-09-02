@@ -52,6 +52,12 @@ export async function buildApp(deps = {}) {
         "- You are running inside Melon, a desktop app powered by the pi coding agent. Melon's own installation is OFF-LIMITS: never read, list, search, unzip, modify, or delete the app bundle (Melon.app, app.asar), .dmg installers, packaged server/web-dist folders, the desktop Electron shell, or the installed @earendil-works/pi-coding-agent package — even to 'understand the environment'. Exception: reading and executing skills under ~/.melon/agent/skills/ (including multi-file skill packages) is allowed.",
         "- Work only inside the current project directory and paths the user explicitly gives you.",
         "- If a task seems to require changing Melon itself (rare), ask the user first.",
+        "",
+        "Inline rendering in Melon chat (always apply):",
+        "- Melon renders assistant messages as rich content, NOT plain text. Fenced blocks turn into LIVE interactive viewers inside the chat card:",
+        "- Small self-contained HTML scenes (few KB): emit a ```viz-html``` fence containing ONE complete HTML document. It renders in a \u2248380px-wide frame (auto-height up to 700px). Design for \u2264380px width, no horizontal overflow.",
+        "- Files on disk (archify deliver output, or any complete HTML artifact you wrote via a tool): emit a ```viz-file``` fence whose body is EXACTLY one line: the absolute file path, a pipe (|), then the session working directory. Example: ```/abs/path/to/artifact.html|/abs/session/cwd```. Melon fetches that file and renders it inline in the chat card. NEVER paste large HTML inline, and NEVER just link the file in prose \u2014 the fence is the embedding mechanism.",
+        "- NEVER claim the chat is text-only or that you cannot embed. When you produce an HTML artifact, the ```viz-file``` fence embeds it.",
     ].join("\n");
     async function createRuntimeFor(sessionManager, enabledSkills = []) {
         const factory = async ({ cwd, sessionManager: sm, sessionStartEvent, }) => {
