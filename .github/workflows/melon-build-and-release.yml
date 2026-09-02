@@ -173,6 +173,7 @@ jobs:
         run: npm --workspace packages/melon-server run build
 
       - name: Sync into desktop shell
+        shell: bash   # windows runner defaults to pwsh — rm/cp are bash
         run: |
           rm -rf desktop/server desktop/web-dist
           cp -R packages/melon-server/dist desktop/server
@@ -185,6 +186,7 @@ jobs:
       - name: Build Melon (electron-builder, ${{ matrix.arch }})
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'  # no code-signing in CI
+        shell: bash   # \ continuations + cd: bash, not pwsh
         run: |
           cd desktop
           npx electron-builder \
@@ -194,28 +196,23 @@ jobs:
 
       - name: Locate built artifact
         id: locate
+        shell: bash
         run: |
           set -euo pipefail
-          # electron-builder writes to desktop/dist/<file>
-          find desktop/dist -maxdepth 2 -type f \( \
-            -name "*.dmg" -o -name "*.AppImage" -o -name "*.exe" \
-          \) -printf "%p %s\n" | tee /tmp/builds.txt
-          # Pick the file that matches the expected arch suffix
+          # Each matrix job runs on its own runner: desktop/dist holds exactly
+          # ONE artifact — no arch matching needed. Just pick by extension.
           case "${{ matrix.os }}" in
-            macos-latest)  PREFIX="${{ matrix.arch == 'arm64' && 'arm64' || 'x64' }}" ;;
-            windows-latest) PREFIX="${{ matrix.arch }}" ;;
-            ubuntu-latest)  PREFIX="" ;;
+            macos-latest)   EXT="dmg" ;;
+            windows-latest) EXT="exe" ;;
+            ubuntu-latest)  EXT="AppImage" ;;
           esac
-          if [ -n "$PREFIX" ]; then
-            ARTIFACT="$(grep -E "/Melon[-_]?${PREFIX}" /tmp/builds.txt | head -1 | awk '{print $1}')"
-          else
-            ARTIFACT="$(grep -E '\.AppImage$' /tmp/builds.txt | head -1 | awk '{print $1}')"
-          fi
+          ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*.${EXT}" | head -1)"
           if [ -z "$ARTIFACT" ]; then
-            echo "::error::no artifact for arch=${{ matrix.arch }} on ${{ matrix.os }}"
-            cat /tmp/builds.txt
+            echo "::error::no .${EXT} produced for arch=${{ matrix.arch }} on ${{ matrix.os }}"
+            find desktop/dist -maxdepth 2 -type f || true
             exit 1
           fi
+          echo "Found: $ARTIFACT"
           echo "artifact=$ARTIFACT" >> "$GITHUB_OUTPUT"
 
       - name: Upload artifact
