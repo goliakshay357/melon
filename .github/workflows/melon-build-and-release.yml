@@ -76,7 +76,7 @@ jobs:
               echo "Release ${TAG} already exists — refusing to overwrite."
               exit 1
             fi
-            if git ls-remote --tags origin "${TAG}" | grep -q "${TAG}"; then
+            if gh api --silent -H "Accept: application/vnd.github+json" "/repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
               echo "Tag ${TAG} already exists on origin — using it."
             else
               # Use the API to create the tag pointing at the branch HEAD.
@@ -92,7 +92,7 @@ jobs:
             fi
           else
             # No tag creation — just verify it exists.
-            if ! git ls-remote --tags origin "${TAG}" | grep -q "${TAG}"; then
+            if ! gh api --silent -H "Accept: application/vnd.github+json" "/repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" >/dev/null 2>&1; then
               echo "::error::Tag ${TAG} not found on origin and create_tag=false."
               exit 1
             fi
