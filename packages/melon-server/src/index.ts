@@ -22,7 +22,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	createAgentSessionFromServices,
@@ -73,7 +73,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
  */
 const MELON_GUARDRAIL = [
 	"Environment boundaries (always apply):",
-	"- You are running inside Melon, a desktop app powered by the pi coding agent. Melon's own installation is OFF-LIMITS: never read, list, search, unzip, modify, or delete the app bundle (Melon.app, app.asar), .dmg installers, packaged server/web-dist folders, the desktop Electron shell, ~/.melon/agent internals, or the installed @earendil-works/pi-coding-agent package — even to 'understand the environment'.",
+	"- You are running inside Melon, a desktop app powered by the pi coding agent. Melon's own installation is OFF-LIMITS: never read, list, search, unzip, modify, or delete the app bundle (Melon.app, app.asar), .dmg installers, packaged server/web-dist folders, the desktop Electron shell, or the installed @earendil-works/pi-coding-agent package — even to 'understand the environment'. Exception: reading and executing skills under ~/.melon/agent/skills/ (including multi-file skill packages) is allowed.",
 	"- Work only inside the current project directory and paths the user explicitly gives you.",
 	"- If a task seems to require changing Melon itself (rare), ask the user first.",
 ].join("\n");
@@ -760,6 +760,37 @@ const MELON_GUARDRAIL = [
 		uptime: Math.round(process.uptime()),
 		model: getDefaultModel(config.defaultModel),
 	}));
+
+	// Serve an agent-authored visualization HTML file for the viz-file iframe.
+	// Guard: absolute path required; must resolve inside the session's cwd
+	// (cards can only show files they could have written themselves).
+	app.get("/viz", async (req, reply) => {
+		const q = req.query as { path?: string; cwd?: string; cardId?: string };
+		const p = q.path ?? "";
+		if (!isAbsolute(p)) return reply.code(400).send({ error: "absolute path required" });
+		// cwd of the requesting card's session, else the requested folder, else default.
+		let cwd = "";
+		const card = registry.get(q.cardId ?? "");
+		if (card?.runtime?.cwd) cwd = String(card.runtime.cwd);
+		else if (q.cwd) {
+			try {
+				cwd = assertCwd(q.cwd);
+			} catch {
+				return reply.code(400).send({ error: "unknown cwd" });
+			}
+		} else cwd = expandHome(config.defaultCwd);
+		const resolved = resolve(p);
+		const rel = relative(resolve(cwd), resolved);
+		if (rel.startsWith("..") || isAbsolute(rel)) {
+			return reply.code(403).send({ error: "path outside the session working directory" });
+		}
+		try {
+			const html = readFileSync(resolved, "utf8");
+			return reply.type("text/html; charset=utf-8").send(html);
+		} catch {
+			return reply.code(404).send({ error: "not found" });
+		}
+	});
 
 	// Available skills for the per-card toggle.
 	app.get("/skills", async () => {
