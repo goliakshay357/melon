@@ -33,7 +33,6 @@ const localStorageStub = {
 };
 
 const fetchCalls: string[] = [];
-// biome-ignore lint/suspicious/noExplicitAny: test stub
 async function fetchStub(url: string, init?: any) {
 	fetchCalls.push(`${init?.method ?? "GET"} ${url}`);
 	return {
@@ -44,7 +43,9 @@ async function fetchStub(url: string, init?: any) {
 				? { sessionFile: "/tmp/fake-session.jsonl", sessionId: "s1", model: "test/model" }
 				: url.includes("/prompt")
 					? { ok: true }
-					: {},
+					: url.startsWith("/canvases?")
+						? { canvases: [] }
+						: {},
 	} as Response;
 }
 
@@ -61,6 +62,7 @@ beforeEach(async () => {
 	fetchCalls.length = 0;
 	vi.resetModules();
 	({ useCanvasStore } = await import("@/store/canvas-store"));
+	useCanvasStore.setState({ folder: "/tmp", hydrated: true });
 });
 
 it("segregates agent outputs into separate messages per turn", async () => {
@@ -128,4 +130,84 @@ it("starts a fresh segment for a follow-up run on the same card", async () => {
 	const texts = card.messages.map((m) => `${m.role}:${m.text}`);
 	// The second run's answer must not merge into the first run's block.
 	expect(texts).toEqual(["user:first", "assistant:run-one answer", "user:second", "assistant:run-two answer"]);
+});
+
+it("creates the first canvas and card from the empty-state prompt", async () => {
+	const sent = await useCanvasStore.getState().startConversation(
+		"map this repository",
+		{ x: 120, y: 80 },
+		{
+			model: "test/model",
+			skills: ["archify"],
+			permission: "readonly",
+		},
+	);
+
+	expect(sent).toBe(true);
+	expect(useCanvasStore.getState().canvasName).toBe("Canvas 1");
+	expect(useCanvasStore.getState().cards).toHaveLength(1);
+	expect(useCanvasStore.getState().cards[0]).toMatchObject({
+		position: { x: 120, y: 80 },
+		model: "test/model",
+		skills: ["archify"],
+		permission: "readonly",
+		size: { width: 480, height: 520 },
+	});
+	expect(useCanvasStore.getState().cards[0].messages[0]).toEqual({
+		role: "user",
+		text: "map this repository",
+	});
+});
+
+it("places a forked card to the right of its parent, not on top", async () => {
+	const parentId = useCanvasStore.getState().addCard({ x: 100, y: 200 });
+	useCanvasStore.getState().updateCard(parentId, {
+		size: { width: 480, height: 520 },
+		title: "Parent",
+	});
+
+	const childId = await useCanvasStore.getState().forkCard(parentId);
+	const child = useCanvasStore.getState().cards.find((c) => c.id === childId);
+
+	expect(child).toBeDefined();
+	expect(child?.parentId).toBe(parentId);
+	expect(child?.position.x).toBe(100 + 480 + 48);
+	expect(child?.position.y).toBe(200);
+	expect(child?.size).toEqual({ width: 480, height: 520 });
+});
+
+it("keeps an empty canvas after choosing a folder that already has canvases", async () => {
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (url: string) => {
+			fetchCalls.push(`GET ${url}`);
+			return {
+				ok: true,
+				status: 200,
+				json: async () =>
+					url.startsWith("/canvases?")
+						? { canvases: [{ id: "cv_existing", name: "Old board" }] }
+						: {},
+			} as Response;
+		}),
+	);
+
+	await useCanvasStore.getState().openFolder("/Users/me/project");
+
+	expect(useCanvasStore.getState().folder).toBe("/Users/me/project");
+	expect(useCanvasStore.getState().canvases).toEqual([{ id: "cv_existing", name: "Old board" }]);
+	expect(useCanvasStore.getState().canvasId).toBeNull();
+	expect(useCanvasStore.getState().cards).toHaveLength(0);
+});
+
+it("never starts a new session without an explicit folder", async () => {
+	useCanvasStore.setState({ folder: null, canvasId: null, cards: [] });
+
+	const sent = await useCanvasStore
+		.getState()
+		.startConversation("do not run this", { x: 0, y: 0 }, { model: "test/model", skills: [], permission: "full" });
+
+	expect(sent).toBe(false);
+	expect(useCanvasStore.getState().cards).toHaveLength(0);
+	expect(fetchCalls.some((call) => call.endsWith("/sessions"))).toBe(false);
 });

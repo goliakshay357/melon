@@ -15,6 +15,7 @@ import {
 import { useCanvasStore } from '@/store/canvas-store';
 import { askText, confirmAction } from '@/components/dialogs';
 import { cn } from '@/lib/utils';
+import { pickFolder } from '@/lib/pick-folder';
 import { Sparkles, Palette } from 'lucide-react';
 
 
@@ -86,28 +87,10 @@ export function Sidebar() {
     const addFolder = async () => {
         setPickingNative(true);
         try {
-            const bridge = (
-                window as unknown as {
-                    melonDesktop?: { pickFolder: () => Promise<string | null> };
-                }
-            ).melonDesktop;
-            if (bridge?.pickFolder) {
-                const picked = await bridge.pickFolder();
-                if (picked) {
-                    await openFolder(picked);
-                    if (!useCanvasStore.getState().canvasId) await createCanvas('Canvas 1');
-                    loadTree();
-                }
-                return;
-            }
-            const res = await fetch(`/pick-folder`, { method: 'POST' });
-            if (res.ok) {
-                const { path } = await res.json();
-                if (path) {
-                    await openFolder(path);
-                    if (!useCanvasStore.getState().canvasId) await createCanvas('Canvas 1');
-                    loadTree();
-                }
+            const picked = await pickFolder();
+            if (picked) {
+                await openFolder(picked);
+                loadTree();
             }
         } finally {
             setPickingNative(false);

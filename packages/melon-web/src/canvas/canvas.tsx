@@ -14,6 +14,7 @@ import {
 import { ChatCardNode, type ChatCardNodeType } from './chat-card-node';
 import { DocumentCardNode, type DocumentCardNodeType } from './document-card-node';
 import { ForkEdge } from './fork-edge';
+import { EmptyCanvasHero } from './empty-canvas-hero';
 import { Toolbar } from './toolbar';
 import { Sidebar } from './sidebar';
 import { VizFullscreenLayer } from '@/components/viz-fullscreen-layer';
@@ -21,6 +22,7 @@ import { VizFullscreenLayer } from '@/components/viz-fullscreen-layer';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useActiveTheme } from '@/theme/theme-store';
 import { SettingsPage } from '@/settings/settings-page';
+import { DEFAULT_CARD_SIZE } from '@/types/session-card';
 
 type AppNode = ChatCardNodeType | DocumentCardNodeType;
 
@@ -34,6 +36,8 @@ export function Canvas() {
     const canvasId = useCanvasStore((s) => s.canvasId);
     const saveCanvas = useCanvasStore((s) => s.saveCanvas);
     const storedViewport = useCanvasStore((s) => s.viewport);
+    const hydrated = useCanvasStore((s) => s.hydrated);
+    const serverOffline = useCanvasStore((s) => s.serverOffline);
 
     const [nodes, setNodes] = useState<AppNode[]>([]);
     const theme = useActiveTheme();
@@ -115,8 +119,8 @@ export function Canvas() {
             const next = cards.map(
                 (c): AppNode => {
                     const old = prevById.get(c.id);
-                    const width = c.size?.width ?? 380;
-                    const height = c.size?.height ?? 360;
+                    const width = c.size?.width ?? DEFAULT_CARD_SIZE.width;
+                    const height = c.size?.height ?? DEFAULT_CARD_SIZE.height;
                     if (
                         old &&
                         old.position.x === c.position.x &&
@@ -165,9 +169,9 @@ export function Canvas() {
                             targetT: c.edgeToParent?.targetT,
                             // Pass positions so React Flow re-renders the edge on ANY card move.
                             srcBox: parent
-                                ? { x: parent.position.x, y: parent.position.y, w: parent.size?.width ?? 380, h: parent.size?.height ?? 260 }
+                                ? { x: parent.position.x, y: parent.position.y, w: parent.size?.width ?? DEFAULT_CARD_SIZE.width, h: parent.size?.height ?? DEFAULT_CARD_SIZE.height }
                                 : null,
-                            tgtBox: { x: c.position.x, y: c.position.y, w: c.size?.width ?? 380, h: c.size?.height ?? 260 },
+                            tgtBox: { x: c.position.x, y: c.position.y, w: c.size?.width ?? DEFAULT_CARD_SIZE.width, h: c.size?.height ?? DEFAULT_CARD_SIZE.height },
                         },
                     };
                 }),
@@ -209,7 +213,17 @@ export function Canvas() {
         setMenu(null);
     }, [menu, addCard, screenToFlowPosition]);
 
-    // Hero input when the canvas is empty — the "what do you want to understand?" moment.
+    const bounds = wrapperRef.current?.getBoundingClientRect();
+    const sidebarWidth = sidebarCollapsed ? 48 : 260;
+    const heroCenter = screenToFlowPosition({
+        x: sidebarWidth + ((bounds?.width ?? window.innerWidth) - sidebarWidth) / 2,
+        y: (bounds?.height ?? window.innerHeight) / 2,
+    });
+    const heroCardPosition = {
+        x: heroCenter.x - DEFAULT_CARD_SIZE.width / 2,
+        y: heroCenter.y - DEFAULT_CARD_SIZE.height / 2,
+    };
+
     return (
         <div className="relative h-full w-full" ref={wrapperRef}>
             {/* Canvas layer — stays mounted so streams/iframes survive page swaps;
@@ -249,6 +263,14 @@ export function Canvas() {
             >
                 <Background variant={BackgroundVariant.Dots} gap={16} size={1} color={theme.tokens.canvasDot} />
             </ReactFlow>
+
+            {cards.length === 0 && (
+                <EmptyCanvasHero
+                    position={heroCardPosition}
+                    hydrated={hydrated}
+                    serverOffline={serverOffline}
+                />
+            )}
 
             {/* <TopBar /> DISABLED — re-enable later */}
             <Toolbar />

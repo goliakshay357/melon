@@ -1,6 +1,19 @@
 import { nanoid } from "nanoid";
 import { create } from "zustand";
-import { type ChatMessage, newCardId, type SessionCard, type ToolRun } from "@/types/session-card";
+import {
+	type ChatMessage,
+	DEFAULT_CARD_SIZE,
+	newCardId,
+	type SessionCard,
+	type ToolRun,
+} from "@/types/session-card";
+
+function cardWidth(c: SessionCard): number {
+	return c.size?.width ?? DEFAULT_CARD_SIZE.width;
+}
+function cardHeight(c: SessionCard): number {
+	return c.size?.height ?? DEFAULT_CARD_SIZE.height;
+}
 
 // cardId → live SSE stream state
 const streams = new Map<
@@ -33,7 +46,12 @@ function pushUndo(cards: SessionCard[]) {
 
 let eventIdCounter = 0;
 
-interface Box { left: number; right: number; top: number; bottom: number; }
+interface Box {
+	left: number;
+	right: number;
+	top: number;
+	bottom: number;
+}
 function boxesOverlap(a: Box, b: Box): boolean {
 	return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
 }
@@ -41,25 +59,26 @@ function boxesOverlap(a: Box, b: Box): boolean {
 function findOpenSpot(cards: SessionCard[], sourceId: string, w: number, h: number): { x: number; y: number } {
 	const src = cards.find((c) => c.id === sourceId);
 	if (!src) return { x: 0, y: 0 };
-	const gap = 36;
+	const gap = 48;
 	const occupied: Box[] = cards
 		.filter((c) => c.id !== sourceId)
 		.map((c) => ({
 			left: c.position.x,
-			right: c.position.x + (c.size?.width ?? 380),
+			right: c.position.x + cardWidth(c),
 			top: c.position.y,
-			bottom: c.position.y + (c.size?.height ?? 260),
+			bottom: c.position.y + cardHeight(c),
 		}));
 	// Column to the right first (mind-map flow), row by row — cards flow right,
 	// then wrap down, so arrows read bottom→top naturally.
 	const spots: Array<{ x: number; y: number }> = [];
-	for (let i = 0; i < 6; i++) spots.push({ x: src.position.x + (src.size?.width ?? 380) + gap, y: src.position.y + i * (h + gap) });
+	for (let i = 0; i < 6; i++)
+		spots.push({ x: src.position.x + cardWidth(src) + gap, y: src.position.y + i * (h + gap) });
 	for (let i = 1; i <= 4; i++) spots.push({ x: src.position.x, y: src.position.y + i * (h + gap) });
 	for (const s of spots) {
 		const box: Box = { left: s.x, right: s.x + w, top: s.y, bottom: s.y + h };
 		if (!occupied.some((o) => boxesOverlap(box, o))) return s;
 	}
-	return { x: src.position.x + (src.size?.width ?? 380) + gap, y: src.position.y };
+	return { x: src.position.x + cardWidth(src) + gap, y: src.position.y };
 }
 
 /** Structured trajectory event — feeds the waterfall view. */
@@ -158,10 +177,20 @@ interface CanvasState {
 	openFolder: (folder: string) => Promise<void>;
 	switchCanvas: (id: string) => Promise<void>;
 	createCanvas: (name: string) => Promise<void>;
+	startConversation: (
+		text: string,
+		position: { x: number; y: number },
+		options: { model: string; skills: string[]; permission: "full" | "readonly" },
+	) => Promise<boolean>;
 	saveCanvas: () => Promise<void>;
 	scrollAction: ScrollAction;
 	setScrollAction: (a: ScrollAction) => void;
-	addCard: (position: { x: number; y: number }, parentId?: string | null, forcedId?: string, kind?: "chat" | "document") => string;
+	addCard: (
+		position: { x: number; y: number },
+		parentId?: string | null,
+		forcedId?: string,
+		kind?: "chat" | "document",
+	) => string;
 	forkCard: (parentId: string) => Promise<string>;
 	moveCard: (id: string, position: { x: number; y: number }) => void;
 	updateCard: (id: string, patch: Partial<SessionCard>) => void;
@@ -191,6 +220,7 @@ function loadLastLocation(): { folder: string | null; canvasId: string | null } 
 
 let healthTimer: ReturnType<typeof setInterval> | null = null;
 let restoring = false;
+let startingConversation = false;
 
 const loc = loadLastLocation();
 
@@ -362,16 +392,51 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		if (res?.ok) set({ canvases: (await res.json()).canvases ?? [] });
 	},
 
+	async startConversation(text, position, options) {
+		const prompt = text.trim();
+		const folder = get().folder;
+		if (startingConversation || !prompt || !folder || !options.model || get().cards.length > 0) return false;
+		startingConversation = true;
+		try {
+			if (!get().canvasId) {
+				const names = new Set(get().canvases.map((canvas) => canvas.name));
+				let number = 1;
+				while (names.has(`Canvas ${number}`)) number++;
+				await get().createCanvas(`Canvas ${number}`);
+			}
+			if (!get().canvasId) return false;
+
+			const cardId = get().addCard(position);
+			get().updateCard(cardId, {
+				skills: options.skills,
+				permission: options.permission,
+			});
+			get().setModel(cardId, options.model);
+			const sent = await get().sendMessage(cardId, prompt, { cwd: folder });
+			if (!sent) get().updateCard(cardId, { pendingDraft: prompt });
+			return sent;
+		} finally {
+			startingConversation = false;
+		}
+	},
+
 	async openFolder(rawFolder) {
-		set({ folder: rawFolder, canvases: [], cards: [], canvasId: null });
+		// Keep the empty-state composer up: set the folder, load the canvas
+		// list for the sidebar, but do not auto-open an existing canvas.
+		// First send (or an explicit sidebar click) creates/opens a canvas.
+		set({
+			folder: rawFolder,
+			canvases: [],
+			cards: [],
+			canvasId: null,
+			canvasName: "",
+		});
 		localStorage.setItem("melon:lastFolder", rawFolder);
+		localStorage.removeItem("melon:lastCanvas");
 		const res = await fetch(`/canvases?cwd=${encodeURIComponent(rawFolder)}`).catch(() => null);
 		let canvases: CanvasMeta[] = [];
 		if (res?.ok) canvases = (await res.json()).canvases ?? [];
-		set({ canvases });
-		if (canvases.length > 0) {
-			await get().switchCanvas(canvases[0].id);
-		}
+		set({ canvases, hydrated: true, serverOffline: false });
 	},
 	scrollAction: (localStorage.getItem("melon:scroll_action") as ScrollAction) || "pan",
 
@@ -391,6 +456,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			kind,
 			status: "idle",
 			messages: [],
+			size: { width: DEFAULT_CARD_SIZE.width, height: DEFAULT_CARD_SIZE.height },
 			debug: false,
 			skills: [],
 			documentContent: "",
@@ -403,6 +469,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		pushUndo(get().cards);
 		const parent = get().cards.find((c) => c.id === parentId);
 		const childCardId = newCardId();
+		const childSize = parent?.size
+			? { width: parent.size.width, height: parent.size.height }
+			: { width: DEFAULT_CARD_SIZE.width, height: DEFAULT_CARD_SIZE.height };
+		const position = parent
+			? findOpenSpot(get().cards, parentId, childSize.width, childSize.height)
+			: { x: 0, y: 0 };
 		let sessionInfo: {
 			sessionFile?: string;
 			model?: string;
@@ -430,20 +502,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			);
 		}
 
-		get().addCard(
-			{
-				x: (parent?.position.x ?? 0) + 140,
-				y: (parent?.position.y ?? 0) + 180,
-			},
-			parentId,
-			childCardId,
-		);
+		get().addCard(position, parentId, childCardId);
 		get().updateCard(childCardId, {
 			title: parent ? `↳ ${parent.title}`.slice(0, 44) : "New card",
+			size: childSize,
 			sessionFile: sessionInfo?.sessionFile,
 			model: sessionInfo?.model,
 			forkedFromEntryId: sessionInfo?.forkedFromEntryId,
 		});
+		if (sessionInfo?.sessionFile) await get().hydrateMessages(childCardId, sessionInfo.sessionFile);
 		return childCardId;
 	},
 
@@ -468,7 +535,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			})
 				.then(async (r) => {
 					if (!r.ok) {
-						const d = await r.json().catch(() => ({} as any));
+						const d = await r.json().catch(() => ({}) as any);
 						pushLog(id, `✗ skills update failed: ${d.error ?? r.status}`);
 					}
 				})
@@ -480,7 +547,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	// Inherits the source's kind: document → document, chat → chat.
 	addLinkedCard(sourceId) {
 		const src = get().cards.find((c) => c.id === sourceId);
-		const pos = findOpenSpot(get().cards, sourceId, 380, 260);
+		const pos = findOpenSpot(
+			get().cards,
+			sourceId,
+			DEFAULT_CARD_SIZE.width,
+			DEFAULT_CARD_SIZE.height,
+		);
 		get().addCard(pos, sourceId, undefined, src?.kind ?? "chat");
 	},
 
@@ -579,8 +651,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}
 		// Place resumed cards to the right of existing content.
 		const cards = get().cards;
-		const maxX = cards.length ? Math.max(...cards.map((c) => c.position.x)) : -400;
-		get().addCard({ x: maxX + 440, y: cards.length ? cards[0].position.y : 0 }, null, cardId);
+		const maxX = cards.length ? Math.max(...cards.map((c) => c.position.x + cardWidth(c))) : -DEFAULT_CARD_SIZE.width;
+		get().addCard({ x: maxX + 48, y: cards.length ? cards[0].position.y : 0 }, null, cardId);
 		const tMsgs = ((transcript?.messages ?? []) as any[]).filter(
 			(mm: any) => mm.role === "user" || mm.text || mm.thinking || mm.tools?.length,
 		);
@@ -649,6 +721,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	async sendMessage(cardId, text, opts) {
 		const card = get().cards.find((c) => c.id === cardId);
 		if (!card || !text.trim()) return false;
+		const sessionFile = opts?.sessionFile ?? card.sessionFile;
+		const cwd = opts?.cwd ?? get().folder;
+		if (!sessionFile && !cwd) {
+			get().setCardError(cardId, "Choose a folder before starting a session.");
+			return false;
+		}
 		// Snapshot for rollback — the user's text is never lost.
 		const messagesBefore = [...card.messages];
 		get().updateCard(cardId, {
@@ -668,12 +746,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
 		// ── 1. attach (idempotent, resume-first) ──
 		if (!attached.has(cardId)) {
-			const sessionFile = opts?.sessionFile ?? card.sessionFile;
 			const url = sessionFile ? `/sessions/resume` : `/sessions`;
-			pushLog(
-				cardId,
-				`→ ATTACH ${sessionFile ? `RESUME ${sessionFile.split("/").pop()}` : `NEW cwd=${opts?.cwd ?? "(default)"}`}`,
-			);
+			pushLog(cardId, `→ ATTACH ${sessionFile ? `RESUME ${sessionFile.split("/").pop()}` : `NEW cwd=${cwd}`}`);
 			try {
 				const res = await fetch(url, {
 					method: "POST",
@@ -681,7 +755,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					body: JSON.stringify(
 						sessionFile
 							? { cardId, sessionFile, model: card.model, skills: card.skills ?? [] }
-							: { cardId, cwd: opts?.cwd ?? get().folder ?? undefined, model: card.model, skills: card.skills ?? [] },
+							: {
+									cardId,
+									cwd,
+									model: card.model,
+									skills: card.skills ?? [],
+								},
 					),
 				});
 				if (!res.ok) throw new Error(`attach ${res.status}: ${await res.text()}`);

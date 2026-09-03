@@ -79,9 +79,14 @@ export interface SessionCard {
 	permission?: "full" | "readonly";
 	/** Messages queued while the agent was busy (DSH-style). */
 	queue?: string[];
+	/** Restored into the card composer when the first prompt fails to send. */
+	pendingDraft?: string;
 	/** Full trajectory trace — meta + every lifecycle event (for debugging). */
 	sessionId?: string;
 	events?: TraceEvent[];
 }
 
 export const newCardId = () => `card_${nanoid(8)}`;
+
+/** Default chat/document card size when none is stored yet. */
+export const DEFAULT_CARD_SIZE = { width: 480, height: 520 } as const;
