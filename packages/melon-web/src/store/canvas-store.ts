@@ -1095,6 +1095,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 							detail: "",
 						});
 						st!.thinkingStartTs = Date.now();
+						const dbg = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+						pushLog(cardId, `[state] thinking-start lastRole=${dbg?.messages[dbg.messages.length - 1]?.role} pending=${st!.pendingPatch ? "yes" : "no"} segSealed=${st!.segSealed}`);
+					}
 					}
 					if (st!.segSealed) {
 						st!.buffer = "";
@@ -1134,8 +1137,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						applyPending();
 						// Queue is server-truth ({type:"queue"} events) — do not
 						// clear or pop here; consumption is detected server-side.
+						const dbg = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+						pushLog(cardId, `[state] idle roles=${JSON.stringify(dbg?.messages.map((m) => m.role))} pending=${st!.pendingPatch ? "yes" : "no"}`);
 						useCanvasStore.getState().updateCard(cardId, { status: "idle" });
 						return;
+					}
+					if (data.status === "streaming") {
+						const dbg = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+						pushLog(cardId, `[state] streaming roles=${JSON.stringify(dbg?.messages.map((m) => m.role))} segSealed=${st!.segSealed}`);
 					}
 					useCanvasStore.getState().updateCard(cardId, {
 						status: data.status,
@@ -1153,6 +1162,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
 					if (!cur) return;
 					const last = cur.messages[cur.messages.length - 1];
+					pushLog(cardId, `[state] user_message "${um.text.slice(0, 20)}" lastRole=${last?.role} pending=${st!.pendingPatch ? "yes" : "no"} segSealed=${st!.segSealed}`);
 					if (last?.role === "user" && last.text === um.text) return;
 					useCanvasStore.getState().updateCard(cardId, {
 						messages: [...cur.messages, { role: "user", text: um.text }],
