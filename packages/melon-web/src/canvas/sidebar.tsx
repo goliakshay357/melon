@@ -41,6 +41,25 @@ export function Sidebar() {
     const openFolder = useCanvasStore((s) => s.openFolder);
     const resumeSession = useCanvasStore((s) => s.resumeSession);
     const canvasTreeRev = useCanvasStore((s) => s.canvasTreeRev);
+    const [appVersion, setAppVersion] = useState<string | null>(null);
+
+    // Same identity as Melon-<version>-<arch>.dmg — always visible in the navbar.
+    useEffect(() => {
+        let alive = true;
+        fetch('/healthz', { cache: 'no-store' })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((body: { version?: unknown } | null) => {
+                if (!alive) return;
+                const v = typeof body?.version === 'string' ? body.version.trim() : '';
+                setAppVersion(v || null);
+            })
+            .catch(() => {
+                if (alive) setAppVersion(null);
+            });
+        return () => {
+            alive = false;
+        };
+    }, []);
 
     const loadTree = useCallback(async () => {
         try {
@@ -479,24 +498,33 @@ export function Sidebar() {
                         </div>
                     )}
 
-                    {/* Footer: workspace breadcrumb + settings */}
-                    <div className="flex shrink-0 items-center justify-between gap-2 border-t border-border px-3 py-2">
-                        <span className="min-w-0 truncate text-[10px] text-muted-foreground">
-                            {folder && `📁 …${folder.split('/').slice(-2).join('/')}`}
-                        </span>
-                        <button
-                            className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                            title={activeView === 'canvas' ? 'Settings' : 'Back to chat'}
-                            onClick={() =>
-                                activeView === 'canvas' ? openView('themes') : setActiveView('canvas')
-                            }
+                    {/* Footer: build version + workspace breadcrumb + settings */}
+                    <div className="flex shrink-0 flex-col gap-1 border-t border-border px-3 py-2">
+                        <p
+                            className="truncate text-[11px] font-medium text-foreground"
+                            data-testid="app-build-version"
+                            title={appVersion ? `Melon ${appVersion}` : 'Melon'}
                         >
-                            {activeView === 'canvas' ? (
-                                <Settings className="size-3.5" />
-                            ) : (
-                                <MessageSquare className="size-3.5" />
-                            )}
-                        </button>
+                            {appVersion ? `Melon ${appVersion}` : 'Melon'}
+                        </p>
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="min-w-0 truncate text-[10px] text-muted-foreground">
+                                {folder && `📁 …${folder.split('/').slice(-2).join('/')}`}
+                            </span>
+                            <button
+                                className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                                title={activeView === 'canvas' ? 'Settings' : 'Back to chat'}
+                                onClick={() =>
+                                    activeView === 'canvas' ? openView('themes') : setActiveView('canvas')
+                                }
+                            >
+                                {activeView === 'canvas' ? (
+                                    <Settings className="size-3.5" />
+                                ) : (
+                                    <MessageSquare className="size-3.5" />
+                                )}
+                            </button>
+                        </div>
                     </div>
 
                 </>

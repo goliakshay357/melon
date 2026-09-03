@@ -169,7 +169,7 @@ export function SettingsPage() {
                 )}
             </div>
             <div className="shrink-0 border-t border-border px-5 py-3">
-                <p className="text-[10px] text-muted-foreground" data-testid="app-build-version">
+                <p className="text-xs font-medium text-foreground" data-testid="app-build-version-page">
                     {appVersion ? `Melon ${appVersion}` : 'Melon'}
                 </p>
             </div>
