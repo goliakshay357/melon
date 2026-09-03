@@ -258,7 +258,15 @@ jobs:
           for asar_path in "${asars[@]}"; do
             node --input-type=commonjs -e "
               const asar = require('./desktop/node_modules/@electron/asar');
-              const files = asar.listPackage(process.argv[1]).map(String);
+              // listPackage builds paths with path.join -> backslashes on Windows.
+              // Normalize before matching, and print counts so failures self-explain.
+              const files = asar.listPackage(process.argv[1]).map(String).map((f) => f.replace(/\\/g, '/'));
+              const nm = files.filter((f) => f.startsWith('/node_modules/')).length;
+              console.log('entries:', files.length, '| node_modules entries:', nm);
+              if (nm === 0) {
+                console.error('asar has no node_modules at all — sample:', files.slice(0, 10).join(' | '));
+                process.exit(1);
+              }
               const missing = ['diff', 'fastify', '@earendil-works/pi-coding-agent']
                 .filter((d) => !files.includes('/node_modules/' + d + '/package.json'));
               if (missing.length) {
