@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 
 function env(name: string, fallback: string): string {
 	const value = process.env[name];
-	return value && value.trim() ? value.trim() : fallback;
+	return value?.trim() ? value.trim() : fallback;
 }
 
 export interface MelonConfig {

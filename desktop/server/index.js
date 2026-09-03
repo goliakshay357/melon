@@ -10,7 +10,7 @@
 //   POST /sessions/:cardId/prompt     {text}                → {ok}
 //   POST /sessions/:cardId/abort
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync, } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -19,9 +19,10 @@ import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
 import { expandHome, loadConfig, modelToString, preview } from "./config.js";
+import { CURSOR_PROVIDER_ID, cursorExtensionPath, hasRealCursorKey, loadCursorProviderInto, rewriteCursorError, } from "./cursor-extension.js";
 import { SessionRegistry } from "./session-registry.js";
-import { denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel } from "./settings.js";
-import { loadSkills, materializeSkills, readSkill, saveSkill, deleteSkill } from "./skills.js";
+import { clearProviderDenylist, denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel, } from "./settings.js";
+import { deleteSkill, loadSkills, materializeSkills, readSkill, saveSkill } from "./skills.js";
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
 function splitModel(model) {
@@ -32,8 +33,17 @@ function splitModel(model) {
 }
 let _modelRuntime;
 async function getModelRuntime() {
-    if (!_modelRuntime)
+    if (!_modelRuntime) {
         _modelRuntime = await ModelRuntime.create();
+        // Register bundled extension providers (cursor) so the GUI pickers see
+        // them. Fail-open — builtin providers must work even if this fails.
+        try {
+            await loadCursorProviderInto(_modelRuntime);
+        }
+        catch (e) {
+            console.error("[melon] cursor provider load failed (continuing without it):", e?.message ?? e);
+        }
+    }
     return _modelRuntime;
 }
 export async function buildApp(deps = {}) {
@@ -70,13 +80,16 @@ export async function buildApp(deps = {}) {
             });
             // Keep the agent OUT of its own installation. One-time system-prompt
             // addition (not per-prompt, no context bloat).
-            const appendSystemPromptOverride = (base) => [
-                ...base,
-                MELON_GUARDRAIL,
-            ];
+            const appendSystemPromptOverride = (base) => [...base, MELON_GUARDRAIL];
             const services = await createAgentSessionServices({
                 cwd,
-                resourceLoaderOptions: { skillsOverride, appendSystemPromptOverride },
+                resourceLoaderOptions: {
+                    skillsOverride,
+                    appendSystemPromptOverride,
+                    // Bundled provider extensions (cursor) — same extension the GUI
+                    // runtime loads, so session model lists match the picker.
+                    ...(cursorExtensionPath() ? { additionalExtensionPaths: [cursorExtensionPath()] } : {}),
+                },
             });
             return {
                 ...(await createAgentSessionFromServices({
@@ -158,7 +171,7 @@ export async function buildApp(deps = {}) {
                 else if (event.type === "auto_retry_start") {
                     registry.broadcast(cardId, {
                         type: "raw",
-                        text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}`,
+                        text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${rewriteCursorError(event.errorMessage ?? "unknown")}`,
                     });
                 }
                 else if (event.type === "summarization_retry_scheduled") {
@@ -200,9 +213,6 @@ export async function buildApp(deps = {}) {
                     if (entry)
                         entry.busy = false;
                 }
-                else if (event.type === "auto_retry_start" || event.type === "summarization_retry_scheduled") {
-                    console.log(`[${cardId}] ${event.type}`);
-                }
                 if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
                     registry.broadcast(cardId, {
                         type: "thinking",
@@ -234,13 +244,13 @@ export async function buildApp(deps = {}) {
                     registry.broadcast(cardId, {
                         type: "turn_end",
                         stopReason: msg?.stopReason,
-                        error: msg?.errorMessage ?? undefined,
+                        error: rewriteCursorError(String(msg?.errorMessage ?? "")) || undefined,
                     });
                 }
                 else if (event.type === "auto_retry_start") {
                     registry.broadcast(cardId, {
                         type: "raw",
-                        text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}`,
+                        text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${rewriteCursorError(event.errorMessage ?? "unknown")}`,
                     });
                 }
                 else if (event.type === "summarization_retry_scheduled") {
@@ -342,7 +352,9 @@ export async function buildApp(deps = {}) {
         catch (e) {
             return reply.code(400).send({ error: e.message });
         }
-        const skills = Array.isArray(body?.skills) ? body.skills.filter((x) => typeof x === "string") : [];
+        const skills = Array.isArray(body?.skills)
+            ? body.skills.filter((x) => typeof x === "string")
+            : [];
         const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model, skills);
         return {
             cardId,
@@ -358,7 +370,9 @@ export async function buildApp(deps = {}) {
         const sessionFile = body?.sessionFile;
         if (!sessionFile)
             return reply.code(400).send({ error: "sessionFile required" });
-        const skills = Array.isArray(body?.skills) ? body.skills.filter((x) => typeof x === "string") : [];
+        const skills = Array.isArray(body?.skills)
+            ? body.skills.filter((x) => typeof x === "string")
+            : [];
         const runtime = await attachSession(cardId, SessionManager.open(sessionFile), body?.model, skills);
         return {
             cardId,
@@ -603,7 +617,7 @@ export async function buildApp(deps = {}) {
         const q = req.query;
         let dir;
         try {
-            dir = expandHome(q.path && q.path.trim() ? q.path : "~");
+            dir = expandHome(q.path?.trim() ? q.path : "~");
         }
         catch {
             dir = homedir();
@@ -682,7 +696,7 @@ export async function buildApp(deps = {}) {
         touchFolder(cwd);
         return { ok: true };
     });
-    app.delete("/folders", async (req, reply) => {
+    app.delete("/folders", async (req, _reply) => {
         const cwd = expandHome(req.query?.cwd ?? "");
         saveFolderHistory(loadFolderHistory().filter((f) => f.cwd !== cwd));
         return { ok: true };
@@ -951,10 +965,13 @@ export async function buildApp(deps = {}) {
                 keyPreview = maskKey(melonKey);
                 authType = "api_key";
             }
+            // The cursor extension registers a literal placeholder apiKey, so the
+            // generic status reports "configured" with no real key. Report the truth.
+            const configured = pid === CURSOR_PROVIDER_ID ? hasRealCursorKey(authEntries, melonKeys) : !!status.configured;
             result.push({
                 id: pid,
                 provider: pid,
-                configured: !!status.configured,
+                configured,
                 source: status.source ?? undefined,
                 keyPreview,
                 authType,
@@ -974,6 +991,19 @@ export async function buildApp(deps = {}) {
             return reply.code(400).send({ error: "key required" });
         try {
             await (await getModelRuntime()).setRuntimeApiKey(provider, key);
+            // Persist to auth.json — runtime overrides die with this process, but
+            // sessions (and extensions like pi-cursor-sdk) read auth.json directly.
+            mkdirSync(getAgentDir(), { recursive: true });
+            const authPath = join(getAgentDir(), "auth.json");
+            let auth = {};
+            try {
+                auth = JSON.parse(readFileSync(authPath, "utf8"));
+            }
+            catch { }
+            auth[provider] = { type: "api_key", key };
+            writeFileSync(authPath, JSON.stringify(auth, null, "\t"), { mode: 0o600 });
+            // A fresh key may resurrect models that failed before it existed.
+            clearProviderDenylist(provider);
             const st = loadSettings();
             st.providerKeys = { ...(st.providerKeys ?? {}), [provider]: key };
             saveSettings(st);
@@ -986,6 +1016,16 @@ export async function buildApp(deps = {}) {
     app.delete("/auth/:provider", async (req) => {
         const provider = req.params.provider;
         await (await getModelRuntime()).removeRuntimeApiKey(provider);
+        // Keep auth.json in sync with the runtime override removal.
+        try {
+            const authPath = join(getAgentDir(), "auth.json");
+            const auth = JSON.parse(readFileSync(authPath, "utf8"));
+            if (provider in auth) {
+                delete auth[provider];
+                writeFileSync(authPath, JSON.stringify(auth, null, "\t"), { mode: 0o600 });
+            }
+        }
+        catch { }
         const st = loadSettings();
         if (st.providerKeys)
             delete st.providerKeys[provider];
@@ -1103,7 +1143,7 @@ export async function buildApp(deps = {}) {
         }
         catch (e) {
             console.error(`[${cardId}] prompt:THREW ${e.stack}`);
-            registry.broadcast(cardId, { type: "error", message: e.message });
+            registry.broadcast(cardId, { type: "error", message: rewriteCursorError(e.message) });
             registry.broadcast(cardId, { type: "status", status: "error" });
         }
         finally {

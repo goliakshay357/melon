@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 function env(name, fallback) {
     const value = process.env[name];
-    return value && value.trim() ? value.trim() : fallback;
+    return value?.trim() ? value.trim() : fallback;
 }
 export function loadConfig(overrides = {}) {
     return {
