@@ -1098,7 +1098,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						const dbg = useCanvasStore.getState().cards.find((c) => c.id === cardId);
 						pushLog(cardId, `[state] thinking-start lastRole=${dbg?.messages[dbg.messages.length - 1]?.role} pending=${st!.pendingPatch ? "yes" : "no"} segSealed=${st!.segSealed}`);
 					}
-					}
 					if (st!.segSealed) {
 						st!.buffer = "";
 						st!.thinkingBuffer = "";
