@@ -300,9 +300,13 @@ jobs:
           echo "Found: $ARTIFACT"
           # Canonical release name: Melon-<version>-<arch>.<ext> — matches
           # Settings footer and avoids electron-builder names with spaces
-          # ("Melon Setup 0.3.2.exe").
-          cp "$ARTIFACT" "desktop/dist/${OUT}"
-          echo "artifact=desktop/dist/${OUT}" >> "$GITHUB_OUTPUT"
+          # ("Melon Setup 0.3.2.exe"). Skip cp when already correctly named:
+          # macOS/Git Bash `cp` exits 1 for identical source/dest.
+          DEST="desktop/dist/${OUT}"
+          if [ "$ARTIFACT" != "$DEST" ]; then
+            cp "$ARTIFACT" "$DEST"
+          fi
+          echo "artifact=${DEST}" >> "$GITHUB_OUTPUT"
           echo "Canonical: ${OUT}"
 
       - name: Upload artifact
