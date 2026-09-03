@@ -241,11 +241,9 @@ jobs:
       - name: Verify packaged server runtime deps are inside app.asar
         shell: bash
         run: |
-          # electron-builder packages node_modules ONLY from desktop/package.json.
-          # A runtime dep added to packages/melon-server but not to desktop ships a
-          # DMG that crashes with ERR_MODULE_NOT_FOUND on first launch (diff, 0.3.x).
-          # Unpacked dir names differ per OS/arch (mac-arm64, mac, win-unpacked,
-          # win-arm64-unpacked, linux-unpacked) — discover the asar, don't hardcode.
+          # Rationale lives in the script's docblock. The check is a checked-in
+          # file (not inline JS) so bash/YAML quoting layers can't mangle it and
+          # local runs exercise the exact code CI runs.
           shopt -s nullglob
           asars=(
             desktop/dist/mac*/Melon.app/Contents/Resources/app.asar
@@ -255,27 +253,7 @@ jobs:
             echo "::error::no packaged app.asar found under desktop/dist"
             exit 1
           fi
-          for asar_path in "${asars[@]}"; do
-            node --input-type=commonjs -e "
-              const asar = require('./desktop/node_modules/@electron/asar');
-              // listPackage builds paths with path.join -> backslashes on Windows.
-              // Normalize before matching, and print counts so failures self-explain.
-              const files = asar.listPackage(process.argv[1]).map(String).map((f) => f.replace(/\\/g, '/'));
-              const nm = files.filter((f) => f.startsWith('/node_modules/')).length;
-              console.log('entries:', files.length, '| node_modules entries:', nm);
-              if (nm === 0) {
-                console.error('asar has no node_modules at all — sample:', files.slice(0, 10).join(' | '));
-                process.exit(1);
-              }
-              const missing = ['diff', 'fastify', '@earendil-works/pi-coding-agent']
-                .filter((d) => !files.includes('/node_modules/' + d + '/package.json'));
-              if (missing.length) {
-                console.error('MISSING from ' + process.argv[1] + ': ' + missing.join(', '));
-                process.exit(1);
-              }
-              console.log('packaged server deps OK:', process.argv[1]);
-            " "$asar_path"
-          done
+          node desktop/scripts/verify-packaged-deps.cjs "${asars[@]}"
 
       - name: Verify binary arch matches the job (never ship a wrong-arch build)
         if: runner.os == 'macOS'
