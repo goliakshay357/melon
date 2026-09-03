@@ -34,6 +34,7 @@ export function Sidebar() {
     const openView = (v: 'skills' | 'themes') => {
         setActiveView(v);
     };    const [recent, setRecent] = useState<Array<{ id: string; name: string; cwd: string; folderName: string; modified: string }>>([]);
+    const [switchingCanvasId, setSwitchingCanvasId] = useState<string | null>(null);
 
     const folder = useCanvasStore((s) => s.folder);
     const canvasId = useCanvasStore((s) => s.canvasId);
@@ -249,19 +250,27 @@ export function Sidebar() {
                                                 className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left transition-colors hover:bg-secondary/70"
                                                 title={`${cv.name} — ${cv.folderName}`}
                                                 onClick={() => {
+                                                    setSwitchingCanvasId(cv.id);
+                                                    const doSwitch = () => {
+                                                        switchCanvas(cv.id).finally(() => setSwitchingCanvasId(null));
+                                                    };
                                                     if (folder !== cv.cwd)
-                                                        openFolder(cv.cwd).then(() => switchCanvas(cv.id));
-                                                    else switchCanvas(cv.id);
+                                                        openFolder(cv.cwd).then(doSwitch);
+                                                    else doSwitch();
                                                 }}
                                             >
                                                 <Layers className="size-3 shrink-0 text-muted-foreground" />
                                                 <span className="min-w-0 flex-1 truncate text-xs text-card-foreground">
                                                     {cv.name}
-                                                    {isActive && (cards.some((c) => c.status === "streaming") ? (
-                                                        <span className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-amber-400" title="AI is running" />
-                                                    ) : cards.some((c) => c.status === "error") ? (
-                                                        <span className="ml-1 inline-block size-1.5 rounded-full bg-red-500" title="Error" />
-                                                    ) : null)}
+                                                    {(isActive || switchingCanvasId === cv.id) && (
+                                                        switchingCanvasId === cv.id ? (
+                                                            <span className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-blue-400" title="Loading..." />
+                                                        ) : cards.some((c) => c.status === "streaming") ? (
+                                                            <span className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-amber-400" title="AI is running" />
+                                                        ) : cards.some((c) => c.status === "error") ? (
+                                                            <span className="ml-1 inline-block size-1.5 rounded-full bg-red-500" title="Error" />
+                                                        ) : null
+                                                    )}
                                                 </span>
                                                 <span className="shrink-0 truncate text-[9px] text-muted-foreground">
                                                     📁 {cv.folderName}
