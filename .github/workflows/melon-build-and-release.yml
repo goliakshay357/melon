@@ -244,23 +244,30 @@ jobs:
           # electron-builder packages node_modules ONLY from desktop/package.json.
           # A runtime dep added to packages/melon-server but not to desktop ships a
           # DMG that crashes with ERR_MODULE_NOT_FOUND on first launch (diff, 0.3.x).
-          case "${{ matrix.os }}/${{ matrix.arch }}" in
-            macos-latest/arm64) ASAR="desktop/dist/mac-arm64/Melon.app/Contents/Resources/app.asar" ;;
-            macos-latest/*)     ASAR="desktop/dist/mac/Melon.app/Contents/Resources/app.asar" ;;
-            windows-latest/*)   ASAR="desktop/dist/win-unpacked/resources/app.asar" ;;
-            *)                  ASAR="desktop/dist/linux-unpacked/resources/app.asar" ;;
-          esac
-          node --input-type=commonjs -e "
-            const asar = require('./desktop/node_modules/@electron/asar');
-            const files = asar.listPackage(process.argv[1]).map(String);
-            const missing = ['diff', 'fastify', '@earendil-works/pi-coding-agent']
-              .filter((d) => !files.includes('/node_modules/' + d + '/package.json'));
-            if (missing.length) {
-              console.error('MISSING from ' + process.argv[1] + ': ' + missing.join(', '));
-              process.exit(1);
-            }
-            console.log('packaged server deps OK:', process.argv[1]);
-          " "$ASAR"
+          # Unpacked dir names differ per OS/arch (mac-arm64, mac, win-unpacked,
+          # win-arm64-unpacked, linux-unpacked) — discover the asar, don't hardcode.
+          shopt -s nullglob
+          asars=(
+            desktop/dist/mac*/Melon.app/Contents/Resources/app.asar
+            desktop/dist/*unpacked/resources/app.asar
+          )
+          if [ ${#asars[@]} -eq 0 ]; then
+            echo "::error::no packaged app.asar found under desktop/dist"
+            exit 1
+          fi
+          for asar_path in "${asars[@]}"; do
+            node --input-type=commonjs -e "
+              const asar = require('./desktop/node_modules/@electron/asar');
+              const files = asar.listPackage(process.argv[1]).map(String);
+              const missing = ['diff', 'fastify', '@earendil-works/pi-coding-agent']
+                .filter((d) => !files.includes('/node_modules/' + d + '/package.json'));
+              if (missing.length) {
+                console.error('MISSING from ' + process.argv[1] + ': ' + missing.join(', '));
+                process.exit(1);
+              }
+              console.log('packaged server deps OK:', process.argv[1]);
+            " "$asar_path"
+          done
 
       - name: Verify binary arch matches the job (never ship a wrong-arch build)
         if: runner.os == 'macOS'
