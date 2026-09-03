@@ -34,6 +34,7 @@ export function ProviderPicker({
     const [key, setKey] = useState('');
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
+    const [selectError, setSelectError] = useState('');
     const ref = useRef<HTMLDivElement>(null);
 
     const current = model.split('/')[0] ?? '';
@@ -66,12 +67,21 @@ export function ProviderPicker({
     }, []);
 
     const selectProvider = async (p: ProviderInfo) => {
-        onOpenChange(false);
         const res = await fetch(`/models?provider=${encodeURIComponent(p.id)}`).then((r) =>
             r.json(),
         );
         const first = res.models?.[0];
-        onChange(first ? first.label : `${p.id}/`);
+        // A provider can be configured (key saved) yet expose no models in
+        // the live catalog. Sending a malformed placeholder like "cursor/"
+        // would only bounce off the server — keep the current model and say
+        // why instead.
+        if (!first || typeof first.label !== 'string' || !first.label.includes('/')) {
+            setSelectError(`No models available for ${p.id}`);
+            return;
+        }
+        setSelectError('');
+        onOpenChange(false);
+        onChange(first.label);
     };
 
     const saveKey = async () => {
@@ -111,6 +121,7 @@ export function ProviderPicker({
                 title={`Provider: ${current || 'none'}`}
                 onClick={(e) => {
                     e.stopPropagation();
+                    setSelectError('');
                     onOpenChange(!open);
                 }}
             >
@@ -131,6 +142,11 @@ export function ProviderPicker({
                     <p className="px-2 pb-0.5 pt-1 text-[9px] font-medium uppercase tracking-wide text-muted-foreground">
                         Provider
                     </p>
+                    {selectError && (
+                        <p className="mx-1.5 mb-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] text-amber-500/90">
+                            {selectError}
+                        </p>
+                    )}
                     {providers.map((p) => (
                         <div
                             key={p.id}

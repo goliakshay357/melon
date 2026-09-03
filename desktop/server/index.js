@@ -213,13 +213,8 @@ export async function buildApp(deps = {}) {
                     deltaCount++;
                 }
                 else if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_start") {
-                    // too chatty to broadcast every one; lifecycle shows via agent_*
-                }
-                else if (event.type === "turn_end") {
-                    registry.broadcast(cardId, {
-                        type: "raw",
-                        text: `turn_end (${event.message?.stopReason ?? "done"})`,
-                    });
+                    // too chatty to broadcast every one; lifecycle shows via agent_*. The
+                    // structured turn_end frame is broadcast in the chain below.
                 }
                 else if (event.type === "auto_retry_start") {
                     registry.broadcast(cardId, {
