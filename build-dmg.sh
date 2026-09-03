@@ -12,10 +12,14 @@ echo "── 2. build melon-server ──"
 cd "$ROOT/packages/melon-server"
 npm run build
 
+echo "── 2a. install melon-server production dependencies ──"
+npm ci --production
+
 echo "── 3. sync into desktop shell ──"
 cd "$ROOT/desktop"
 rm -rf server web-dist
 cp -r ../packages/melon-server/dist server
+cp -r ../packages/melon-server/node_modules server/node_modules
 cp -r ../packages/melon-web/dist web-dist
 # Packaged Settings footer reads version from desktop/package.json (via
 # Electron MELON_VERSION / app.getVersion). Keep server package.json aligned.
