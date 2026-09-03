@@ -45,6 +45,7 @@ import {
 } from "./settings.ts";
 import { deleteSkill, loadSkills, materializeSkills, readSkill, saveSkill } from "./skills.ts";
 
+
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
 function splitModel(model: string): [string, string] {
@@ -78,6 +79,42 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	await app.register(cors, { origin: true });
 
 	const registry = new SessionRegistry();
+	/**
+	 * Drain a card's server-owned prompt queue. Queued prompts never enter
+	 * pi's followUp queue (pi has no per-item removal, which made cancel/edit
+	 * inherently racy) — this array is the single source of truth and runs one
+	 * prompt at a time whenever the agent goes idle. Cancel = array splice.
+	 */
+	function drainPromptQueue(cardId: string): void {
+		const s = registry.get(cardId);
+		if (!s || s.draining || s.promptQueue.length === 0) return;
+		s.draining = true;
+		const run = async () => {
+			while (s.promptQueue.length > 0) {
+				const next = s.promptQueue.shift() as string;
+				console.log(`[${cardId}] queue:drain "${next.slice(0, 40)}" (remaining=${JSON.stringify(s.promptQueue)})`);
+				registry.broadcast(cardId, { type: "queue", followUp: [...s.promptQueue] });
+				// The client never optimistically renders queued messages — this
+				// event is the moment the text actually reaches the model.
+				registry.broadcast(cardId, { type: "user_message", text: next });
+				s.busy = true;
+				try {
+					await s.runtime.session.prompt(next, { streamingBehavior: "followUp" });
+				} catch (e) {
+					console.error(`[${cardId}] queued prompt THREW ${(e as Error).stack}`);
+					registry.broadcast(cardId, { type: "error", message: rewriteCursorError((e as Error).message) });
+					registry.broadcast(cardId, { type: "status", status: "error" });
+					// Stop — surface the failure; remaining items stay queued so the
+					// user can cancel them or retry by sending again.
+					return;
+				}
+			}
+		};
+		void run().finally(() => {
+			s.draining = false;
+			s.busy = false;
+		});
+	}
 
 	/**
 	 * System-prompt guardrail: the agent must not explore its own installation
@@ -137,11 +174,25 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				services,
 			};
 		};
-		return createAgentSessionRuntime(factory, {
+		const runtime = await createAgentSessionRuntime(factory, {
 			cwd: sessionManager.getCwd(),
 			agentDir: getAgentDir(),
 			sessionManager,
 		});
+		// Bind extensions in "rpc" mode — Melon is an interactive GUI peer of the
+		// TUI/RPC frontends, not a one-shot print run. Extensions gate
+		// terminal-only behavior on ctx.mode; pi-cursor-sdk, for instance, only
+		// registers its native tool replay outside "print" mode. Without this,
+		// all Cursor tool activity (bash/read/write/...) renders as
+		// thinking-block traces instead of tool cards. This also emits
+		// session_start, which melon-server previously never delivered. Fail-open
+		// so a broken extension cannot take down card creation.
+		try {
+			await runtime.session.bindExtensions({ mode: "rpc" });
+		} catch (e) {
+			console.error("[melon] extension bind failed (continuing):", (e as Error)?.message ?? e);
+		}
+		return runtime;
 	}
 
 	async function attachSession(
@@ -164,7 +215,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			console.error("model switch failed:", (e as Error)?.message ?? e);
 		}
 		wireEvents(cardId, runtime);
-		registry.set(cardId, { runtime, clients: new Set(), busy: false, activeSkills: skills });
+		registry.set(cardId, { runtime, clients: new Set(), busy: false, activeSkills: skills, promptQueue: [] });
 		return runtime;
 	}
 
@@ -218,6 +269,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				} else if (event.type === "compaction_start") {
 					registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
 				} else if (event.type === "queue_update") {
+					// pi's internal followUp queue is NOT the prompt queue anymore
+					// (the server owns queuing); only log for the trajectory.
 					const q = event as any;
 					if (q.steering || q.followUp)
 						registry.broadcast(cardId, {
@@ -248,6 +301,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					// processing) — holding busy for that blocks the next message.
 					const entry = registry.get(cardId);
 					if (entry) entry.busy = false;
+					// The answer is done — if the server-owned queue has items, run
+					// the next one now. After a user abort, stop instead: the user
+					// asked for a halt; remaining items stay queued (chips) and can
+					// be cancelled or resumed by sending again.
+					const stopReason = String((msgs[msgs.length - 1] as any)?.stopReason ?? "");
+					if (stopReason !== "aborted") drainPromptQueue(cardId);
 				}
 				if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
 					registry.broadcast(cardId, {
@@ -258,6 +317,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					registry.broadcast(cardId, { type: "delta", text: event.assistantMessageEvent.delta });
 					broadcastCtx();
 				} else if (event.type === "agent_start") {
+					const entry = registry.get(cardId);
+					if (entry) entry.busy = true;
 					registry.broadcast(cardId, { type: "status", status: "streaming" });
 					registry.broadcast(cardId, {
 						type: "raw",
@@ -389,6 +450,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			sessionFile: runtime.session.sessionFile,
 			cwd: dir,
 			model: modelToString(runtime.session.model),
+			followUp: [...runtime.session.getFollowUpMessages()],
 		};
 	});
 
@@ -407,6 +469,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			sessionFile,
 			cwd: runtime.session.sessionManager.getCwd(),
 			model: modelToString(runtime.session.model),
+			followUp: [...runtime.session.getFollowUpMessages()],
 		};
 	});
 
@@ -467,6 +530,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				runtime: await createRuntimeFor(SessionManager.open(body.sessionFile)),
 				clients: new Set(),
 				busy: false,
+				promptQueue: [],
 			};
 		}
 		if (!s) return reply.code(404).send({ error: "unknown card" });
@@ -482,7 +546,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		if (res.cancelled) return reply.code(409).send({ error: "fork cancelled" });
 
 		wireEvents(newCardId, s.runtime);
-		registry.set(newCardId, { runtime: s.runtime, clients: new Set(), busy: false });
+		registry.set(newCardId, { runtime: s.runtime, clients: new Set(), busy: false, promptQueue: [] });
 		await attachSession(parentCardId, SessionManager.open(parentSessionFile));
 
 		const childRuntime = registry.get(newCardId)!;
@@ -1148,21 +1212,22 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		if (!s) return reply.code(404).send({ error: "unknown card" });
 		const cardId = (req.params as any).cardId;
 		const started = Date.now();
-		// Busy? Queue via pi's followUp — runs automatically when current work ends.
+		// Busy? Append to the SERVER-OWNED queue — never pi's followUp queue.
+		// pi has no per-item removal, so queueing there made cancel/edit racy
+		// (clear + re-queue could lose or duplicate items). The drain loop
+		// (agent_end -> drainPromptQueue) executes queued items one at a time.
 		if (s.busy) {
-			try {
-				await s.runtime.session.followUp((req.body as any)?.text ?? "");
-				reply.send({ ok: true, queued: true });
-			} catch (e) {
-				reply.code(500).send({ error: (e as Error).message });
-			}
+			const text = String((req.body as any)?.text ?? "");
+			s.promptQueue.push(text);
+			console.log(`[${cardId}] queue:push "${text.slice(0, 40)}" (queue=${JSON.stringify(s.promptQueue)})`);
+			registry.broadcast(cardId, { type: "queue", followUp: [...s.promptQueue] });
+			reply.send({ ok: true, queued: true });
 			return;
 		}
-		s.busy = true;
 		reply.send({ ok: true });
 
 		console.log(`[${cardId}] prompt:start "${String((req.body as any)?.text).slice(0, 60)}"`);
-		registry.broadcast(cardId, { type: "raw", text: "⬇ prompt received by server" });
+		registry.broadcast(cardId, { type: "raw", text: "\u2b07 prompt received by server" });
 		try {
 			const text = (req.body as any)?.text ?? "";
 			// Skills are activated via pi's native /skill: followUp on toggle —
@@ -1174,8 +1239,50 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			registry.broadcast(cardId, { type: "error", message: rewriteCursorError((e as Error).message) });
 			registry.broadcast(cardId, { type: "status", status: "error" });
 		} finally {
-			s.busy = false;
+			// busy is owned by agent_start/agent_end events; this drain covers
+			// runs that ended without an agent_end (e.g. prompt threw early).
+			drainPromptQueue(cardId);
 		}
+	});
+
+	// The queue lives on the registry entry (s.promptQueue) — cancel is a
+	// plain array splice with no pi-internal races.
+	app.get("/sessions/:cardId/queue", async (req, reply) => {
+		const s = registry.get((req.params as any).cardId);
+		if (!s) return reply.code(404).send({ error: "unknown card" });
+		reply.send({ followUp: [...s.promptQueue] });
+	});
+
+	// Items are identified by TEXT, not index: the queue mutates as items
+	// drain, so a stale index could remove the wrong entry.
+	app.post("/sessions/:cardId/queue/remove", async (req, reply) => {
+		const s = registry.get((req.params as any).cardId);
+		if (!s) return reply.code(404).send({ error: "unknown card" });
+		const text = String((req.body as any)?.text ?? "");
+		if (!text) return reply.code(400).send({ error: "text required" });
+		const index = s.promptQueue.indexOf(text);
+		if (index === -1) {
+			// Already drained — it is executing (or done) now. 409 + current
+			// list lets the client resync instead of erroring.
+			console.log(`[${(req.params as any).cardId}] queue:remove MISS "${text.slice(0, 40)}" (queue=${JSON.stringify(s.promptQueue)})`);
+			return reply.code(409).send({ error: "queued message not found", followUp: [...s.promptQueue] });
+		}
+		s.promptQueue.splice(index, 1);
+		registry.broadcast((req.params as any).cardId, { type: "queue", followUp: [...s.promptQueue] });
+		console.log(`[${(req.params as any).cardId}] queue:remove "${text.slice(0, 40)}"`);
+		reply.send({ ok: true, followUp: [...s.promptQueue] });
+	});
+
+	// Clear the whole queue (error/abort recovery) — returns what was dropped
+	// so the client can hand the text back to the composer.
+	app.post("/sessions/:cardId/queue/clear", async (req, reply) => {
+		const s = registry.get((req.params as any).cardId);
+		if (!s) return reply.code(404).send({ error: "unknown card" });
+		const dropped = [...s.promptQueue];
+		s.promptQueue = [];
+		registry.broadcast((req.params as any).cardId, { type: "queue", followUp: [] });
+		console.log(`[${(req.params as any).cardId}] queue:clear (${dropped.length} items)`);
+		reply.send({ ok: true, followUp: dropped });
 	});
 
 	app.post("/sessions/:cardId/abort", async (req, reply) => {

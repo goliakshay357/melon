@@ -73,6 +73,10 @@ if (!serverPort) {
             width: 1440,
             height: 900,
             backgroundColor: '#282a36',
+            // Distinguish the dev shell from the installed app — multiple
+            // Melon instances share the same look, and testing the queue in
+            // a stale build makes bugs unreproducible.
+            title: 'Melon DEV',
             webPreferences: { preload: join(__dirname, 'preload.cjs'), contextIsolation: true },
         });
         // NEVER open links inside the app. Any window.open / target=_blank link

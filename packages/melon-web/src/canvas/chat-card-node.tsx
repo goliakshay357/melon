@@ -8,7 +8,7 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { Bug, ChevronDown, Copy, Minimize2, Plus, X } from 'lucide-react';
+import { Bug, ChevronDown, Copy, Minimize2, Pencil, Plus, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { PromptComposer } from '@/components/prompt-composer';
@@ -587,9 +587,19 @@ function ChatCardNodeInner({
 
     useEffect(() => {
         if (!card?.pendingDraft) return;
-        setDraft(card.pendingDraft);
+        // APPEND, never overwrite — the user may be typing already.
+        setDraft((prev) => (prev ? `${prev}\n\n${card.pendingDraft}` : card.pendingDraft!));
         useCanvasStore.getState().updateCard(id, { pendingDraft: undefined });
     }, [card?.pendingDraft, id]);
+
+    // The persisted queue is a mirror of pi's in-memory queue, which dies
+    // with the server. Resync once per mount so stale chips (app restart,
+    // page reload) never show messages that will never run.
+    // biome-ignore lint/correctness/useExhaustiveDependencies: once per mount
+    useEffect(() => {
+        if (!card?.sessionFile) return;
+        void useCanvasStore.getState().syncQueued(id);
+    }, [id]);
 
     if (!card) return null;
 
@@ -805,11 +815,42 @@ function ChatCardNodeInner({
     const footerInput = (
         <div className={cn('shrink-0 border-t border-border p-2', maximized && 'px-4')}>
             {(card.queue?.length ?? 0) > 0 && (
-                <div className="mb-1.5 space-y-0.5">
+                <div className="mb-1.5 space-y-1">
                     {card.queue!.map((q, i) => (
-                        <p key={i} className="truncate text-[11px] text-amber-500/90" title={q}>
-                            ⏳ queued — runs after the current answer: {q}
-                        </p>
+                        <div
+                            key={i}
+                            className="flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-1 text-[11px] text-amber-500/90"
+                        >
+                            <span className="truncate" title={q}>
+                                ⏳ queued — runs after the current answer: {q}
+                            </span>
+                            <button
+                                className="nodrag ml-auto shrink-0 rounded p-0.5 text-amber-500/70 hover:bg-amber-500/20 hover:text-amber-500"
+                                title="Move back to the composer to edit"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    void (async () => {
+                                        const r = await useCanvasStore.getState().dropQueued(id, q);
+                                        // Consumed items belong to the transcript, not the composer.
+                                        if (r === 'removed' || r === 'dead') {
+                                            setDraft((prev) => (prev ? `${prev}\n\n${q}` : q));
+                                        }
+                                    })();
+                                }}
+                            >
+                                <Pencil className="size-3" />
+                            </button>
+                            <button
+                                className="nodrag shrink-0 rounded p-0.5 text-amber-500/70 hover:bg-amber-500/20 hover:text-amber-500"
+                                title="Cancel queued message"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    void useCanvasStore.getState().dropQueued(id, q);
+                                }}
+                            >
+                                <X className="size-3" />
+                            </button>
+                        </div>
                     ))}
                 </div>
             )}

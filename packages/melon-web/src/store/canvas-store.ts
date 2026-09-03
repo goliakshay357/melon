@@ -1,12 +1,6 @@
 import { nanoid } from "nanoid";
 import { create } from "zustand";
-import {
-	type ChatMessage,
-	DEFAULT_CARD_SIZE,
-	newCardId,
-	type SessionCard,
-	type ToolRun,
-} from "@/types/session-card";
+import { type ChatMessage, DEFAULT_CARD_SIZE, newCardId, type SessionCard, type ToolRun } from "@/types/session-card";
 
 function cardWidth(c: SessionCard): number {
 	return c.size?.width ?? DEFAULT_CARD_SIZE.width;
@@ -197,6 +191,19 @@ interface CanvasState {
 	setModel: (id: string, model: string) => void;
 	setCardError: (id: string, message: string) => void;
 	clearCardError: (id: string) => void;
+	/** Move queued text into the composer draft without dropping what's there. */
+	queueToDraft: (id: string, texts: string[]) => void;
+	/**
+	 * Remove a queued message (identified by its TEXT — pi's live queue
+	 * mutates under any client-side index) from the agent's real queue.
+	 * "removed" — gone from the server queue; "consumed" — the agent already
+	 * took it (it's executing; the chip resyncs away); "dead" — the server has
+	 * no such session (e.g. app restart) so the text was returned to the
+	 * composer; "failed" — transient error, keep the chip.
+	 */
+	dropQueued: (id: string, text: string) => Promise<"removed" | "consumed" | "dead" | "failed">;
+	/** Resync the local queue mirror from the server on card mount. */
+	syncQueued: (id: string) => Promise<void>;
 	setSkills: (id: string, skills: string[]) => void;
 	abortCard: (id: string) => void;
 	addLinkedCard: (sourceId: string) => void;
@@ -472,9 +479,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const childSize = parent?.size
 			? { width: parent.size.width, height: parent.size.height }
 			: { width: DEFAULT_CARD_SIZE.width, height: DEFAULT_CARD_SIZE.height };
-		const position = parent
-			? findOpenSpot(get().cards, parentId, childSize.width, childSize.height)
-			: { x: 0, y: 0 };
+		const position = parent ? findOpenSpot(get().cards, parentId, childSize.width, childSize.height) : { x: 0, y: 0 };
 		let sessionInfo: {
 			sessionFile?: string;
 			model?: string;
@@ -547,12 +552,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	// Inherits the source's kind: document → document, chat → chat.
 	addLinkedCard(sourceId) {
 		const src = get().cards.find((c) => c.id === sourceId);
-		const pos = findOpenSpot(
-			get().cards,
-			sourceId,
-			DEFAULT_CARD_SIZE.width,
-			DEFAULT_CARD_SIZE.height,
-		);
+		const pos = findOpenSpot(get().cards, sourceId, DEFAULT_CARD_SIZE.width, DEFAULT_CARD_SIZE.height);
 		get().addCard(pos, sourceId, undefined, src?.kind ?? "chat");
 	},
 
@@ -570,6 +570,82 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	},
 	clearCardError(id) {
 		get().updateCard(id, { error: undefined });
+	},
+
+	// Server (pi's own queue) is ground truth — every path adopts the list it
+	// returns so the client mirror can never drift from what will execute.
+	queueToDraft(id, texts) {
+		if (texts.length === 0) return;
+		const cur = get().cards.find((c) => c.id === id);
+		const base = cur?.pendingDraft;
+		get().updateCard(id, {
+			pendingDraft: base ? `${base}\n\n${texts.join("\n\n")}` : texts.join("\n\n"),
+		});
+	},
+
+	async dropQueued(id, text) {
+		pushLog(id, `[cancel] click: "${text.slice(0, 30)}"`);
+		const res = await fetch(`/sessions/${id}/queue/remove`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ text }),
+		}).catch((e) => {
+			pushLog(id, `[cancel] network error: ${e instanceof Error ? e.message : e}`);
+			return null;
+		});
+		if (!res) return "failed";
+		if (res?.status === 404) {
+			// Only a definitive "unknown card" means the queue died with the
+			// server (app restart). A missing ROUTE on a stale server also
+			// 404s — clearing the queue there would silently drop live text.
+			const body = (await res.json().catch(() => ({}))) as { error?: string };
+			if (body.error === "unknown card") {
+				const cur = get().cards.find((c) => c.id === id);
+				const orphans = [...(cur?.queue ?? [])];
+				get().updateCard(id, { queue: [] });
+				if (orphans.length) get().queueToDraft(id, orphans);
+				pushLog(id, "⏳ server queue gone — text returned to composer");
+				return "dead";
+			}
+			pushLog(id, `[cancel] 404 stale-server body=${JSON.stringify(body)}`);
+			return "failed";
+		}
+		if (res?.status === 409) {
+			// Agent already consumed it — it's executing now. Resync the chip.
+			const d = (await res.json().catch(() => ({}))) as { followUp?: string[] };
+			get().updateCard(id, { queue: d.followUp ?? [] });
+			pushLog(id, `[cancel] 409 already executing, queue=${JSON.stringify(d.followUp ?? [])}`);
+			return "consumed";
+		}
+		if (!res?.ok) {
+			pushLog(id, `[cancel] failed HTTP ${res?.status ?? "?"}`);
+			return "failed";
+		}
+		const d = (await res.json()) as { followUp?: string[] };
+		get().updateCard(id, { queue: d.followUp ?? [] });
+		pushLog(id, `[cancel] ok, queue=${JSON.stringify(d.followUp ?? [])}`);
+		return "removed";
+	},
+
+	async syncQueued(id) {
+		const res = await fetch(`/sessions/${id}/queue`).catch(() => null);
+		// Network hiccup → keep the local mirror; a later sync or drop fixes it.
+		if (!res) return;
+		if (res.status === 404) {
+			// "unknown card" = server restarted, the queue died with it —
+			// orphan the text to the composer. Any other 404 (e.g. a stale
+			// server without this route) must NOT touch the queue.
+			const body = (await res.json().catch(() => ({}))) as { error?: string };
+			if (body.error !== "unknown card") return;
+			const cur = get().cards.find((c) => c.id === id);
+			const orphans = [...(cur?.queue ?? [])];
+			get().updateCard(id, { queue: [] });
+			if (orphans.length) get().queueToDraft(id, orphans);
+			return;
+		}
+		if (!res.ok) return;
+		const d = (await res.json()) as { followUp?: string[] };
+		get().updateCard(id, { queue: d.followUp ?? [] });
 	},
 
 	// One path for model changes — keeps UI and backend in sync always.
@@ -764,10 +840,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					sessionFile?: string;
 					sessionId?: string;
 					model?: string;
+					followUp?: string[];
 				};
 				get().updateCard(cardId, {
 					sessionFile: info.sessionFile,
 					model: info.model,
+					// Server-truth queue — reconciles the mirror after reload/reconnect.
+					queue: info.followUp ?? [],
 				});
 				attached.add(cardId);
 				pushLog(
@@ -823,7 +902,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					  }
 					| { type: "status"; status: "idle" | "streaming" | "error" }
 					| { type: "error"; message: string }
-					| { type: "context_usage"; tokens: number | null; contextWindow: number; percent: number | null };
+					| { type: "context_usage"; tokens: number | null; contextWindow: number; percent: number | null }
+					| { type: "queue"; followUp: string[] }
+					| { type: "user_message"; text: string };
 
 				// Batched mutation of the newest assistant message (~8fps, anti-flicker).
 				// Pending state lives on the STREAM (not this per-frame closure) so it
@@ -1051,27 +1132,30 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						st!.segSealed = false;
 						cancelFlush();
 						applyPending();
-						// Run finished. A queued follow-up starts right after —
-						// its agent_start moves it from the queue into the
-						// transcript, so keep the queue here.
+						// Queue is server-truth ({type:"queue"} events) — do not
+						// clear or pop here; consumption is detected server-side.
 						useCanvasStore.getState().updateCard(cardId, { status: "idle" });
 						return;
 					}
-					if (data.status === "streaming") {
-						// A run just started — if a message was queued while the
-						// previous run was active, THIS is when it begins
-						// executing. Land it in the transcript now.
-						const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
-						if (cur?.queue?.length) {
-							const [next, ...rest] = cur.queue;
-							useCanvasStore.getState().updateCard(cardId, {
-								messages: [...cur.messages, { role: "user", text: next }],
-								queue: rest,
-							});
-						}
-					}
 					useCanvasStore.getState().updateCard(cardId, {
 						status: data.status,
+					});
+				} else if ((data as { type: string }).type === "queue") {
+					// Server-truth queue sync — the server owns the queue, the card
+					// only mirrors it. No diffing, no client-side bookkeeping.
+					const q = data as { followUp?: string[] };
+					pushLog(cardId, `[queue-sync] server list=${JSON.stringify(q.followUp ?? [])}`);
+					useCanvasStore.getState().updateCard(cardId, { queue: q.followUp ?? [] });
+				} else if ((data as { type: string }).type === "user_message") {
+					// A queued message just reached the model (drain started it).
+					// Direct sends are appended optimistically — skip the echo.
+					const um = data as { text: string };
+					const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+					if (!cur) return;
+					const last = cur.messages[cur.messages.length - 1];
+					if (last?.role === "user" && last.text === um.text) return;
+					useCanvasStore.getState().updateCard(cardId, {
+						messages: [...cur.messages, { role: "user", text: um.text }],
 					});
 				} else if (data.type === "context_usage") {
 					useCanvasStore.getState().updateCard(cardId, {
@@ -1088,12 +1172,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					get().setCardError(cardId, msg ?? "agent error");
 					const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
 					const queuedBack = cur?.queue ?? [];
-					useCanvasStore.getState().updateCard(cardId, {
-						status: "error",
-						// Queued text never reached the agent — hand it back.
-						queue: [],
-						pendingDraft: queuedBack.length ? queuedBack.join("\n\n") : undefined,
-					});
+					useCanvasStore.getState().updateCard(cardId, { status: "error", queue: [] });
+					if (queuedBack.length) {
+						// The server queue holds these too — clear it or they would
+						// execute as zombies on the next prompt. Server list wins.
+						void fetch(`/sessions/${cardId}/queue/clear`, { method: "POST" })
+							.then((r) => (r.ok ? (r.json() as Promise<{ followUp?: string[] }>) : null))
+							.then((cleared) => get().queueToDraft(cardId, cleared?.followUp ?? queuedBack))
+							.catch(() => get().queueToDraft(cardId, queuedBack));
+					}
 				}
 			};
 			es.onerror = () => {
@@ -1103,14 +1190,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				attached.delete(cardId);
 				// The run's outcome is now unknowable — release the Stop button
 				// instead of leaving the card stuck on streaming forever. Queued
-				// text never reached the transcript — hand it back.
+				// text never reached the transcript — hand it back (server wins).
 				const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
 				const queuedBack = cur?.queue ?? [];
-				useCanvasStore.getState().updateCard(cardId, {
-					status: "idle",
-					queue: [],
-					pendingDraft: queuedBack.length ? queuedBack.join("\n\n") : undefined,
-				});
+				useCanvasStore.getState().updateCard(cardId, { status: "idle", queue: [] });
+				if (queuedBack.length) {
+					fetch(`/sessions/${cardId}/queue/clear`, { method: "POST" })
+						.then((r) => (r.ok ? (r.json() as Promise<{ followUp?: string[] }>) : null))
+						.then((cleared) => get().queueToDraft(cardId, cleared?.followUp ?? queuedBack))
+						.catch(() => get().queueToDraft(cardId, queuedBack));
+				}
 			};
 		} else {
 			st.buffer = "";
@@ -1147,8 +1236,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const pj = (await pres.json().catch(() => ({}))) as { queued?: boolean };
 		if (pj.queued) {
 			pushLog(cardId, "⏳ agent busy — message queued (renders when its run starts)");
-			const cur = get().cards.find((c) => c.id === cardId);
-			get().updateCard(cardId, { queue: [...(cur?.queue ?? []), text] });
+			// NO local append here: the server broadcasts the authoritative
+			// `queue` frame BEFORE this response arrives, and both landing set
+			// the state — an append on top of the frame DUPLICATES the item
+			// (seen as every queued chip rendering twice).
 			return true;
 		}
 		// Accepted immediately — NOW it lands in the transcript.
