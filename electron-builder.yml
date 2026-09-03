@@ -8,6 +8,8 @@ files:
     - static-server.mjs
     - server/**/*
     - web-dist/**/*
+asarUnpack:
+    - server/node_modules/**/*
 mac:
     target: dmg
     category: public.app-category.developer-tools
