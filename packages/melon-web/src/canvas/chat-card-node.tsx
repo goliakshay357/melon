@@ -805,9 +805,13 @@ function ChatCardNodeInner({
     const footerInput = (
         <div className={cn('shrink-0 border-t border-border p-2', maximized && 'px-4')}>
             {(card.queue?.length ?? 0) > 0 && (
-                <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-amber-500/90">
-                    ⏳ {card.queue!.length} queued — sends after current run finishes
-                </p>
+                <div className="mb-1.5 space-y-0.5">
+                    {card.queue!.map((q, i) => (
+                        <p key={i} className="truncate text-[11px] text-amber-500/90" title={q}>
+                            ⏳ queued — runs after the current answer: {q}
+                        </p>
+                    ))}
+                </div>
             )}
             <PromptComposer
                 value={draft}

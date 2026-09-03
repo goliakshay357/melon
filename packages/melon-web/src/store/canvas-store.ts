@@ -727,21 +727,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			get().setCardError(cardId, "Choose a folder before starting a session.");
 			return false;
 		}
-		// Snapshot for rollback — the user's text is never lost.
-		const messagesBefore = [...card.messages];
-		get().updateCard(cardId, {
-			status: "streaming",
-			error: undefined,
-			title: card.messages.length === 0 ? text.slice(0, 40) : card.title,
-			messages: [...card.messages, { role: "user", text }],
-		});
+		// The user message is NOT appended here — if the agent is busy the
+		// server queues it (pi followUp) and it must only land in the
+		// transcript when its run actually starts (agent_start pops it from
+		// card.queue). Rendering upfront made the message look sent while
+		// the AI was still answering the previous prompt.
+		const prevStatus = card.status;
+		const isFirstMessage = card.messages.length === 0;
+		get().updateCard(cardId, { status: "streaming", error: undefined });
 		const rollback = (why: string) => {
-			pushLog(cardId, `✗ ${why} — input restored`);
-			get().updateCard(cardId, {
-				status: "idle",
-				messages: messagesBefore,
-				queue: [],
-			});
+			pushLog(cardId, `✗ ${why}`);
+			get().updateCard(cardId, { status: prevStatus });
 		};
 
 		// ── 1. attach (idempotent, resume-first) ──
@@ -1055,12 +1051,24 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						st!.segSealed = false;
 						cancelFlush();
 						applyPending();
-						// Run finished → queued messages have been consumed.
-						useCanvasStore.getState().updateCard(cardId, {
-							status: "idle",
-							queue: [],
-						});
+						// Run finished. A queued follow-up starts right after —
+						// its agent_start moves it from the queue into the
+						// transcript, so keep the queue here.
+						useCanvasStore.getState().updateCard(cardId, { status: "idle" });
 						return;
+					}
+					if (data.status === "streaming") {
+						// A run just started — if a message was queued while the
+						// previous run was active, THIS is when it begins
+						// executing. Land it in the transcript now.
+						const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+						if (cur?.queue?.length) {
+							const [next, ...rest] = cur.queue;
+							useCanvasStore.getState().updateCard(cardId, {
+								messages: [...cur.messages, { role: "user", text: next }],
+								queue: rest,
+							});
+						}
 					}
 					useCanvasStore.getState().updateCard(cardId, {
 						status: data.status,
@@ -1078,9 +1086,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					pushLog(cardId, `✗ agent error: ${msg ?? "unknown"}`);
 					if (msg) pushEvent(cardId, { kind: "system", name: "error", detail: msg.slice(0, 300) });
 					get().setCardError(cardId, msg ?? "agent error");
+					const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+					const queuedBack = cur?.queue ?? [];
 					useCanvasStore.getState().updateCard(cardId, {
 						status: "error",
+						// Queued text never reached the agent — hand it back.
 						queue: [],
+						pendingDraft: queuedBack.length ? queuedBack.join("\n\n") : undefined,
 					});
 				}
 			};
@@ -1090,8 +1102,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				streams.delete(cardId);
 				attached.delete(cardId);
 				// The run's outcome is now unknowable — release the Stop button
-				// instead of leaving the card stuck on streaming forever.
-				useCanvasStore.getState().updateCard(cardId, { status: "idle" });
+				// instead of leaving the card stuck on streaming forever. Queued
+				// text never reached the transcript — hand it back.
+				const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+				const queuedBack = cur?.queue ?? [];
+				useCanvasStore.getState().updateCard(cardId, {
+					status: "idle",
+					queue: [],
+					pendingDraft: queuedBack.length ? queuedBack.join("\n\n") : undefined,
+				});
 			};
 		} else {
 			st.buffer = "";
@@ -1127,10 +1146,18 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}
 		const pj = (await pres.json().catch(() => ({}))) as { queued?: boolean };
 		if (pj.queued) {
-			pushLog(cardId, "⏳ agent busy — message queued");
+			pushLog(cardId, "⏳ agent busy — message queued (renders when its run starts)");
 			const cur = get().cards.find((c) => c.id === cardId);
 			get().updateCard(cardId, { queue: [...(cur?.queue ?? []), text] });
+			return true;
 		}
+		// Accepted immediately — NOW it lands in the transcript.
+		const cur = get().cards.find((c) => c.id === cardId);
+		get().updateCard(cardId, {
+			status: "streaming",
+			title: isFirstMessage ? text.slice(0, 40) : card.title,
+			messages: [...(cur?.messages ?? []), { role: "user", text }],
+		});
 		return true;
 	},
 }));

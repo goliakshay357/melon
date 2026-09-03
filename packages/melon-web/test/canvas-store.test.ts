@@ -176,6 +176,54 @@ it("places a forked card to the right of its parent, not on top", async () => {
 	expect(child?.size).toEqual({ width: 480, height: 520 });
 });
 
+it("renders a queued message only when its run actually starts", async () => {
+	useCanvasStore.getState().addCard({ x: 0, y: 0 });
+	const cardId = useCanvasStore.getState().cards[0].id;
+
+	await useCanvasStore.getState().sendMessage(cardId, "first");
+	const es = FakeEventSource.latest;
+	es?.emit({ type: "status", status: "streaming" });
+	es?.emit({ type: "delta", text: "answering first" });
+	await sleep(250); // flush batched delta patches
+
+	// Agent busy → server queues via pi followUp and replies queued: true.
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (url: string, init?: any) => {
+			fetchCalls.push(`${init?.method ?? "GET"} ${url}`);
+			return {
+				ok: true,
+				status: 200,
+				json: async () => (url.includes("/prompt") ? { ok: true, queued: true } : {}),
+			} as Response;
+		}),
+	);
+
+	await useCanvasStore.getState().sendMessage(cardId, "while busy");
+
+	let card = useCanvasStore.getState().cards.find((c) => c.id === cardId) as SessionCard;
+	// Queued message must NOT be in the transcript yet — only in the queue.
+	expect(card.messages.map((m) => m.role)).toEqual(["user", "assistant"]);
+	expect(card.queue).toEqual(["while busy"]);
+
+	// Current run ends, follow-up run starts → the queued message lands NOW.
+	es?.emit({ type: "turn_end", stopReason: "stop" });
+	es?.emit({ type: "status", status: "idle" });
+	es?.emit({ type: "status", status: "streaming" });
+	es?.emit({ type: "delta", text: "answer to queued" });
+	es?.emit({ type: "status", status: "idle" });
+	await sleep(250);
+
+	card = useCanvasStore.getState().cards.find((c) => c.id === cardId) as SessionCard;
+	expect(card.queue).toEqual([]);
+	expect(card.messages.map((m) => `${m.role}:${m.text}`)).toEqual([
+		"user:first",
+		"assistant:answering first",
+		"user:while busy",
+		"assistant:answer to queued",
+	]);
+});
+
 it("keeps an empty canvas after choosing a folder that already has canvases", async () => {
 	vi.stubGlobal(
 		"fetch",
