@@ -26,7 +26,15 @@ import {
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
-import { expandHome, loadConfig, type MelonConfig, modelToString, preview } from "./config.ts";
+import {
+	expandHome,
+	loadConfig,
+	type MelonConfig,
+	modelToString,
+	preview,
+	structuredToolArgs,
+	toolTextPreview,
+} from "./config.ts";
 import {
 	CURSOR_PROVIDER_ID,
 	cursorExtensionPath,
@@ -44,6 +52,13 @@ import {
 	touchRecentModel,
 } from "./settings.ts";
 import { deleteSkill, loadSkills, materializeSkills, readSkill, saveSkill } from "./skills.ts";
+import {
+	isMutationTool,
+	mutationDiffOutput,
+	readFileSnapshot,
+	resolveToolPath,
+} from "./tool-diff.ts";
+import { lookupToolDiff, saveToolDiff } from "./tool-diff-store.ts";
 
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
@@ -239,6 +254,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	function wireEvents(cardId: string, runtime: any): void {
 		let deltaCount = 0;
 		const toolTimers = new Map<string, number>();
+		/** Pre-mutation file snapshots so write/edit cards can show a real diff. */
+		const mutationSnaps = new Map<string, { before: string; args: unknown; toolName: string }>();
 		// Live context-window fill: broadcast on a 2s throttle while the turn
 		// streams, and force a final one on agent_end.
 		let ctxLast = 0;
@@ -376,24 +393,71 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					broadcastCtx(true);
 				} else if (event.type === "tool_execution_start") {
 					toolTimers.set(event.toolCallId, Date.now());
+					if (isMutationTool(event.toolName)) {
+						try {
+							const cwd = String(runtime.session.sessionManager.getCwd?.() ?? "");
+							const abs = cwd ? resolveToolPath(cwd, event.args) : undefined;
+							if (abs) {
+								mutationSnaps.set(event.toolCallId, {
+									before: readFileSnapshot(abs),
+									args: event.args,
+									toolName: event.toolName,
+								});
+							}
+						} catch {
+							/* snapshot is best-effort */
+						}
+					}
 					registry.broadcast(cardId, {
 						type: "tool_start",
 						callId: event.toolCallId,
 						name: event.toolName,
 						args: preview(event.args),
+						argsStructured: structuredToolArgs(event.args),
 					});
 				} else if (event.type === "tool_execution_update") {
 					registry.broadcast(cardId, {
 						type: "tool_update",
 						callId: event.toolCallId,
-						output: preview(event.partialResult),
+						output: toolTextPreview(event.partialResult),
 					});
 				} else if (event.type === "tool_execution_end") {
+					let output = toolTextPreview(event.result);
+					const snap = mutationSnaps.get(event.toolCallId);
+					mutationSnaps.delete(event.toolCallId);
+					if (snap && !event.isError) {
+						try {
+							const cwd = String(runtime.session.sessionManager.getCwd?.() ?? "");
+							if (cwd) {
+								output = mutationDiffOutput({
+									cwd,
+									toolName: snap.toolName,
+									args: snap.args,
+									before: snap.before,
+									fallbackText: output,
+								});
+							}
+						} catch {
+							/* keep plain success text */
+						}
+					}
+					// Persist Melon-enriched output so reopen/hydrate still shows diffs.
+					// Past sessions without a sidecar stay as plain transcript text.
+					if (snap && !event.isError) {
+						try {
+							const sessionFile = runtime.session.sessionManager.getSessionFile?.();
+							if (typeof sessionFile === "string" && sessionFile) {
+								saveToolDiff(sessionFile, event.toolCallId, output);
+							}
+						} catch {
+							/* non-fatal */
+						}
+					}
 					registry.broadcast(cardId, {
 						type: "tool_end",
 						callId: event.toolCallId,
 						isError: event.isError,
-						output: preview(event.result),
+						output,
 					});
 					broadcastCtx();
 				}
@@ -1163,6 +1227,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					.map((b: any) => b.text)
 					.join("");
 			const messages: any[] = [];
+			const pendingToolArgs = new Map<string, Record<string, unknown>>();
 			for (const e of ctx) {
 				if (e.type !== "message") continue;
 				const m: any = e.message;
@@ -1175,6 +1240,13 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					for (const b of m.content ?? []) {
 						if (b.type === "text") text += b.text;
 						else if (b.type === "thinking") thinking += b.thinking ?? "";
+						else if (
+							(b.type === "toolCall" || b.type === "toolUse" || b.type === "tool_use") &&
+							typeof b.id === "string"
+						) {
+							const structured = structuredToolArgs(b.arguments ?? b.input ?? b.args);
+							if (structured) pendingToolArgs.set(b.id, structured);
+						}
 					}
 					if (text.trim() || thinking.trim())
 						messages.push({
@@ -1187,11 +1259,16 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					if (lastA) {
 						lastA.tools = lastA.tools ?? [];
 						if (!lastA.tools.some((t: any) => t.callId === m.toolCallId)) {
+							const argsStructured = pendingToolArgs.get(m.toolCallId);
+							pendingToolArgs.delete(m.toolCallId);
+							const persisted = lookupToolDiff(file, m.toolCallId);
 							lastA.tools.push({
 								callId: m.toolCallId,
 								name: m.toolName ?? "tool",
 								status: m.isError ? "error" : "ok",
-								output: textOf(m.content).slice(0, 4000),
+								output: persisted ?? textOf(m.content).slice(0, 8000),
+								argsStructured,
+								args: argsStructured ? preview(argsStructured) : undefined,
 							});
 						}
 					}

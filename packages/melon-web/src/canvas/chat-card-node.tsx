@@ -12,6 +12,7 @@ import { Bug, ChevronDown, Copy, Minimize2, Pencil, Plus, X } from 'lucide-react
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { PromptComposer } from '@/components/prompt-composer';
+import { ToolRunBlock } from '@/components/tool-run-block';
 import { DEFAULT_CARD_SIZE, type TraceEvent } from '@/types/session-card';
 import { cn } from '@/lib/utils';
 
@@ -43,7 +44,14 @@ type MessageShape = {
     role: string;
     text: string;
     thinking?: string;
-    tools?: Array<{ callId: string; name: string; status: string; args?: string; output: string }>;
+    tools?: Array<{
+        callId: string;
+        name: string;
+        status: string;
+        args?: string;
+        argsStructured?: Record<string, unknown>;
+        output: string;
+    }>;
 };
 
 // MODULE-LEVEL + memoized: a stable component identity means React reconciles
@@ -83,7 +91,18 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
                 />
             )}
             {(m.tools ?? []).map((t) => (
-                <ToolRunBlock key={t.callId} cardId={cardId} run={t as never} />
+                <ToolRunBlock
+                    key={t.callId}
+                    cardId={cardId}
+                    run={{
+                        callId: t.callId,
+                        name: t.name,
+                        status: (t.status as 'running' | 'ok' | 'error') || 'ok',
+                        args: t.args,
+                        argsStructured: t.argsStructured,
+                        output: t.output,
+                    }}
+                />
             ))}
             {isStreamingTail ? (
                 <StreamText content={m.text} />
@@ -139,72 +158,6 @@ function ThinkingBlock({
                 <div className="nowheel max-h-56 overflow-y-auto whitespace-pre-wrap border-t border-border/50 px-2.5 py-1.5 text-[10px] italic leading-relaxed text-muted-foreground">
                     {text || '…'}
                 </div>
-            )}
-        </div>
-    );
-}
-
-// ── ⚙ Tool run ───────────────────────────────────────────────────────────
-function ToolRunBlock({ cardId, run }: { cardId: string; run: {
-    callId: string;
-    name: string;
-    status: 'running' | 'ok' | 'error';
-    args?: string;
-    output: string;
-} }) {
-    const key = `${cardId}:tool:${run.callId}`;
-    const [open, setOpen] = useState(() => uiFlag(key, run.status === 'running'));
-    const prevStatus = useRef(run.status);
-    const autoControlled = useRef(true);
-
-    useEffect(() => {
-        if (prevStatus.current === 'running' && run.status !== 'running' && autoControlled.current) {
-            setOpen(false);
-            setUiFlag(key, false);
-        }
-        prevStatus.current = run.status;
-    }, [run.status]);
-
-    const toggle = () => {
-        autoControlled.current = false;
-        const next = !open;
-        setOpen(next);
-        setUiFlag(key, next);
-    };
-
-    return (
-        <div className="overflow-hidden rounded-lg border border-border/70 bg-[#21222c]">
-            <button
-                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left font-mono text-[10px]"
-                onClick={toggle}
-            >
-                {run.status === 'running' ? (
-                    <Spinner />
-                ) : run.status === 'error' ? (
-                    <span className="text-[#ff5555]">✗</span>
-                ) : (
-                    <span className="text-[#50fa7b]">✓</span>
-                )}
-                <span className="font-semibold text-[#f8f8f2]">{run.name}</span>
-                <span className="ml-auto opacity-60">
-                    {run.status === 'running'
-                        ? 'running…'
-                        : `${run.output.split('\n').length} lines`}
-                </span>
-            </button>
-            {open && (
-                <>
-                    {run.args && (
-                        <pre className="m-0 whitespace-pre-wrap border-t border-border/40 px-2.5 py-1 text-[10px] leading-relaxed text-muted-foreground">
-                            $ {run.args}
-                        </pre>
-                    )}
-                    {run.output && (
-                        <pre className="nowheel m-0 max-h-64 overflow-auto whitespace-pre-wrap border-t border-border/40 px-2.5 py-1.5 text-[10px] leading-relaxed text-[#f8f8f2]">
-                            {run.output || '(no output)'}
-                        </pre>
-                    )}
-                </>
             )}
         </div>
     );

@@ -10,5 +10,12 @@ export declare function loadConfig(overrides?: Partial<MelonConfig>): MelonConfi
 export declare function expandHome(dir: string): string;
 /** Truncated string/JSON preview for tool payloads. */
 export declare function preview(value: unknown, max?: number): string;
+/**
+ * Compact tool args for the Melon GUI (path/command/pattern/etc.).
+ * Drops huge body fields so the client does not re-parse truncated JSON.
+ */
+export declare function structuredToolArgs(args: unknown): Record<string, unknown> | undefined;
+/** Prefer plain text from tool results; fall back to JSON preview. */
+export declare function toolTextPreview(value: unknown, max?: number): string;
 export declare function modelToString(model: unknown): string;
 //# sourceMappingURL=config.d.ts.map

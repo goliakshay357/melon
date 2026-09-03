@@ -883,7 +883,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				const data = JSON.parse(ev.data as string) as
 					| { type: "delta"; text: string }
 					| { type: "thinking"; text: string }
-					| { type: "tool_start"; callId: string; name: string; args?: string }
+					| {
+							type: "tool_start";
+							callId: string;
+							name: string;
+							args?: string;
+							argsStructured?: Record<string, unknown>;
+					  }
 					| { type: "tool_update"; callId: string; output: string }
 					| {
 							type: "tool_end";
@@ -1022,6 +1028,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 							callId: data.callId,
 							name: data.name,
 							args: data.args,
+							argsStructured: data.argsStructured,
 							output: "",
 						},
 						true,

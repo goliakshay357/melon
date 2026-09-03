@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": { "title": "Cursor Plug-In", "quality_profile": "showcase" },
+  "components": [
+    {"id":"app","type":"cloud","label":"Melon Desktop","sublabel":"Electron shell","pos":[100,80],"size":[200,60]},
+    {"id":"mrt","type":"backend","label":"ModelRuntime","sublabel":"core engine","pos":[400,80],"size":[200,60]},
+    {"id":"auth","type":"database","label":"auth.json","sublabel":"cursor key stored here","pos":[700,80],"size":[200,60]}
+  ],
+  "connections": [
+    {"from":"app","to":"mrt","label":"bundled SDK -> registerProvider('cursor')","labelAt":[250,150]},
+    {"from":"mrt","to":"auth","label":"reads/writes API key","labelAt":[550,150]}
+  ],
+  "cards": [
+    {"dot":"cyan","title":"Plug-in Path","items":["Desktop bundles pi-cursor-sdk","SDK registers cursor provider","GUI key -> auth.json -> session loads key"]}
+  ]
+}

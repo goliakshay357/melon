@@ -169,3 +169,119 @@
     width: 0;
     height: 0;
 }
+
+/* ── Tool run cards (Melon GUI pretty output) ── */
+.tool-out-line {
+    color: #f8f8f2;
+}
+.tool-out-add {
+    color: #50fa7b;
+    background: rgba(80, 250, 123, 0.08);
+}
+.tool-out-del {
+    color: #ff5555;
+    background: rgba(255, 85, 85, 0.08);
+}
+.tool-out-meta {
+    color: #6272a4;
+}
+.tool-out-dir {
+    color: #8be9fd;
+    font-weight: 600;
+}
+.tool-out-err {
+    color: #ffb86c;
+}
+
+.tool-diff-gutter {
+    color: #6272a4;
+    min-width: 1.75rem;
+    background: rgba(0, 0, 0, 0.18);
+}
+.tool-out-add .tool-diff-gutter,
+.tool-out-del .tool-diff-gutter {
+    background: transparent;
+}
+.tool-diff-sign {
+    color: inherit;
+    opacity: 0.9;
+}
+.tool-diff-empty {
+    background: rgba(0, 0, 0, 0.12);
+    color: transparent;
+}
+
+.tool-prism-lnum {
+    color: #6272a4;
+    opacity: 0.85;
+}
+
+/* Prism token colors (Dracula-ish, matches Melon tool cards) */
+.tool-prism .token.comment,
+.tool-prism .token.prolog,
+.tool-prism .token.doctype,
+.tool-prism .token.cdata {
+    color: #6272a4;
+}
+.tool-prism .token.punctuation {
+    color: #f8f8f2;
+}
+.tool-prism .token.property,
+.tool-prism .token.tag,
+.tool-prism .token.constant,
+.tool-prism .token.symbol,
+.tool-prism .token.deleted {
+    color: #ff79c6;
+}
+.tool-prism .token.boolean,
+.tool-prism .token.number {
+    color: #bd93f9;
+}
+.tool-prism .token.selector,
+.tool-prism .token.attr-name,
+.tool-prism .token.string,
+.tool-prism .token.char,
+.tool-prism .token.builtin,
+.tool-prism .token.inserted {
+    color: #f1fa8c;
+}
+.tool-prism .token.operator,
+.tool-prism .token.entity,
+.tool-prism .token.url,
+.tool-prism .language-css .token.string,
+.tool-prism .style .token.string,
+.tool-prism .token.variable {
+    color: #f8f8f2;
+}
+.tool-prism .token.atrule,
+.tool-prism .token.attr-value,
+.tool-prism .token.function,
+.tool-prism .token.class-name {
+    color: #50fa7b;
+}
+.tool-prism .token.keyword {
+    color: #ff79c6;
+}
+.tool-prism .token.regex,
+.tool-prism .token.important {
+    color: #ffb86c;
+}
+
+.shimmer-text {
+    background: linear-gradient(
+        90deg,
+        hsl(var(--muted-foreground)) 0%,
+        hsl(var(--foreground)) 45%,
+        hsl(var(--muted-foreground)) 90%
+    );
+    background-size: 200% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: melon-shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes melon-shimmer {
+    0% { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
+}

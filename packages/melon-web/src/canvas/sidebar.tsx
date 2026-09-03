@@ -29,6 +29,7 @@ export function Sidebar() {
     const [openCanvasSessions, setOpenCanvasSessions] = useState<Set<string>>(new Set());
     const [pickingNative, setPickingNative] = useState(false);
     const activeView = useCanvasStore((s) => s.activeView);
+    const cards = useCanvasStore((s) => s.cards);
     const setActiveView = useCanvasStore((s) => s.setActiveView);
     const openView = (v: 'skills' | 'themes') => {
         setActiveView(v);
@@ -240,26 +241,34 @@ export function Sidebar() {
                                     Recent canvases
                                 </p>
                                 <div className="mb-2 space-y-0.5 pb-2">
-                                    {recent.map((cv) => (
-                                        <button
-                                            key={`${cv.cwd}::${cv.id}`}
-                                            className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left transition-colors hover:bg-secondary/70"
-                                            title={`${cv.name} — ${cv.folderName}`}
-                                            onClick={() => {
-                                                if (folder !== cv.cwd)
-                                                    openFolder(cv.cwd).then(() => switchCanvas(cv.id));
-                                                else switchCanvas(cv.id);
-                                            }}
-                                        >
-                                            <Layers className="size-3 shrink-0 text-muted-foreground" />
-                                            <span className="min-w-0 flex-1 truncate text-xs text-card-foreground">
-                                                {cv.name}
-                                            </span>
-                                            <span className="shrink-0 truncate text-[9px] text-muted-foreground">
-                                                📁 {cv.folderName}
-                                            </span>
-                                        </button>
-                                    ))}
+                                    {recent.map((cv) => {
+                                        const isActive = folder === cv.cwd && cv.id === canvasId;
+                                        return (
+                                            <button
+                                                key={`${cv.cwd}::${cv.id}`}
+                                                className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left transition-colors hover:bg-secondary/70"
+                                                title={`${cv.name} — ${cv.folderName}`}
+                                                onClick={() => {
+                                                    if (folder !== cv.cwd)
+                                                        openFolder(cv.cwd).then(() => switchCanvas(cv.id));
+                                                    else switchCanvas(cv.id);
+                                                }}
+                                            >
+                                                <Layers className="size-3 shrink-0 text-muted-foreground" />
+                                                <span className="min-w-0 flex-1 truncate text-xs text-card-foreground">
+                                                    {cv.name}
+                                                    {isActive && (cards.some((c) => c.status === "streaming") ? (
+                                                        <span className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-amber-400" title="AI is running" />
+                                                    ) : cards.some((c) => c.status === "error") ? (
+                                                        <span className="ml-1 inline-block size-1.5 rounded-full bg-red-500" title="Error" />
+                                                    ) : null)}
+                                                </span>
+                                                <span className="shrink-0 truncate text-[9px] text-muted-foreground">
+                                                    📁 {cv.folderName}
+                                                </span>
+                                            </button>
+                                        );
+                                    })}
                                 </div>
                             </>
                         )}
@@ -375,6 +384,11 @@ export function Sidebar() {
                                                                 }}
                                                             >
                                                                 {cv.name}
+                                                                {isActive && (cards.some((c) => c.status === "streaming") ? (
+                                                                    <span className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-amber-400" title="AI is running" />
+                                                                ) : cards.some((c) => c.status === "error") ? (
+                                                                    <span className="ml-1 inline-block size-1.5 rounded-full bg-red-500" title="Error" />
+                                                                ) : null)}
                                                             </span>
                                                             <span className="shrink-0 rounded-full bg-secondary px-1.5 text-[9px] tabular-nums text-muted-foreground">
                                                                 {cv.sessions.length}

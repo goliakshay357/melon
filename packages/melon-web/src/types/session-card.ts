@@ -20,8 +20,10 @@ export interface ToolRun {
 	callId: string;
 	name: string;
 	status: "running" | "ok" | "error";
-	/** Invocation arguments (stable for the whole run). */
+	/** Invocation arguments as a truncated display string. */
 	args?: string;
+	/** Compact structured args (path/command/…) for pretty headers. */
+	argsStructured?: Record<string, unknown>;
 	/** Latest known output — pi sends cumulative snapshots, so this REPLACES. */
 	output: string;
 }

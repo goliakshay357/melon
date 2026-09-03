@@ -18,11 +18,13 @@ import { createAgentSessionFromServices, createAgentSessionRuntime, createAgentS
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
-import { expandHome, loadConfig, modelToString, preview } from "./config.js";
+import { expandHome, loadConfig, modelToString, preview, structuredToolArgs, toolTextPreview, } from "./config.js";
 import { CURSOR_PROVIDER_ID, cursorExtensionPath, hasRealCursorKey, loadCursorProviderInto, rewriteCursorError, } from "./cursor-extension.js";
 import { SessionRegistry } from "./session-registry.js";
 import { clearProviderDenylist, denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel, } from "./settings.js";
 import { deleteSkill, loadSkills, materializeSkills, readSkill, saveSkill } from "./skills.js";
+import { isMutationTool, mutationDiffOutput, readFileSnapshot, resolveToolPath, } from "./tool-diff.js";
+import { lookupToolDiff, saveToolDiff } from "./tool-diff-store.js";
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
 function splitModel(model) {
@@ -30,6 +32,26 @@ function splitModel(model) {
     if (idx <= 0)
         return ["", ""];
     return [model.slice(0, idx), model.slice(idx + 1)];
+}
+/**
+ * Product version shown in Settings and stamped into release artifacts.
+ * Prefer MELON_VERSION (CI/local override), else the nearest package.json:
+ * packaged Electron → desktop/package.json; standalone server → melon-server.
+ */
+export function readAppVersion() {
+    const fromEnv = process.env.MELON_VERSION?.trim();
+    if (fromEnv)
+        return fromEnv;
+    try {
+        const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+        const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
+        if (typeof pkg.version === "string" && pkg.version.trim())
+            return pkg.version.trim();
+    }
+    catch {
+        /* fall through */
+    }
+    return "0.0.0";
 }
 let _modelRuntime;
 async function getModelRuntime() {
@@ -181,6 +203,8 @@ export async function buildApp(deps = {}) {
     function wireEvents(cardId, runtime) {
         let deltaCount = 0;
         const toolTimers = new Map();
+        /** Pre-mutation file snapshots so write/edit cards can show a real diff. */
+        const mutationSnaps = new Map();
         // Live context-window fill: broadcast on a 2s throttle while the turn
         // streams, and force a final one on agent_end.
         let ctxLast = 0;
@@ -335,26 +359,76 @@ export async function buildApp(deps = {}) {
                 }
                 else if (event.type === "tool_execution_start") {
                     toolTimers.set(event.toolCallId, Date.now());
+                    if (isMutationTool(event.toolName)) {
+                        try {
+                            const cwd = String(runtime.session.sessionManager.getCwd?.() ?? "");
+                            const abs = cwd ? resolveToolPath(cwd, event.args) : undefined;
+                            if (abs) {
+                                mutationSnaps.set(event.toolCallId, {
+                                    before: readFileSnapshot(abs),
+                                    args: event.args,
+                                    toolName: event.toolName,
+                                });
+                            }
+                        }
+                        catch {
+                            /* snapshot is best-effort */
+                        }
+                    }
                     registry.broadcast(cardId, {
                         type: "tool_start",
                         callId: event.toolCallId,
                         name: event.toolName,
                         args: preview(event.args),
+                        argsStructured: structuredToolArgs(event.args),
                     });
                 }
                 else if (event.type === "tool_execution_update") {
                     registry.broadcast(cardId, {
                         type: "tool_update",
                         callId: event.toolCallId,
-                        output: preview(event.partialResult),
+                        output: toolTextPreview(event.partialResult),
                     });
                 }
                 else if (event.type === "tool_execution_end") {
+                    let output = toolTextPreview(event.result);
+                    const snap = mutationSnaps.get(event.toolCallId);
+                    mutationSnaps.delete(event.toolCallId);
+                    if (snap && !event.isError) {
+                        try {
+                            const cwd = String(runtime.session.sessionManager.getCwd?.() ?? "");
+                            if (cwd) {
+                                output = mutationDiffOutput({
+                                    cwd,
+                                    toolName: snap.toolName,
+                                    args: snap.args,
+                                    before: snap.before,
+                                    fallbackText: output,
+                                });
+                            }
+                        }
+                        catch {
+                            /* keep plain success text */
+                        }
+                    }
+                    // Persist Melon-enriched output so reopen/hydrate still shows diffs.
+                    // Past sessions without a sidecar stay as plain transcript text.
+                    if (snap && !event.isError) {
+                        try {
+                            const sessionFile = runtime.session.sessionManager.getSessionFile?.();
+                            if (typeof sessionFile === "string" && sessionFile) {
+                                saveToolDiff(sessionFile, event.toolCallId, output);
+                            }
+                        }
+                        catch {
+                            /* non-fatal */
+                        }
+                    }
                     registry.broadcast(cardId, {
                         type: "tool_end",
                         callId: event.toolCallId,
                         isError: event.isError,
-                        output: preview(event.result),
+                        output,
                     });
                     broadcastCtx();
                 }
@@ -819,10 +893,12 @@ export async function buildApp(deps = {}) {
         return { models, total: models.length };
     });
     // Liveness probe — the frontend polls this to clear the "reconnecting" banner.
+    // `version` is the same identity stamped into DMG/AppImage/exe filenames.
     app.get("/healthz", async () => ({
         ok: true,
         uptime: Math.round(process.uptime()),
         model: getDefaultModel(config.defaultModel),
+        version: readAppVersion(),
     }));
     // Serve an agent-authored visualization HTML file for the viz-file iframe.
     // Guard: absolute path required; must resolve inside the session's cwd
@@ -1111,6 +1187,7 @@ export async function buildApp(deps = {}) {
                 .map((b) => b.text)
                 .join("");
             const messages = [];
+            const pendingToolArgs = new Map();
             for (const e of ctx) {
                 if (e.type !== "message")
                     continue;
@@ -1128,6 +1205,12 @@ export async function buildApp(deps = {}) {
                             text += b.text;
                         else if (b.type === "thinking")
                             thinking += b.thinking ?? "";
+                        else if ((b.type === "toolCall" || b.type === "toolUse" || b.type === "tool_use") &&
+                            typeof b.id === "string") {
+                            const structured = structuredToolArgs(b.arguments ?? b.input ?? b.args);
+                            if (structured)
+                                pendingToolArgs.set(b.id, structured);
+                        }
                     }
                     if (text.trim() || thinking.trim())
                         messages.push({
@@ -1141,11 +1224,16 @@ export async function buildApp(deps = {}) {
                     if (lastA) {
                         lastA.tools = lastA.tools ?? [];
                         if (!lastA.tools.some((t) => t.callId === m.toolCallId)) {
+                            const argsStructured = pendingToolArgs.get(m.toolCallId);
+                            pendingToolArgs.delete(m.toolCallId);
+                            const persisted = lookupToolDiff(file, m.toolCallId);
                             lastA.tools.push({
                                 callId: m.toolCallId,
                                 name: m.toolName ?? "tool",
                                 status: m.isError ? "error" : "ok",
-                                output: textOf(m.content).slice(0, 4000),
+                                output: persisted ?? textOf(m.content).slice(0, 8000),
+                                argsStructured,
+                                args: argsStructured ? preview(argsStructured) : undefined,
                             });
                         }
                     }
