@@ -1,10 +1,36 @@
 import { describe, expect, it } from "vitest";
-import { buildApp } from "../src/index.ts";
+import { buildApp, readAppVersion } from "../src/index.ts";
 
 // Unit-ish: no LLM calls. Real-model streaming is covered by the
 // gated integration test at the bottom (MELON_E2E=1).
 
 describe("melon-server routes", () => {
+	it("healthz reports ok + product version", async () => {
+		const app = await buildApp();
+		const res = await app.inject({ method: "GET", url: "/healthz" });
+		expect(res.statusCode).toBe(200);
+		const body = res.json();
+		expect(body.ok).toBe(true);
+		expect(body.version).toBe(readAppVersion());
+		expect(String(body.version)).toMatch(/^\d+\.\d+\.\d+/);
+		await app.close();
+	});
+
+	it("MELON_VERSION env overrides package.json for healthz", async () => {
+		const prev = process.env.MELON_VERSION;
+		process.env.MELON_VERSION = "9.9.9-test";
+		try {
+			expect(readAppVersion()).toBe("9.9.9-test");
+			const app = await buildApp();
+			const res = await app.inject({ method: "GET", url: "/healthz" });
+			expect(res.json().version).toBe("9.9.9-test");
+			await app.close();
+		} finally {
+			if (prev === undefined) delete process.env.MELON_VERSION;
+			else process.env.MELON_VERSION = prev;
+		}
+	});
+
 	it("404s SSE for unknown card", async () => {
 		const app = await buildApp();
 		const res = await app.inject({ method: "GET", url: "/sessions/nope/events" });

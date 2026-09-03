@@ -17,6 +17,12 @@ cd "$ROOT/desktop"
 rm -rf server web-dist
 cp -r ../packages/melon-server/dist server
 cp -r ../packages/melon-web/dist web-dist
+# Packaged Settings footer reads version from desktop/package.json (via
+# Electron MELON_VERSION / app.getVersion). Keep server package.json aligned.
+cp ../packages/melon-server/package.json server/package.json
+
+VERSION="$(node -p "require('./package.json').version")"
+echo "  product version: ${VERSION}"
 
 echo "── 4. enforce identical pi-coding-agent in dev + desktop (version + branding) ──"
 node -e '
@@ -111,6 +117,9 @@ pkill -f "Melon.app/Contents/MacOS/Melon" 2>/dev/null || true
 echo "  ✓ packaged app smoke test passed"
 
 echo ""
-DMG=$(ls -lh "$ROOT/desktop/dist"/*.dmg 2>/dev/null | grep -i melon | awk '{print $NF, $5}' | head -1)
+DMG=$(ls -1 "$ROOT/desktop/dist"/Melon-"${VERSION}"-*.dmg 2>/dev/null | head -1)
+if [ -z "$DMG" ]; then
+  DMG=$(ls -1 "$ROOT/desktop/dist"/*.dmg 2>/dev/null | head -1)
+fi
 [ -z "$DMG" ] && echo "❌ no DMG produced" && exit 1
-echo "✅ $DMG"
+echo "✅ $(basename "$DMG") ($(du -h "$DMG" | awk '{print $1}')) — Settings should show Melon ${VERSION}"

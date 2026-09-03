@@ -18,6 +18,8 @@ const serverProc = spawn(
             ELECTRON_RUN_AS_NODE: '1',
             MELON_PORT: '0',
             MELON_CODING_AGENT_DIR: MELON_AGENT_DIR,
+            // Same version electron-builder stamped into package.json / DMG name.
+            MELON_VERSION: app.getVersion(),
         },
         stdio: ['ignore', 'pipe', 'pipe'],
     },

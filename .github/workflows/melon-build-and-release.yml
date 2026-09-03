@@ -50,6 +50,7 @@ jobs:
     outputs:
       ref: ${{ steps.resolve.outputs.ref }}
       tag: ${{ steps.resolve.outputs.tag }}
+      version: ${{ steps.resolve.outputs.version }}
     steps:
       - name: Checkout (gives gh a .git dir — some gh paths probe git)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -65,10 +66,22 @@ jobs:
         run: |
           set -euo pipefail
           BRANCH="${{ github.event.inputs.branch }}"
-          VERSION="${{ github.event.inputs.version }}"
+          VERSION_INPUT="${{ github.event.inputs.version }}"
           CREATE_TAG="${{ github.event.inputs.create_tag }}"
-          if [ -z "${VERSION}" ] || [ "${VERSION}" = "0.0.0" ]; then
-            echo "::error::version is required (e.g., 0.3.3)"
+
+          # Version identity: workflow_dispatch input, else tag push (v0.3.3 → 0.3.3).
+          if [ -n "${VERSION_INPUT}" ] && [ "${VERSION_INPUT}" != "0.0.0" ]; then
+            VERSION="${VERSION_INPUT#v}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            VERSION="${{ github.ref_name }}"
+            VERSION="${VERSION#v}"
+            CREATE_TAG="false"
+          else
+            echo "::error::version is required (e.g., 0.3.3) — pass workflow input or push a v* tag"
+            exit 1
+          fi
+          if ! [[ "${VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-].+)?$ ]]; then
+            echo "::error::invalid version '${VERSION}' (expected semver like 0.3.3)"
             exit 1
           fi
           TAG="v${VERSION}"
@@ -76,7 +89,7 @@ jobs:
             # Free from the event context — no gh/git probing needed.
             BRANCH="${{ github.event.repository.default_branch }}"
           fi
-          echo "Using branch=${BRANCH} tag=${TAG}"
+          echo "Using branch=${BRANCH} tag=${TAG} version=${VERSION}"
 
           # Check if release already exists (--repo: never probe local git)
           if gh release view "${TAG}" --repo "${GH_REPO}" >/dev/null 2>&1; then
@@ -116,6 +129,7 @@ jobs:
           
           echo "ref=${TAG}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build (${{ matrix.os }}-${{ matrix.arch }})
@@ -126,22 +140,24 @@ jobs:
         include:
           - os: macos-latest
             arch: arm64
-            out: 'Melon-arm64.dmg'
+            artifact_suffix: 'arm64.dmg'
           - os: macos-latest
             arch: x64
-            out: 'Melon-x64.dmg'
+            artifact_suffix: 'x64.dmg'
           - os: ubuntu-latest
             arch: x64
-            out: 'Melon.AppImage'
+            artifact_suffix: 'x64.AppImage'
           - os: windows-latest
             arch: x64
-            out: 'Melon-x64.exe'
+            artifact_suffix: 'x64.exe'
           - os: windows-latest
             arch: arm64
-            out: 'Melon-arm64.exe'
+            artifact_suffix: 'arm64.exe'
     runs-on: ${{ matrix.os }}
     permissions:
       contents: read
+    env:
+      MELON_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -153,6 +169,31 @@ jobs:
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
+
+      - name: Stamp release version into package.json (Settings + artifact names)
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${MELON_VERSION}"
+          echo "Stamping version=${VERSION}"
+          node <<'NODE'
+          const fs = require('fs');
+          const version = process.env.MELON_VERSION;
+          if (!version) {
+            console.error('MELON_VERSION missing');
+            process.exit(1);
+          }
+          for (const p of [
+            'desktop/package.json',
+            'packages/melon-server/package.json',
+            'packages/melon-web/package.json',
+          ]) {
+            const j = JSON.parse(fs.readFileSync(p, 'utf8'));
+            j.version = version;
+            fs.writeFileSync(p, JSON.stringify(j, null, 4) + '\n');
+            console.log(`  ${p} → ${version}`);
+          }
+          NODE
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
@@ -178,6 +219,9 @@ jobs:
           rm -rf desktop/server desktop/web-dist
           cp -R packages/melon-server/dist desktop/server
           cp -R packages/melon-web/dist desktop/web-dist
+          # Keep desktop/package.json version as the product identity the
+          # packaged server reads via ../package.json (Settings footer).
+          cp packages/melon-server/package.json desktop/server/package.json
 
       - name: Install desktop deps (electron + electron-builder at pinned versions)
         run: npm ci
@@ -225,36 +269,46 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          VERSION="${MELON_VERSION}"
+          OUT="Melon-${VERSION}-${{ matrix.artifact_suffix }}"
           # Arch-aware pick: electron-builder names arm64 mac dmgs with an
-          # -arm64 suffix and x64 ones WITHOUT any suffix. Blind head -1 once
-          # grabbed the x64 dmg and renamed it Melon-arm64.dmg.
+          # -arm64 suffix and x64 ones WITHOUT any suffix when artifactName
+          # is unset; with Melon-${version}-${arch}.${ext} both include arch.
           case "${{ matrix.os }}-${{ matrix.arch }}" in
             macos-latest-arm64)
-              ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*-arm64.dmg" | head -1)" ;;
+              ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*-${VERSION}-arm64.dmg" | head -1)"
+              if [ -z "$ARTIFACT" ]; then
+                ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*-arm64.dmg" | head -1)"
+              fi
+              ;;
             macos-latest-x64)
-              ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*.dmg" ! -name "*-arm64.dmg" | head -1)" ;;
+              ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*-${VERSION}-x64.dmg" | head -1)"
+              if [ -z "$ARTIFACT" ]; then
+                ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*.dmg" ! -name "*-arm64.dmg" | head -1)"
+              fi
+              ;;
             windows-latest-*)
-              ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*.exe" | head -1)" ;;
+              ARTIFACT="$(find desktop/dist -maxdepth 2 -type f \( -name "*-${VERSION}-${{ matrix.arch }}.exe" -o -name "*.exe" \) | head -1)" ;;
             ubuntu-latest-*)
-              ARTIFACT="$(find desktop/dist -maxdepth 2 -type f -name "*.AppImage" | head -1)" ;;
+              ARTIFACT="$(find desktop/dist -maxdepth 2 -type f \( -name "*-${VERSION}-*.AppImage" -o -name "*.AppImage" \) | head -1)" ;;
           esac
           if [ -z "$ARTIFACT" ]; then
-            echo "::error::no .${EXT} produced for arch=${{ matrix.arch }} on ${{ matrix.os }}"
+            echo "::error::no artifact produced for arch=${{ matrix.arch }} on ${{ matrix.os }}"
             find desktop/dist -maxdepth 2 -type f || true
             exit 1
           fi
           echo "Found: $ARTIFACT"
-          # Canonical, space-free release name (matrix.out) — electron-builder's
-          # defaults vary per target ("Melon Setup 0.3.2.exe" has SPACES, which
-          # breaks globs and word-splitting downstream).
-          OUT="${{ matrix.out }}"
+          # Canonical release name: Melon-<version>-<arch>.<ext> — matches
+          # Settings footer and avoids electron-builder names with spaces
+          # ("Melon Setup 0.3.2.exe").
           cp "$ARTIFACT" "desktop/dist/${OUT}"
           echo "artifact=desktop/dist/${OUT}" >> "$GITHUB_OUTPUT"
+          echo "Canonical: ${OUT}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: melon-${{ matrix.os }}-${{ matrix.arch }}
+          name: melon-${{ needs.prepare.outputs.version }}-${{ matrix.os }}-${{ matrix.arch }}
           path: ${{ steps.locate.outputs.artifact }}
           if-no-files-found: error
           retention-days: 14
@@ -268,6 +322,7 @@ jobs:
     env:
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RELEASE_VERSION: ${{ needs.prepare.outputs.version }}
     steps:
       - name: Download all platform artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -295,6 +350,7 @@ jobs:
         run: |
           set -euo pipefail
           cd release-assets
+          VERSION="${RELEASE_VERSION}"
           # If a release with this tag already exists (re-run), delete the draft
           # so we never publish duplicate/partial assets.
           existing="$(gh release view "${RELEASE_TAG}" --repo "${GH_REPO}" --json isDraft --jq .isDraft 2>/dev/null || true)"
@@ -325,13 +381,15 @@ jobs:
             --title "Melon ${RELEASE_TAG}" \
             --notes "Automated multi-platform build.
 
+          Settings → footer shows \`Melon ${VERSION}\` — same identity as these filenames.
+
           | Platform | Architecture | Asset |
           |----------|--------------|-------|
-          | macOS    | arm64 (Apple Silicon) | Melon-arm64.dmg |
-          | macOS    | x64   (Intel)         | Melon-x64.dmg |
-          | Linux    | x64                    | Melon.AppImage |
-          | Windows  | x64                    | Melon-x64.exe |
-          | Windows  | arm64                  | Melon-arm64.exe |
+          | macOS    | arm64 (Apple Silicon) | Melon-${VERSION}-arm64.dmg |
+          | macOS    | x64   (Intel)         | Melon-${VERSION}-x64.dmg |
+          | Linux    | x64                    | Melon-${VERSION}-x64.AppImage |
+          | Windows  | x64                    | Melon-${VERSION}-x64.exe |
+          | Windows  | arm64                  | Melon-${VERSION}-arm64.exe |
 
           Verify: \`shasum -a 256 -c SHA256SUMS\` after download." \
             "${ASSETS[@]}"

@@ -19,8 +19,27 @@ export function SettingsPage() {
     const [creating, setCreating] = useState(false);
     const [prefill, setPrefill] = useState<SkillPrefill | undefined>(undefined);
     const [refreshKey, setRefreshKey] = useState(0);
+    const [appVersion, setAppVersion] = useState<string | null>(null);
     const dirtyRef = useRef(false);
     const setActiveView = useCanvasStore((s) => s.setActiveView);
+
+    // Same version string baked into release artifact names (Melon-0.3.3-arm64.dmg).
+    useEffect(() => {
+        let alive = true;
+        fetch('/healthz', { cache: 'no-store' })
+            .then((r) => (r.ok ? r.json() : null))
+            .then((body: { version?: unknown } | null) => {
+                if (!alive) return;
+                const v = typeof body?.version === 'string' ? body.version.trim() : '';
+                setAppVersion(v || null);
+            })
+            .catch(() => {
+                if (alive) setAppVersion(null);
+            });
+        return () => {
+            alive = false;
+        };
+    }, []);
 
     const closeEditor = () => {
         setEditingId(null);
@@ -148,6 +167,11 @@ export function SettingsPage() {
                         </div>
                     </div>
                 )}
+            </div>
+            <div className="shrink-0 border-t border-border px-5 py-3">
+                <p className="text-[10px] text-muted-foreground" data-testid="app-build-version">
+                    {appVersion ? `Melon ${appVersion}` : 'Melon'}
+                </p>
             </div>
         </div>
     );

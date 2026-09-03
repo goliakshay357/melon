@@ -24,6 +24,7 @@
     "build": {
         "appId": "com.melon.canvas",
         "productName": "Melon",
+        "artifactName": "Melon-${version}-${arch}.${ext}",
         "directories": {
             "output": "dist",
             "buildResources": "build"

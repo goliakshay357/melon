@@ -45,13 +45,30 @@ import {
 } from "./settings.ts";
 import { deleteSkill, loadSkills, materializeSkills, readSkill, saveSkill } from "./skills.ts";
 
-
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
 function splitModel(model: string): [string, string] {
 	const idx = model.indexOf("/");
 	if (idx <= 0) return ["", ""];
 	return [model.slice(0, idx), model.slice(idx + 1)];
+}
+
+/**
+ * Product version shown in Settings and stamped into release artifacts.
+ * Prefer MELON_VERSION (CI/local override), else the nearest package.json:
+ * packaged Electron → desktop/package.json; standalone server → melon-server.
+ */
+export function readAppVersion(): string {
+	const fromEnv = process.env.MELON_VERSION?.trim();
+	if (fromEnv) return fromEnv;
+	try {
+		const pkgPath = join(dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+		const pkg = JSON.parse(readFileSync(pkgPath, "utf8")) as { version?: unknown };
+		if (typeof pkg.version === "string" && pkg.version.trim()) return pkg.version.trim();
+	} catch {
+		/* fall through */
+	}
+	return "0.0.0";
 }
 
 let _modelRuntime: ModelRuntime | undefined;
@@ -252,7 +269,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				} else if (event.type === "message_start" || event.type === "message_end" || event.type === "turn_start") {
 					// too chatty to broadcast every one; lifecycle shows via agent_*. The
 					// structured turn_end frame is broadcast in the chain below.
-					} else if (event.type === "auto_retry_start") {
+				} else if (event.type === "auto_retry_start") {
 					registry.broadcast(cardId, {
 						type: "raw",
 						text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${rewriteCursorError(event.errorMessage ?? "unknown")}`,
@@ -844,10 +861,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	});
 
 	// Liveness probe — the frontend polls this to clear the "reconnecting" banner.
+	// `version` is the same identity stamped into DMG/AppImage/exe filenames.
 	app.get("/healthz", async () => ({
 		ok: true,
 		uptime: Math.round(process.uptime()),
 		model: getDefaultModel(config.defaultModel),
+		version: readAppVersion(),
 	}));
 
 	// Serve an agent-authored visualization HTML file for the viz-file iframe.
@@ -1260,7 +1279,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		if (index === -1) {
 			// Already drained — it is executing (or done) now. 409 + current
 			// list lets the client resync instead of erroring.
-			console.log(`[${(req.params as any).cardId}] queue:remove MISS "${text.slice(0, 40)}" (queue=${JSON.stringify(s.promptQueue)})`);
+			console.log(
+				`[${(req.params as any).cardId}] queue:remove MISS "${text.slice(0, 40)}" (queue=${JSON.stringify(s.promptQueue)})`,
+			);
 			return reply.code(409).send({ error: "queued message not found", followUp: [...s.promptQueue] });
 		}
 		s.promptQueue.splice(index, 1);
