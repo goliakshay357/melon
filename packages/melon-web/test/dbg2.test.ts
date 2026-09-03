@@ -247,7 +247,11 @@ it("cancels and edits queued messages via the server queue", async () => {
 	);
 	await useCanvasStore.getState().sendMessage(cardId, "second");
 	await useCanvasStore.getState().sendMessage(cardId, "third");
-	expect(JSON.stringify(useCanvasStore.getState().cards[0].messages.map((m) => m.text)) + "|" + JSON.stringify(useCanvasStore.getState().cards[0].queue)).toBe("FORCE_FAIL");
+	expect(
+		JSON.stringify(useCanvasStore.getState().cards[0].messages.map((m) => m.text)) +
+			"|" +
+			JSON.stringify(useCanvasStore.getState().cards[0].queue),
+	).toBe("FORCE_FAIL");
 	expect(useCanvasStore.getState().cards[0].queue).toEqual(["second", "third"]);
 
 	// Server is ground truth: cancel by TEXT → remaining list comes back.

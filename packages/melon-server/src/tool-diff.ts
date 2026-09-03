@@ -1,6 +1,6 @@
-import * as Diff from "diff";
 import { readFileSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
+import * as Diff from "diff";
 
 const MUTATION_TOOLS = new Set(["write", "edit", "write_file", "search_replace", "str_replace"]);
 
@@ -35,7 +35,11 @@ export function buildUnifiedDiff(pathLabel: string, before: string, after: strin
 	// Drop the leading "Index:" / "====" noise; keep ---/+++ and hunks.
 	const cleaned = patch
 		.split("\n")
-		.filter((line) => !line.startsWith("Index:") && line !== "===================================================================")
+		.filter(
+			(line) =>
+				!line.startsWith("Index:") &&
+				line !== "===================================================================",
+		)
 		.join("\n")
 		.trimEnd();
 	if (cleaned.length <= maxChars) return cleaned;

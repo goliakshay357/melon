@@ -23,7 +23,7 @@ import { CURSOR_PROVIDER_ID, cursorExtensionPath, hasRealCursorKey, loadCursorPr
 import { SessionRegistry } from "./session-registry.js";
 import { clearProviderDenylist, denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel, } from "./settings.js";
 import { deleteSkill, loadSkills, materializeSkills, readSkill, saveSkill } from "./skills.js";
-import { isMutationTool, mutationDiffOutput, readFileSnapshot, resolveToolPath, } from "./tool-diff.js";
+import { isMutationTool, mutationDiffOutput, readFileSnapshot, resolveToolPath } from "./tool-diff.js";
 import { lookupToolDiff, saveToolDiff } from "./tool-diff-store.js";
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").

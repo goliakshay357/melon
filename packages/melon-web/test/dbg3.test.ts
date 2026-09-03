@@ -229,7 +229,13 @@ it("cancels and edits queued messages via the server queue", async () => {
 	const cardId = useCanvasStore.getState().cards[0].id;
 
 	await useCanvasStore.getState().sendMessage(cardId, "first");
-	expect("after-first:" + JSON.stringify({ m: useCanvasStore.getState().cards[0].messages.map((mm) => mm.text), q: useCanvasStore.getState().cards[0].queue })).toBe("FORCE_FAIL");
+	expect(
+		"after-first:" +
+			JSON.stringify({
+				m: useCanvasStore.getState().cards[0].messages.map((mm) => mm.text),
+				q: useCanvasStore.getState().cards[0].queue,
+			}),
+	).toBe("FORCE_FAIL");
 	const es = FakeEventSource.latest;
 	es?.emit({ type: "status", status: "streaming" });
 

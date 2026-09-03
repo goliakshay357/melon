@@ -52,12 +52,7 @@ import {
 	touchRecentModel,
 } from "./settings.ts";
 import { deleteSkill, loadSkills, materializeSkills, readSkill, saveSkill } from "./skills.ts";
-import {
-	isMutationTool,
-	mutationDiffOutput,
-	readFileSnapshot,
-	resolveToolPath,
-} from "./tool-diff.ts";
+import { isMutationTool, mutationDiffOutput, readFileSnapshot, resolveToolPath } from "./tool-diff.ts";
 import { lookupToolDiff, saveToolDiff } from "./tool-diff-store.ts";
 
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
