@@ -165,7 +165,6 @@ const DIMMED: Theme = {
 	},
 };
 
-
 const GITHUB_DARK: Theme = {
 	id: "github-dark",
 	label: "GitHub",
@@ -206,7 +205,6 @@ const GITHUB_DARK: Theme = {
 		vizForeground: "#c9d1d9",
 	},
 };
-
 
 const AYU_DARK: Theme = {
 	id: "ayu_dark",

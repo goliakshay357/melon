@@ -1,19 +1,18 @@
-import { memo as ReactMemo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo as ReactMemo, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
     Handle,
     NodeResizer,
     Position,
+    useReactFlow,
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { ArrowUp, Bug, ChevronDown, Copy, Minimize2, Plus, Square, X } from 'lucide-react';
+import { Bug, ChevronDown, Copy, Minimize2, Pencil, Plus, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
-import { ModelPicker } from '@/components/model-picker';
-import { SkillsPicker } from '@/components/skills-picker';
-import { ProviderPicker } from '@/components/provider-picker';
-import type { TraceEvent } from '@/types/session-card';
+import { PromptComposer } from '@/components/prompt-composer';
+import { DEFAULT_CARD_SIZE, type TraceEvent } from '@/types/session-card';
 import { cn } from '@/lib/utils';
 
 export type ChatCardNodeType = Node<{ cardId: string }, 'chatCard'>;
@@ -495,10 +494,10 @@ function ChatCardNodeInner({
     const forkCard = useCanvasStore((s) => s.forkCard);
     const deleteCards = useCanvasStore((s) => s.deleteCards);
     const sendMessage = useCanvasStore((s) => s.sendMessage);
+    const { setCenter, getZoom } = useReactFlow();
     const [draft, setDraft] = useState('');
     const [maximized, setMaximized] = useState(false);
     const [view, setView] = useState<'chat' | 'trajectory'>('chat');
-    const [openPicker, setOpenPicker] = useState<'model' | 'provider' | 'skills' | null>(null);
     const [editingTitle, setEditingTitle] = useState(false);
     const dbg = (...args: unknown[]) => console.log('[ui-debug]', ...args);
     useEffect(() => { dbg('card mounted', id); }, []);
@@ -557,17 +556,6 @@ function ChatCardNodeInner({
         };
     }, [maximized]);
 
-    // STABLE ref callback — the inline arrow was re-created every render, so
-    // React re-ran growTextarea on EVERY keystroke (height:auto → reset), which
-    // made the footer bob up/down. useCallback stops that.
-    const growTextarea = useCallback((el: HTMLTextAreaElement | null) => {
-        if (!el) return;
-        const before = el.style.height;
-        el.style.height = 'auto';
-        el.style.height = `${Math.min(el.scrollHeight, 120)}px`;
-        dbg('textarea-grow', `${before || 'auto'} -> ${el.style.height}`);
-    }, []);
-
     // Copy selected text with Ctrl+G / Cmd+G — works in the card without expanding.
     useEffect(() => {
         const onKey = (e: KeyboardEvent) => {
@@ -596,6 +584,22 @@ function ChatCardNodeInner({
         window.addEventListener('keydown', onKey);
         return () => window.removeEventListener('keydown', onKey);
     }, [maximized]);
+
+    useEffect(() => {
+        if (!card?.pendingDraft) return;
+        // APPEND, never overwrite — the user may be typing already.
+        setDraft((prev) => (prev ? `${prev}\n\n${card.pendingDraft}` : card.pendingDraft!));
+        useCanvasStore.getState().updateCard(id, { pendingDraft: undefined });
+    }, [card?.pendingDraft, id]);
+
+    // The persisted queue is a mirror of pi's in-memory queue, which dies
+    // with the server. Resync once per mount so stale chips (app restart,
+    // page reload) never show messages that will never run.
+    // biome-ignore lint/correctness/useExhaustiveDependencies: once per mount
+    useEffect(() => {
+        if (!card?.sessionFile) return;
+        void useCanvasStore.getState().syncQueued(id);
+    }, [id]);
 
     if (!card) return null;
 
@@ -714,7 +718,17 @@ function ChatCardNodeInner({
                 className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
                 onClick={(e) => {
                     e.stopPropagation();
-                    forkCard(id);
+                    void (async () => {
+                        const newId = await forkCard(id);
+                        const child = useCanvasStore.getState().cards.find((c) => c.id === newId);
+                        if (!child) return;
+                        const w = child.size?.width ?? DEFAULT_CARD_SIZE.width;
+                        const h = child.size?.height ?? DEFAULT_CARD_SIZE.height;
+                        setCenter(child.position.x + w / 2, child.position.y + h / 2, {
+                            zoom: getZoom(),
+                            duration: 320,
+                        });
+                    })();
                 }}
                 title="Fork this conversation"
             >
@@ -801,87 +815,60 @@ function ChatCardNodeInner({
     const footerInput = (
         <div className={cn('shrink-0 border-t border-border p-2', maximized && 'px-4')}>
             {(card.queue?.length ?? 0) > 0 && (
-                <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-amber-500/90">
-                    ⏳ {card.queue!.length} queued — sends after current run finishes
-                </p>
-            )}
-            <div className="rounded-xl border border-input bg-background focus-within:border-ring">
-                <textarea
-                    rows={1}
-                    value={draft}
-                    ref={growTextarea}
-                    onChange={(e) => {
-                        setDraft(e.target.value);
-                        growTextarea(e.target);
-                    }}
-                    onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                            e.preventDefault();
-                            submit();
-                        }
-                    }}
-                    onClick={(e) => e.stopPropagation()}
-                    placeholder="Ask anything…  (Enter to send, Shift+Enter for newline)"
-                    className="nodrag nowheel block max-h-[120px] w-full resize-none bg-transparent px-3 pt-2.5 text-xs leading-relaxed outline-none placeholder:text-muted-foreground"
-                />
-                <div className="flex items-center gap-1 px-2 pb-1.5 pt-1">
-                    <SkillsPicker
-                        value={card.skills ?? []}
-                        onChange={(skills) => useCanvasStore.getState().setSkills(id, skills)}
-                        open={openPicker === 'skills'}
-                        onOpenChange={(o) => setOpenPicker(o ? 'skills' : null)}
-                    />
-                    <ProviderPicker
-                        model={card.model ?? ''}
-                        onChange={(m) => useCanvasStore.getState().setModel(id, m)}
-                        open={openPicker === 'provider'}
-                        onOpenChange={(o) => setOpenPicker(o ? 'provider' : null)}
-                    />
-                    <ModelPicker
-                        value={card.model ?? ''}
-                        onChange={(m) => useCanvasStore.getState().setModel(id, m)}
-                        open={openPicker === 'model'}
-                        onOpenChange={(o) => setOpenPicker(o ? 'model' : null)}
-                    />
-                    <select
-                        className="cursor-pointer rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none hover:text-foreground"
-                        title="Workspace permissions"
-                        value={card.permission ?? 'full'}
-                        onChange={(e) =>
-                            useCanvasStore.getState().updateCard(id, {
-                                permission: e.target.value as 'full' | 'readonly',
-                            })
-                        }
-                        onClick={(e) => e.stopPropagation()}
-                    >
-                        <option value="full">🔓 full access</option>
-                        <option value="readonly">🔒 read-only</option>
-                    </select>
-                    <button
-                        className={cn(
-                            'ml-auto flex size-7 items-center justify-center rounded-full transition-colors',
-                            card.status === 'streaming'
-                                ? 'bg-foreground text-background hover:bg-foreground/80'
-                                : draft.trim()
-                                  ? 'bg-primary text-primary-foreground hover:bg-primary/90'
-                                  : 'bg-secondary text-muted-foreground',
-                        )}
-                        title={card.status === 'streaming' ? 'Stop' : 'Send'}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            if (card.status === 'streaming') abortStream();
-                            else submit();
-                        }}
-                    >
-                        {card.status === 'streaming' ? (
-                            <Square className="size-3" fill="currentColor" />
-                        ) : (
-                            <ArrowUp className="size-4" />
-                        )}
-                    </button>
+                <div className="mb-1.5 space-y-1">
+                    {card.queue!.map((q, i) => (
+                        <div
+                            key={i}
+                            className="flex items-center gap-1 rounded-md border border-amber-500/30 bg-amber-500/10 px-1.5 py-1 text-[11px] text-amber-500/90"
+                        >
+                            <span className="truncate" title={q}>
+                                ⏳ queued — runs after the current answer: {q}
+                            </span>
+                            <button
+                                className="nodrag ml-auto shrink-0 rounded p-0.5 text-amber-500/70 hover:bg-amber-500/20 hover:text-amber-500"
+                                title="Move back to the composer to edit"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    void (async () => {
+                                        const r = await useCanvasStore.getState().dropQueued(id, q);
+                                        // Consumed items belong to the transcript, not the composer.
+                                        if (r === 'removed' || r === 'dead') {
+                                            setDraft((prev) => (prev ? `${prev}\n\n${q}` : q));
+                                        }
+                                    })();
+                                }}
+                            >
+                                <Pencil className="size-3" />
+                            </button>
+                            <button
+                                className="nodrag shrink-0 rounded p-0.5 text-amber-500/70 hover:bg-amber-500/20 hover:text-amber-500"
+                                title="Cancel queued message"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    void useCanvasStore.getState().dropQueued(id, q);
+                                }}
+                            >
+                                <X className="size-3" />
+                            </button>
+                        </div>
+                    ))}
                 </div>
-            </div>
+            )}
+            <PromptComposer
+                value={draft}
+                onChange={setDraft}
+                onSubmit={submit}
+                model={card.model ?? ''}
+                onModelChange={(model) => useCanvasStore.getState().setModel(id, model)}
+                skills={card.skills ?? []}
+                onSkillsChange={(skills) => useCanvasStore.getState().setSkills(id, skills)}
+                permission={card.permission ?? 'full'}
+                onPermissionChange={(permission) =>
+                    useCanvasStore.getState().updateCard(id, { permission })
+                }
+                sending={card.status === 'streaming'}
+                onStop={abortStream}
+            />
         </div>
     );
 
