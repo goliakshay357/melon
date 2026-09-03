@@ -44,6 +44,18 @@ export function denylistModel(model: string): void {
 	saveSettings(s);
 }
 
+/** Clear all denylisted models of one provider (e.g. after a valid key was added —
+ * models that failed pre-key must not stay hidden forever). */
+export function clearProviderDenylist(provider: string): void {
+	const s = loadSettings();
+	if (!s.denylistedModels?.length) return;
+	const prefix = `${provider}/`;
+	const next = s.denylistedModels.filter((m) => !m.startsWith(prefix));
+	if (next.length === s.denylistedModels.length) return;
+	s.denylistedModels = next;
+	saveSettings(s);
+}
+
 /** Single source of truth for the default model of NEW sessions. */
 export function getDefaultModel(fallback: string): string {
 	return loadSettings().lastModel || fallback;

@@ -11,16 +11,7 @@
 //   POST /sessions/:cardId/abort
 
 import { randomUUID } from "node:crypto";
-import {
-	copyFileSync,
-	existsSync,
-	mkdirSync,
-	readdirSync,
-	readFileSync,
-	rmSync,
-	statSync,
-	writeFileSync,
-} from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -36,9 +27,23 @@ import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
 import { expandHome, loadConfig, type MelonConfig, modelToString, preview } from "./config.ts";
+import {
+	CURSOR_PROVIDER_ID,
+	cursorExtensionPath,
+	hasRealCursorKey,
+	loadCursorProviderInto,
+	rewriteCursorError,
+} from "./cursor-extension.ts";
 import { SessionRegistry } from "./session-registry.ts";
-import { denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel } from "./settings.js";
-import { loadSkills, materializeSkills, readSkill, saveSkill, deleteSkill, skillsDir } from "./skills.js";
+import {
+	clearProviderDenylist,
+	denylistModel,
+	getDefaultModel,
+	loadSettings,
+	saveSettings,
+	touchRecentModel,
+} from "./settings.ts";
+import { deleteSkill, loadSkills, materializeSkills, readSkill, saveSkill } from "./skills.ts";
 
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
@@ -50,7 +55,16 @@ function splitModel(model: string): [string, string] {
 
 let _modelRuntime: ModelRuntime | undefined;
 async function getModelRuntime(): Promise<ModelRuntime> {
-	if (!_modelRuntime) _modelRuntime = await ModelRuntime.create();
+	if (!_modelRuntime) {
+		_modelRuntime = await ModelRuntime.create();
+		// Register bundled extension providers (cursor) so the GUI pickers see
+		// them. Fail-open — builtin providers must work even if this fails.
+		try {
+			await loadCursorProviderInto(_modelRuntime);
+		} catch (e) {
+			console.error("[melon] cursor provider load failed (continuing without it):", (e as Error)?.message ?? e);
+		}
+	}
 	return _modelRuntime;
 }
 
@@ -65,24 +79,24 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 
 	const registry = new SessionRegistry();
 
-/**
- * System-prompt guardrail: the agent must not explore its own installation
- * (Melon.app, app.asar, DMGs, packaged dist, ~/.melon, the pi SDK) — a real
- * failure mode where the model "reads its own codebase" instead of the
- * user's project.
- */
-const MELON_GUARDRAIL = [
-	"Environment boundaries (always apply):",
-	"- You are running inside Melon, a desktop app powered by the pi coding agent. Melon's own installation is OFF-LIMITS: never read, list, search, unzip, modify, or delete the app bundle (Melon.app, app.asar), .dmg installers, packaged server/web-dist folders, the desktop Electron shell, or the installed @earendil-works/pi-coding-agent package — even to 'understand the environment'. Exception: reading and executing skills under ~/.melon/agent/skills/ (including multi-file skill packages) is allowed.",
-	"- Work only inside the current project directory and paths the user explicitly gives you.",
-	"- If a task seems to require changing Melon itself (rare), ask the user first.",
-	"",
-	"Inline rendering in Melon chat (always apply):",
-	"- Melon renders assistant messages as rich content, NOT plain text. Fenced blocks turn into LIVE interactive viewers inside the chat card:",
-	"- Small self-contained HTML scenes (few KB): emit a ```viz-html``` fence containing ONE complete HTML document. It renders in a \u2248380px-wide frame (auto-height up to 700px). Design for \u2264380px width, no horizontal overflow.",
-	"- Files on disk (archify deliver output, or any complete HTML artifact you wrote via a tool): emit a ```viz-file``` fence whose body is EXACTLY one line: the absolute file path, a pipe (|), then the session working directory. Example: ```/abs/path/to/artifact.html|/abs/session/cwd```. Melon fetches that file and renders it inline in the chat card. NEVER paste large HTML inline, and NEVER just link the file in prose \u2014 the fence is the embedding mechanism.",
-	"- NEVER claim the chat is text-only or that you cannot embed. When you produce an HTML artifact, the ```viz-file``` fence embeds it.",
-].join("\n");
+	/**
+	 * System-prompt guardrail: the agent must not explore its own installation
+	 * (Melon.app, app.asar, DMGs, packaged dist, ~/.melon, the pi SDK) — a real
+	 * failure mode where the model "reads its own codebase" instead of the
+	 * user's project.
+	 */
+	const MELON_GUARDRAIL = [
+		"Environment boundaries (always apply):",
+		"- You are running inside Melon, a desktop app powered by the pi coding agent. Melon's own installation is OFF-LIMITS: never read, list, search, unzip, modify, or delete the app bundle (Melon.app, app.asar), .dmg installers, packaged server/web-dist folders, the desktop Electron shell, or the installed @earendil-works/pi-coding-agent package — even to 'understand the environment'. Exception: reading and executing skills under ~/.melon/agent/skills/ (including multi-file skill packages) is allowed.",
+		"- Work only inside the current project directory and paths the user explicitly gives you.",
+		"- If a task seems to require changing Melon itself (rare), ask the user first.",
+		"",
+		"Inline rendering in Melon chat (always apply):",
+		"- Melon renders assistant messages as rich content, NOT plain text. Fenced blocks turn into LIVE interactive viewers inside the chat card:",
+		"- Small self-contained HTML scenes (few KB): emit a ```viz-html``` fence containing ONE complete HTML document. It renders in a \u2248380px-wide frame (auto-height up to 700px). Design for \u2264380px width, no horizontal overflow.",
+		"- Files on disk (archify deliver output, or any complete HTML artifact you wrote via a tool): emit a ```viz-file``` fence whose body is EXACTLY one line: the absolute file path, a pipe (|), then the session working directory. Example: ```/abs/path/to/artifact.html|/abs/session/cwd```. Melon fetches that file and renders it inline in the chat card. NEVER paste large HTML inline, and NEVER just link the file in prose \u2014 the fence is the embedding mechanism.",
+		"- NEVER claim the chat is text-only or that you cannot embed. When you produce an HTML artifact, the ```viz-file``` fence embeds it.",
+	].join("\n");
 
 	async function createRuntimeFor(sessionManager: any, enabledSkills: string[] = []): Promise<any> {
 		const factory: any = async ({
@@ -103,13 +117,16 @@ const MELON_GUARDRAIL = [
 			});
 			// Keep the agent OUT of its own installation. One-time system-prompt
 			// addition (not per-prompt, no context bloat).
-			const appendSystemPromptOverride = (base: string[]) => [
-				...base,
-				MELON_GUARDRAIL,
-			];
+			const appendSystemPromptOverride = (base: string[]) => [...base, MELON_GUARDRAIL];
 			const services = await createAgentSessionServices({
 				cwd,
-				resourceLoaderOptions: { skillsOverride, appendSystemPromptOverride },
+				resourceLoaderOptions: {
+					skillsOverride,
+					appendSystemPromptOverride,
+					// Bundled provider extensions (cursor) — same extension the GUI
+					// runtime loads, so session model lists match the picker.
+					...(cursorExtensionPath() ? { additionalExtensionPaths: [cursorExtensionPath()!] } : {}),
+				},
 			});
 			return {
 				...(await createAgentSessionFromServices({
@@ -127,7 +144,12 @@ const MELON_GUARDRAIL = [
 		});
 	}
 
-	async function attachSession(cardId: string, sessionManager: any, explicitModel?: string, skills: string[] = []): Promise<any> {
+	async function attachSession(
+		cardId: string,
+		sessionManager: any,
+		explicitModel?: string,
+		skills: string[] = [],
+	): Promise<any> {
 		const runtime = await createRuntimeFor(sessionManager, skills);
 		try {
 			const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
@@ -186,7 +208,7 @@ const MELON_GUARDRAIL = [
 				} else if (event.type === "auto_retry_start") {
 					registry.broadcast(cardId, {
 						type: "raw",
-						text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}`,
+						text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${rewriteCursorError(event.errorMessage ?? "unknown")}`,
 					});
 				} else if (event.type === "summarization_retry_scheduled") {
 					registry.broadcast(cardId, {
@@ -226,10 +248,7 @@ const MELON_GUARDRAIL = [
 					// processing) — holding busy for that blocks the next message.
 					const entry = registry.get(cardId);
 					if (entry) entry.busy = false;
-				} else if (event.type === "auto_retry_start" || event.type === "summarization_retry_scheduled") {
-					console.log(`[${cardId}] ${event.type}`);
 				}
-
 				if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
 					registry.broadcast(cardId, {
 						type: "thinking",
@@ -257,12 +276,12 @@ const MELON_GUARDRAIL = [
 					registry.broadcast(cardId, {
 						type: "turn_end",
 						stopReason: msg?.stopReason,
-						error: msg?.errorMessage ?? undefined,
+						error: rewriteCursorError(String(msg?.errorMessage ?? "")) || undefined,
 					});
 				} else if (event.type === "auto_retry_start") {
 					registry.broadcast(cardId, {
 						type: "raw",
-						text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${event.errorMessage ?? "unknown"}`,
+						text: `provider error — auto-retrying (attempt ${event.attempt ?? "?"}/${event.maxAttempts ?? "?"}): ${rewriteCursorError(event.errorMessage ?? "unknown")}`,
 					});
 				} else if (event.type === "summarization_retry_scheduled") {
 					registry.broadcast(cardId, {
@@ -360,7 +379,9 @@ const MELON_GUARDRAIL = [
 		} catch (e) {
 			return reply.code(400).send({ error: (e as Error).message });
 		}
-		const skills = Array.isArray(body?.skills) ? (body.skills as unknown[]).filter((x): x is string => typeof x === "string") : [];
+		const skills = Array.isArray(body?.skills)
+			? (body.skills as unknown[]).filter((x): x is string => typeof x === "string")
+			: [];
 		const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model, skills);
 		return {
 			cardId,
@@ -376,7 +397,9 @@ const MELON_GUARDRAIL = [
 		const cardId = body?.cardId ?? randomUUID();
 		const sessionFile = body?.sessionFile;
 		if (!sessionFile) return reply.code(400).send({ error: "sessionFile required" });
-		const skills = Array.isArray(body?.skills) ? (body.skills as unknown[]).filter((x): x is string => typeof x === "string") : [];
+		const skills = Array.isArray(body?.skills)
+			? (body.skills as unknown[]).filter((x): x is string => typeof x === "string")
+			: [];
 		const runtime = await attachSession(cardId, SessionManager.open(sessionFile), body?.model, skills);
 		return {
 			cardId,
@@ -616,7 +639,7 @@ const MELON_GUARDRAIL = [
 		const q = req.query as any;
 		let dir: string;
 		try {
-			dir = expandHome(q.path && q.path.trim() ? q.path : "~");
+			dir = expandHome(q.path?.trim() ? q.path : "~");
 		} catch {
 			dir = homedir();
 		}
@@ -700,7 +723,7 @@ const MELON_GUARDRAIL = [
 		return { ok: true };
 	});
 
-	app.delete("/folders", async (req, reply) => {
+	app.delete("/folders", async (req, _reply) => {
 		const cwd = expandHome((req.query as any)?.cwd ?? "");
 		saveFolderHistory(loadFolderHistory().filter((f) => f.cwd !== cwd));
 		return { ok: true };
@@ -837,19 +860,20 @@ const MELON_GUARDRAIL = [
 		const name = String(b?.name ?? "").trim();
 		const description = b?.description ? String(b.description).trim() : undefined;
 		const instructions = String(b?.instructions ?? "").trim();
-		if (!id || !name || !instructions) return reply.code(400).send({ error: "id, name and instructions are required" });
+		if (!id || !name || !instructions)
+			return reply.code(400).send({ error: "id, name and instructions are required" });
 		if (!VALID_SKILL_ID.test(id) || id.length > 64)
 			return reply.code(400).send({ error: "id must be lowercase letters, numbers and dashes (max 64)" });
 		// Create must never silently overwrite — update goes through PUT.
-		if (readSkill(id)) return reply.code(409).send({ error: `A skill named "${id}" already exists — pick another id.` });
+		if (readSkill(id))
+			return reply.code(409).send({ error: `A skill named "${id}" already exists — pick another id.` });
 		saveSkill(id, name, description, instructions);
 		return { ok: true, id };
 	});
 
 	app.put("/skills/:id", async (req, reply) => {
 		const id = (req.params as any).id;
-		if (!VALID_SKILL_ID.test(id) || id.length > 64)
-			return reply.code(400).send({ error: "invalid skill id" });
+		if (!VALID_SKILL_ID.test(id) || id.length > 64) return reply.code(400).send({ error: "invalid skill id" });
 		const b = req.body as any;
 		const name = String(b?.name ?? "").trim();
 		const description = b?.description ? String(b.description).trim() : undefined;
@@ -861,8 +885,7 @@ const MELON_GUARDRAIL = [
 
 	app.delete("/skills/:id", async (req, reply) => {
 		const id = (req.params as any).id;
-		if (!VALID_SKILL_ID.test(id) || id.length > 64)
-			return reply.code(400).send({ error: "invalid skill id" });
+		if (!VALID_SKILL_ID.test(id) || id.length > 64) return reply.code(400).send({ error: "invalid skill id" });
 		deleteSkill(id);
 		return { ok: true, id };
 	});
@@ -977,10 +1000,14 @@ const MELON_GUARDRAIL = [
 				authType = "api_key";
 			}
 
+			// The cursor extension registers a literal placeholder apiKey, so the
+			// generic status reports "configured" with no real key. Report the truth.
+			const configured = pid === CURSOR_PROVIDER_ID ? hasRealCursorKey(authEntries, melonKeys) : !!status.configured;
+
 			result.push({
 				id: pid,
 				provider: pid,
-				configured: !!status.configured,
+				configured,
 				source: (status as any).source ?? undefined,
 				keyPreview,
 				authType,
@@ -1000,6 +1027,18 @@ const MELON_GUARDRAIL = [
 		if (!key) return reply.code(400).send({ error: "key required" });
 		try {
 			await (await getModelRuntime()).setRuntimeApiKey(provider, key);
+			// Persist to auth.json — runtime overrides die with this process, but
+			// sessions (and extensions like pi-cursor-sdk) read auth.json directly.
+			mkdirSync(getAgentDir(), { recursive: true });
+			const authPath = join(getAgentDir(), "auth.json");
+			let auth: Record<string, unknown> = {};
+			try {
+				auth = JSON.parse(readFileSync(authPath, "utf8"));
+			} catch {}
+			auth[provider] = { type: "api_key", key };
+			writeFileSync(authPath, JSON.stringify(auth, null, "\t"), { mode: 0o600 });
+			// A fresh key may resurrect models that failed before it existed.
+			clearProviderDenylist(provider);
 			const st = loadSettings();
 			st.providerKeys = { ...(st.providerKeys ?? {}), [provider]: key };
 			saveSettings(st);
@@ -1012,6 +1051,15 @@ const MELON_GUARDRAIL = [
 	app.delete("/auth/:provider", async (req) => {
 		const provider = (req.params as any).provider;
 		await (await getModelRuntime()).removeRuntimeApiKey(provider);
+		// Keep auth.json in sync with the runtime override removal.
+		try {
+			const authPath = join(getAgentDir(), "auth.json");
+			const auth = JSON.parse(readFileSync(authPath, "utf8")) as Record<string, unknown>;
+			if (provider in auth) {
+				delete auth[provider];
+				writeFileSync(authPath, JSON.stringify(auth, null, "\t"), { mode: 0o600 });
+			}
+		} catch {}
 		const st = loadSettings();
 		if (st.providerKeys) delete st.providerKeys[provider];
 		saveSettings(st);
@@ -1123,7 +1171,7 @@ const MELON_GUARDRAIL = [
 			console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
 		} catch (e) {
 			console.error(`[${cardId}] prompt:THREW ${(e as Error).stack}`);
-			registry.broadcast(cardId, { type: "error", message: (e as Error).message });
+			registry.broadcast(cardId, { type: "error", message: rewriteCursorError((e as Error).message) });
 			registry.broadcast(cardId, { type: "status", status: "error" });
 		} finally {
 			s.busy = false;
