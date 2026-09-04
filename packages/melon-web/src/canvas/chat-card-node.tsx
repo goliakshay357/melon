@@ -20,8 +20,8 @@ import { cn } from '@/lib/utils';
 export type ChatCardNodeType = Node<{ cardId: string }, 'chatCard'>;
 
 const statusDot: Record<string, string> = {
-    idle: 'bg-[#50fa7b]',
-    streaming: 'bg-[#f1fa8c] animate-pulse',
+    idle: 'bg-muted-foreground/35',
+    streaming: 'bg-[#50fa7b] animate-pulse',
     error: 'bg-[#ff5555]',
 };
 
@@ -81,14 +81,18 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
         );
     }
     const isStreamingTail = streaming && index === totalMessages - 1;
+    const hasTools = (m.tools ?? []).length > 0;
+    // Thinking is live until this turn produces tools or answer text.
+    const thinkingActive =
+        isStreamingTail && !!m.thinking && !m.text.trim() && !hasTools;
     return (
         <div className="min-w-0 space-y-2 pl-1">
-            {m.thinking != null && (
+            {m.thinking != null && m.thinking.length > 0 && (
                 <ThinkingBlock
                     cardId={cardId}
                     index={index}
                     text={m.thinking}
-                    active={!m.text && streaming}
+                    active={thinkingActive}
                 />
             )}
             {(m.tools ?? []).map((t) => (
@@ -129,15 +133,35 @@ function ThinkingBlock({
     const [open, setOpen] = useState(() => uiFlag(key, true));
     const prevActive = useRef(active);
     const autoControlled = useRef(true);
+    const bodyRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
-        // Auto-collapse once the answer starts — unless user took control.
-        if (prevActive.current && !active && autoControlled.current) setOpen(false);
+        // Live thinking: force open so the stream is visible.
+        // Finished thinking: auto-collapse unless the user took control.
+        if (active && autoControlled.current) {
+            setOpen(true);
+            setUiFlag(key, true);
+        } else if (prevActive.current && !active && autoControlled.current) {
+            setOpen(false);
+            setUiFlag(key, false);
+        }
         prevActive.current = active;
-    }, [active]);
+    }, [active, key]);
+
+    // Keep the latest thought in view while it streams.
+    useEffect(() => {
+        if (!active || !open) return;
+        const el = bodyRef.current;
+        if (el) el.scrollTop = el.scrollHeight;
+    }, [text, active, open]);
 
     return (
-        <div className="rounded-lg border border-border/70 bg-background/40">
+        <div
+            className={cn(
+                'rounded-lg border bg-background/40',
+                active ? 'border-primary/35' : 'border-border/70',
+            )}
+        >
             <button
                 className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left"
                 onClick={() => {
@@ -148,13 +172,21 @@ function ThinkingBlock({
                 }}
             >
                 {active ? <Spinner /> : <span className="text-muted-foreground">💭</span>}
-                <span className="flex-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                <span
+                    className={cn(
+                        'flex-1 text-[10px] font-medium uppercase tracking-wide',
+                        active ? 'shimmer-text' : 'text-muted-foreground',
+                    )}
+                >
                     {active ? 'Thinking…' : 'Thought process'}
                 </span>
                 <span className="text-[9px] text-muted-foreground/60">{text.length} chars</span>
             </button>
             {open && (
-                <div className="nowheel max-h-56 overflow-y-auto whitespace-pre-wrap border-t border-border/50 px-2.5 py-1.5 text-[10px] italic leading-relaxed text-muted-foreground">
+                <div
+                    ref={bodyRef}
+                    className="nowheel max-h-56 overflow-y-auto whitespace-pre-wrap border-t border-border/50 px-2.5 py-1.5 text-[10px] italic leading-relaxed text-muted-foreground"
+                >
                     {text || '…'}
                 </div>
             )}
@@ -162,24 +194,42 @@ function ThinkingBlock({
     );
 }
 
-// ── ✨ Activity shimmer ──────────────────────────────────────────────────
-const ACTIVITY_PHRASES = [
-    'Deep diving…',
-    'Reasoning…',
-    'Connecting the dots…',
-    'Reading context…',
-    'Crafting response…',
-];
-function ActivityLine() {
+// ── ✨ Activity shimmer (card heartbeat while AI runs) ───────────────────
+type ActivityPhase = 'waiting' | 'thinking' | 'tools' | 'responding' | 'working';
+
+const PHASE_PHRASES: Record<ActivityPhase, string[]> = {
+    waiting: ['Deep diving…', 'Reading context…', 'Connecting the dots…'],
+    thinking: ['Reasoning…', 'Thinking it through…', 'Working through it…'],
+    tools: ['Running tools…', 'Getting things done…', 'Working…'],
+    responding: ['Crafting response…', 'Writing…'],
+    working: ['Still working…', 'Deep diving…', 'Almost there…'],
+};
+
+function deriveActivityPhase(
+    card: NonNullable<ReturnType<typeof useCanvasStore.getState>['cards'][number]>,
+): ActivityPhase {
+    const last = card.messages[card.messages.length - 1];
+    if (!last || last.role === 'user') return 'waiting';
+    const tools = last.tools ?? [];
+    if (tools.some((t) => t.status === 'running')) return 'tools';
+    if (last.thinking && !last.text.trim() && tools.length === 0) return 'thinking';
+    if (last.text.trim()) return 'responding';
+    return 'working';
+}
+
+function ActivityLine({ phase }: { phase: ActivityPhase }) {
+    const phrases = PHASE_PHRASES[phase];
     const [idx, setIdx] = useState(0);
+    // Reset phrase rotation when the run phase changes.
     useEffect(() => {
-        const t = setInterval(() => setIdx((i) => (i + 1) % ACTIVITY_PHRASES.length), 2200);
+        setIdx(0);
+        const t = setInterval(() => setIdx((i) => (i + 1) % phrases.length), 2200);
         return () => clearInterval(t);
-    }, []);
+    }, [phase, phrases.length]);
     return (
-        <div className="flex items-center gap-2 px-1 py-2">
+        <div className="sticky bottom-0 z-[1] -mx-1 flex items-center gap-2 rounded-md bg-card/90 px-2 py-2 backdrop-blur-sm">
             <Spinner />
-            <span className="shimmer-text text-xs font-medium">{ACTIVITY_PHRASES[idx]}</span>
+            <span className="shimmer-text text-xs font-medium">{phrases[idx % phrases.length]}</span>
         </div>
     );
 }
@@ -477,7 +527,7 @@ function ChatCardNodeInner({
         if (el) el.scrollTop = el.scrollHeight;
         const el2 = maxScrollRef.current;
         if (el2) el2.scrollTop = el2.scrollHeight;
-    }, [card?.messages.length, lastMsg?.text, lastMsg?.tools, card?.status]);
+    }, [card?.messages.length, lastMsg?.text, lastMsg?.thinking, lastMsg?.tools, card?.status]);
 
     // Fixed-height card: growing the input footer shrinks the messages viewport.
     // If the user is pinned to the bottom, snap back on ANY resize so typing
@@ -717,16 +767,9 @@ function ChatCardNodeInner({
     // reloading viz iframes and making the chat bounce).
 
     const messagesBody = (scrollTo: React.RefObject<HTMLDivElement>) => {
-        const last = card.messages[card.messages.length - 1];
-        // One load line only. Keep the old "waiting after your message" case,
-        // and also show while the assistant turn is live but still has no
-        // answer text (thinking / tools / quiet gaps). Hide once answer
-        // tokens start — the answer markdown is the feedback then.
-        const showActivityLine =
-            card.status === 'streaming' &&
-            (card.messages.length === 0 ||
-                last?.role === 'user' ||
-                (last?.role === 'assistant' && !(last.text?.trim())));
+        // Heartbeat for the whole run — same lifetime as the header status dot.
+        const showActivityLine = card.status === 'streaming';
+        const activityPhase = showActivityLine ? deriveActivityPhase(card) : 'waiting';
         return (
         <div className="relative min-h-0 min-w-0 flex-1">
             <div
@@ -734,7 +777,7 @@ function ChatCardNodeInner({
                 onScroll={(e) => handleMessagesScroll(e.currentTarget)}
                 className="nodrag nowheel h-full cursor-default select-text space-y-4 overflow-y-auto px-4 py-3"
             >
-                {card.messages.length === 0 && (
+                {card.messages.length === 0 && !showActivityLine && (
                     <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
                         Ask something to start this thread.
                     </p>
@@ -749,7 +792,7 @@ function ChatCardNodeInner({
                         totalMessages={card.messages.length}
                     />
                 ))}
-                {showActivityLine && <ActivityLine />}
+                {showActivityLine && <ActivityLine phase={activityPhase} />}
             </div>
             {showDown && (
                 <button
