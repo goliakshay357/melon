@@ -194,29 +194,6 @@ function ThinkingBlock({
     );
 }
 
-// ── Activity status (composer — not a sticky chat strip) ─────────────────
-type ActivityPhase = 'waiting' | 'thinking' | 'tools' | 'responding' | 'working';
-
-const PHASE_LABEL: Record<ActivityPhase, string> = {
-    waiting: 'Working',
-    thinking: 'Thinking',
-    tools: 'Running tools',
-    responding: 'Writing',
-    working: 'Working',
-};
-
-function deriveActivityPhase(
-    card: NonNullable<ReturnType<typeof useCanvasStore.getState>['cards'][number]>,
-): ActivityPhase {
-    const last = card.messages[card.messages.length - 1];
-    if (!last || last.role === 'user') return 'waiting';
-    const tools = last.tools ?? [];
-    if (tools.some((t) => t.status === 'running')) return 'tools';
-    if (last.thinking && !last.text.trim() && tools.length === 0) return 'thinking';
-    if (last.text.trim()) return 'responding';
-    return 'working';
-}
-
 // ── Trajectory waterfall (DSH-style) ─────────────────────────────────────
 type TraceEvent2 = TraceEvent;
 
@@ -933,9 +910,6 @@ function ChatCardNodeInner({
         );
     };
 
-    const activityLabel =
-        card.status === 'streaming' ? PHASE_LABEL[deriveActivityPhase(card)] : null;
-
     const footerInput = (
         <div className={cn('shrink-0 border-t border-border', maximized ? 'px-0 py-3' : 'p-2')}>
             {card.pendingExtensionUi && (
@@ -1000,7 +974,6 @@ function ChatCardNodeInner({
                 }
                 sending={card.status === 'streaming'}
                 onStop={abortStream}
-                statusLabel={activityLabel}
                 disabled={serverOffline}
                 placeholder={
                     serverOffline
