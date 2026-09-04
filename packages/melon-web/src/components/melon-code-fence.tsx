@@ -1,33 +1,25 @@
-import { Suspense, useState, type HTMLAttributes, type MouseEvent, type ReactNode } from "react";
+import { Suspense, useEffect, useState, type HTMLAttributes } from "react";
 import { Check, Copy, Download } from "lucide-react";
 import { useIsCodeFenceIncomplete, type ExtraProps } from "streamdown";
 import { cn } from "@/lib/utils";
-import { escapeHtml, highlightCode, resolvePrismLanguage } from "@/lib/prism-highlight";
+import { highlightCode } from "@/lib/prism-highlight";
+import { MelonArtifact, MelonArtifactButton, downloadTextFile } from "./melon-artifact";
 import { IframeViz } from "./iframe-viz";
-import { codeTextFromChildren, languageFromClassName } from "./melon-code-fence-utils";
+import {
+	codeTextFromChildren,
+	escapeHtml,
+	extensionForLanguage,
+	languageFromClassName,
+} from "./melon-code-fence-utils";
 
 /**
  * Melon-owned fenced-code chrome.
  *
- * Streamdown's default toolbar (sticky + -mt-10) breaks under React Flow and
- * the maximize portal. Streamdown also ships no highlighter unless
- * `@streamdown/code` is installed — tokens stay `inherit`. Melon draws the
- * header + Prism body itself so card and fullscreen stay aligned and colored.
+ * Streamdown parses the fence; Melon owns the frame + Prism highlighting.
+ * No nested Streamdown highlighter card (avoids sticky toolbar + CSS wars).
  */
 
 export { codeTextFromChildren, languageFromClassName } from "./melon-code-fence-utils";
-
-const EXT_BY_LANG: Record<string, string> = {
-	typescript: "ts",
-	javascript: "js",
-	python: "py",
-	markdown: "md",
-	markup: "html",
-	csharp: "cs",
-	bash: "sh",
-	rust: "rs",
-	yaml: "yml",
-};
 
 function VizPlaceholder({ label }: { label: string }) {
 	return (
@@ -52,70 +44,38 @@ function VizFileFence({ code, isIncomplete }: { code: string; isIncomplete: bool
 	return <IframeViz path={path} cwd={cwd || undefined} />;
 }
 
-function downloadCode(code: string, language: string) {
-	const prismLang = resolvePrismLanguage(language);
-	const ext = (prismLang && EXT_BY_LANG[prismLang]) || language || "txt";
-	const blob = new Blob([code], { type: "text/plain;charset=utf-8" });
-	const url = URL.createObjectURL(blob);
-	const a = document.createElement("a");
-	a.href = url;
-	a.download = `code.${ext}`;
-	a.click();
-	URL.revokeObjectURL(url);
-}
-
-function FenceAction({
-	label,
-	onClick,
-	children,
-}: {
-	label: string;
-	onClick: (e: MouseEvent<HTMLButtonElement>) => void;
-	children: ReactNode;
-}) {
-	return (
-		<button
-			type="button"
-			title={label}
-			aria-label={label}
-			className="nodrag melon-code-fence-btn"
-			onClick={(e) => {
-				e.stopPropagation();
-				onClick(e);
-			}}
-		>
-			{children}
-		</button>
-	);
-}
-
-function FenceToolbar({ code, label }: { code: string; label: string }) {
+function CodeActions({ code, language }: { code: string; language: string }) {
 	const [copied, setCopied] = useState(false);
 
+	useEffect(() => {
+		if (!copied) return;
+		const id = window.setTimeout(() => setCopied(false), 1400);
+		return () => window.clearTimeout(id);
+	}, [copied]);
+
 	return (
-		<div className="melon-code-fence-toolbar">
-			<span className="melon-code-fence-lang">{label}</span>
-			<div className="melon-code-fence-actions">
-				<FenceAction label="Download file" onClick={() => downloadCode(code, label)}>
-					<Download className="size-3.5" strokeWidth={2} />
-				</FenceAction>
-				<FenceAction
-					label="Copy code"
-					onClick={() => {
-						void navigator.clipboard.writeText(code).then(() => {
-							setCopied(true);
-							window.setTimeout(() => setCopied(false), 1500);
-						});
-					}}
-				>
-					{copied ? (
-						<Check className="size-3.5" strokeWidth={2} />
-					) : (
-						<Copy className="size-3.5" strokeWidth={2} />
-					)}
-				</FenceAction>
-			</div>
-		</div>
+		<>
+			<MelonArtifactButton
+				title={copied ? "Copied" : "Copy code"}
+				onClick={() => {
+					void navigator.clipboard.writeText(code).then(() => setCopied(true));
+				}}
+			>
+				{copied ? <Check className="size-3.5" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
+			</MelonArtifactButton>
+			<MelonArtifactButton
+				title="Download"
+				onClick={() => {
+					downloadTextFile(
+						`code.${extensionForLanguage(language)}`,
+						code,
+						"text/plain;charset=utf-8",
+					);
+				}}
+			>
+				<Download className="size-3.5" aria-hidden />
+			</MelonArtifactButton>
+		</>
 	);
 }
 
@@ -159,18 +119,17 @@ export function MelonCode({
 	}
 
 	const label = language || "text";
-	const highlighted = highlightCode(code, language);
+	const highlighted = highlightCode(code, label);
 	const html = highlighted ?? escapeHtml(code);
 
 	return (
-		<div className="melon-code-fence" data-melon="code-fence" data-language={label}>
-			<FenceToolbar code={code} label={label} />
-			<pre className="nowheel melon-code-fence-pre tool-prism">
+		<MelonArtifact kind="code" label={label} actions={<CodeActions code={code} language={label} />}>
+			<pre className="melon-code-body tool-prism nowheel">
 				<code
-					className={cn(language && `language-${language}`)}
+					className={language ? `language-${language}` : undefined}
 					dangerouslySetInnerHTML={{ __html: html || " " }}
 				/>
 			</pre>
-		</div>
+		</MelonArtifact>
 	);
 }

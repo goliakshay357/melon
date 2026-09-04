@@ -64,15 +64,8 @@ const LANG_ALIAS: Record<string, string> = {
 	yaml: "yaml",
 	yml: "yaml",
 	toml: "bash",
+	zshrc: "bash",
 };
-
-export function languageFromPath(filePath: string | undefined): string | undefined {
-	if (!filePath) return undefined;
-	const base = filePath.split(/[\\/]/).pop() ?? filePath;
-	const ext = base.includes(".") ? base.split(".").pop()?.toLowerCase() : undefined;
-	if (!ext) return undefined;
-	return resolvePrismLanguage(ext);
-}
 
 /** Map a fence label / extension to a loaded Prism grammar id. */
 export function resolvePrismLanguage(raw: string | undefined): string | undefined {
@@ -81,6 +74,14 @@ export function resolvePrismLanguage(raw: string | undefined): string | undefine
 	if (!key || key === "text" || key === "plain" || key === "txt") return undefined;
 	const mapped = LANG_ALIAS[key] ?? key;
 	return Prism.languages[mapped] ? mapped : undefined;
+}
+
+export function languageFromPath(filePath: string | undefined): string | undefined {
+	if (!filePath) return undefined;
+	const base = filePath.split(/[\\/]/).pop() ?? filePath;
+	const ext = base.includes(".") ? base.split(".").pop()?.toLowerCase() : undefined;
+	if (!ext) return undefined;
+	return resolvePrismLanguage(ext) ?? LANG_ALIAS[ext];
 }
 
 export function escapeHtml(text: string): string {
@@ -92,8 +93,10 @@ export function highlightCode(code: string, language: string | undefined): strin
 	if (!code) return null;
 	const lang = resolvePrismLanguage(language);
 	if (!lang) return null;
+	const grammar = Prism.languages[lang];
+	if (!grammar) return null;
 	try {
-		return Prism.highlight(code, Prism.languages[lang], lang);
+		return Prism.highlight(code, grammar, lang);
 	} catch {
 		return null;
 	}

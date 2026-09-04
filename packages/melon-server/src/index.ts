@@ -26,7 +26,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
-import Fastify, { type FastifyInstance } from "fastify";
+import Fastify, { type FastifyInstance, type FastifyPluginAsync } from "fastify";
 import {
 	expandHome,
 	loadConfig,
@@ -107,7 +107,10 @@ export interface MelonServerDeps {
 
 export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInstance> {
 	const config = loadConfig(deps.config);
-	const app = Fastify({ logger: false });
+	// Canvas PUT sends the full card transcript as one JSON body. Fastify's
+	// default 1 MiB bodyLimit returns 413 once a canvas grows past that.
+	const CANVAS_BODY_LIMIT = 10 * 1024 * 1024; // 10 MiB
+	const app = Fastify({ logger: false, bodyLimit: CANVAS_BODY_LIMIT });
 	await app.register(cors, { origin: true });
 
 	const registry = new SessionRegistry();
@@ -1462,6 +1465,13 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		if (!body || typeof body !== "object") return reply.code(400).send({ error: "body required" });
 		const cur = loadSettings();
 		const next = { ...cur, ...body };
+		// Theme id must be a non-empty string when provided (web owns the catalog).
+		if ("theme" in body) {
+			if (typeof body.theme !== "string" || !body.theme.trim()) {
+				return reply.code(400).send({ error: "theme must be a non-empty string" });
+			}
+			next.theme = body.theme.trim();
+		}
 		saveSettings(next);
 		return { ok: true, settings: next };
 	});
@@ -1806,7 +1816,11 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	// Resolve web-dist relative to THIS script (not cwd — packaged apps launch from / or home).
 	const webDist = join(dirname(fileURLToPath(import.meta.url)), "..", "web-dist");
 	if (existsSync(join(webDist, "index.html"))) {
-		await app.register(fastifyStatic, { root: webDist });
+		// Parent monorepo may hoist a newer fastify than this package's pin;
+		// plugin generics then disagree across the two copies. Runtime is fine.
+		await app.register(fastifyStatic as unknown as FastifyPluginAsync<{ root: string }>, {
+			root: webDist,
+		});
 		app.setNotFoundHandler((req, reply) => {
 			if (req.method === "GET") {
 				return reply.type("text/html").send(readFileSync(join(webDist, "index.html")));

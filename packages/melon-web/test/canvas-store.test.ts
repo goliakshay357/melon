@@ -1,4 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
+import { spawnSize } from "@/lib/spawn";
 import type { SessionCard } from "@/types/session-card";
 
 /**
@@ -155,7 +156,8 @@ it("creates the first canvas and card from the empty-state prompt", async () => 
 		model: "test/model",
 		skills: ["archify"],
 		permission: "readonly",
-		size: { width: 480, height: 520 },
+		// Viewport-aware spawn size; node env has no window → 1280×800 fallback.
+		size: spawnSize({ width: 1280, height: 800 }, 1),
 	});
 	expect(useCanvasStore.getState().cards[0].messages[0]).toEqual({
 		role: "user",

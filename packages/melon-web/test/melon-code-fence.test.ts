@@ -4,7 +4,12 @@ import { dirname, join } from "node:path";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { createElement } from "react";
-import { codeTextFromChildren, languageFromClassName } from "../src/components/melon-code-fence-utils.ts";
+import {
+	codeTextFromChildren,
+	escapeHtml,
+	extensionForLanguage,
+	languageFromClassName,
+} from "../src/components/melon-code-fence-utils.ts";
 
 const webRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -21,43 +26,55 @@ describe("melon code fence helpers", () => {
 		assert.equal(codeTextFromChildren(createElement("code", null, "nested")), "nested");
 		assert.equal(codeTextFromChildren(null), "");
 	});
+
+	it("maps languages to download extensions", () => {
+		assert.equal(extensionForLanguage("typescript"), "ts");
+		assert.equal(extensionForLanguage("python"), "py");
+		assert.equal(extensionForLanguage("text"), "txt");
+	});
+
+	it("escapes HTML for unhighlighted fences", () => {
+		assert.equal(escapeHtml(`a <b> & "c"`), "a &lt;b&gt; &amp; &quot;c&quot;");
+	});
 });
 
-describe("melon code fence layout contract", () => {
-	it("owns a flex toolbar so card and maximize share one layout", () => {
+describe("melon artifact layout contract", () => {
+	it("owns a shared flex toolbar for code and tables", () => {
 		const css = readFileSync(join(webRoot, "src/globals.css"), "utf8");
-		assert.match(css, /\.melon-code-fence-toolbar\s*\{[^}]*display:\s*flex/s);
-		assert.match(css, /\.melon-code-fence-actions\s*\{[^}]*flex-direction:\s*row/s);
-		assert.ok(css.includes("melon-code-fence-btn"));
-		assert.ok(css.includes("melon-code-fence-pre"));
-		assert.equal(css.includes("code-block-copy-button"), false);
-		assert.equal(css.includes('[data-streamdown="code-block-header"]'), false);
+		assert.match(css, /\.melon-artifact-toolbar\s*\{[^}]*display:\s*flex/s);
+		assert.match(css, /\.melon-artifact-actions\s*\{[^}]*flex-direction:\s*row/s);
+		assert.match(css, /\.melon-code-body\s*\{/s);
+		assert.match(css, /\.melon-table-scroll\s*\{[^}]*overflow:\s*auto/s);
+		assert.match(css, /\.melon-table\s*\{[^}]*display:\s*table/s);
+		assert.match(css, /\.melon-table-head\s*\{[^}]*position:\s*sticky/s);
+		assert.equal(css.includes("display: block; overflow-x: auto"), false);
 	});
 
-	it("keeps markdown wired to MelonCode (not Streamdown sticky toolbar)", () => {
+	it("keeps markdown wired to Melon code + table chrome", () => {
 		const src = readFileSync(join(webRoot, "src/components/markdown-block.tsx"), "utf8");
 		assert.ok(src.includes("MelonCode"));
-		assert.ok(src.includes("controls={{ code: false }}"));
+		assert.ok(src.includes("MelonTable"));
+		assert.ok(src.includes("controls={{ code: false, table: false }}"));
 		assert.ok(src.includes("code: MelonCode"));
+		assert.ok(src.includes("table: MelonTable"));
 	});
 
-	it("MelonCode owns Prism body and Melon toolbar (no nested Streamdown CodeBlock)", () => {
+	it("MelonCode uses Melon Prism body, not nested Streamdown CodeBlock", () => {
 		const src = readFileSync(join(webRoot, "src/components/melon-code-fence.tsx"), "utf8");
-		assert.ok(src.includes("melon-code-fence-toolbar"));
+		assert.ok(src.includes("MelonArtifact"));
+		assert.ok(src.includes("melon-code-body"));
 		assert.ok(src.includes("highlightCode"));
-		assert.ok(src.includes("tool-prism"));
-		assert.ok(src.includes("Download"));
-		assert.ok(src.includes("Copy"));
+		assert.equal(src.includes("CodeBlock"), false);
 		assert.equal(src.includes("CodeBlockCopyButton"), false);
-		assert.equal(src.includes("<CodeBlock"), false);
 	});
 
-	it("prism-highlight resolves fence aliases and highlights via Prism", () => {
-		const src = readFileSync(join(webRoot, "src/lib/prism-highlight.ts"), "utf8");
-		assert.ok(src.includes("resolvePrismLanguage"));
-		assert.ok(src.includes('py: "python"'));
-		assert.ok(src.includes('ts: "typescript"'));
-		assert.ok(src.includes("Prism.highlight"));
-		assert.ok(src.includes("escapeHtml"));
+	it("MelonTable wraps a real table with quiet copy", () => {
+		const src = readFileSync(join(webRoot, "src/components/melon-table.tsx"), "utf8");
+		assert.ok(src.includes("MelonArtifact"));
+		assert.ok(src.includes("melon-table-scroll"));
+		assert.ok(src.includes("tableDataToMarkdown"));
+		assert.ok(src.includes("extractTableDataFromElement"));
+		assert.equal(src.includes("TableCopyDropdown"), false);
+		assert.equal(src.includes("fullscreen"), false);
 	});
 });

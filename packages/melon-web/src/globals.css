@@ -68,68 +68,59 @@
 .md-body pre code { background: none; padding: 0; font-size: 11px; }
 
 /*
- * Melon fenced-code chrome (see components/melon-code-fence.tsx).
- *
- * One flex header (language | icon actions) + Prism body. Same DOM in the
- * React Flow card and the maximized portal — no Streamdown sticky overlay.
+ * Melon markdown artifacts (code fences + tables).
+ * One quiet frame Melon owns — Streamdown parses; we draw chrome.
  */
-.md-body .melon-code-fence {
+.md-body .melon-artifact {
     margin: 0.6em 0;
     max-width: 100%;
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 0;
+    gap: 0.4rem;
+    padding: 0.45rem;
     border: 1px solid hsl(var(--border));
     border-radius: 0.5rem;
     background: hsl(var(--secondary));
     box-sizing: border-box;
-    overflow: hidden;
 }
-.md-body .melon-code-fence-toolbar {
+.md-body .melon-artifact-toolbar {
     display: flex;
     flex-direction: row;
     flex-wrap: nowrap;
     align-items: center;
     justify-content: space-between;
     gap: 0.5rem;
-    height: 2rem;
-    min-height: 2rem;
-    padding: 0 0.5rem 0 0.75rem;
-    border-bottom: 1px solid hsl(var(--border));
-    background: hsl(var(--muted) / 0.55);
-    box-sizing: border-box;
+    min-height: 1.5rem;
+    padding: 0 0.15rem;
 }
-.md-body .melon-code-fence-lang {
+.md-body .melon-artifact-label {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-    font-size: 0.6875rem;
-    font-weight: 500;
+    font-size: 0.7rem;
     line-height: 1;
     letter-spacing: 0.02em;
     text-transform: lowercase;
     color: hsl(var(--muted-foreground));
 }
-.md-body .melon-code-fence-actions {
+.md-body .melon-artifact-actions {
     display: inline-flex;
     flex-direction: row;
     flex-wrap: nowrap;
     align-items: center;
-    justify-content: flex-end;
-    gap: 0.125rem;
+    gap: 0.1rem;
     flex-shrink: 0;
-    height: 1.5rem;
 }
-.md-body .melon-code-fence-btn {
+.md-body .melon-artifact-btn {
     display: inline-flex;
     align-items: center;
     justify-content: center;
     box-sizing: border-box;
-    width: 1.5rem;
-    height: 1.5rem;
+    width: 1.35rem;
+    height: 1.35rem;
     padding: 0;
     margin: 0;
     border: none;
@@ -139,37 +130,87 @@
     cursor: pointer;
     flex-shrink: 0;
     line-height: 0;
+    transition: color 120ms ease, background 120ms ease;
 }
-.md-body .melon-code-fence-btn:hover {
+.md-body .melon-artifact-btn:hover:not(:disabled) {
     color: hsl(var(--foreground));
-    background: hsl(var(--secondary));
+    background: hsl(var(--card) / 0.7);
 }
-.md-body .melon-code-fence-pre {
-    margin: 0 !important;
-    padding: 0.75rem 0.875rem !important;
-    max-height: 24rem;
+.md-body .melon-artifact-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+.md-body .melon-artifact-btn:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 1px hsl(var(--ring));
+}
+
+/* Code body — Melon Prism highlight, no nested Streamdown card. */
+.md-body .melon-code-body {
+    margin: 0;
+    padding: 0.55rem 0.65rem;
     max-width: 100%;
     min-width: 0;
+    max-height: 22rem;
     overflow: auto;
-    border: none !important;
-    border-radius: 0 !important;
-    background: hsl(var(--card)) !important;
+    border: 1px solid hsl(var(--border) / 0.7);
+    border-radius: 0.35rem;
+    background: hsl(var(--card) / 0.55);
     white-space: pre;
     word-break: normal;
     overflow-wrap: normal;
+}
+.md-body .melon-code-body code {
+    background: none;
+    padding: 0;
+    border-radius: 0;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 11px;
     line-height: 1.55;
-    color: hsl(var(--card-foreground));
-}
-.md-body .melon-code-fence-pre code {
-    background: none !important;
-    padding: 0 !important;
-    border-radius: 0 !important;
-    font-size: inherit;
     color: inherit;
-    overflow-wrap: normal;
-    word-break: normal;
+}
+
+/* Tables — scroll on wrapper; table stays display:table. */
+.md-body .melon-table-scroll {
+    max-width: 100%;
+    min-width: 0;
+    max-height: 18rem;
+    overflow: auto;
+    border: 1px solid hsl(var(--border) / 0.7);
+    border-radius: 0.35rem;
+    background: hsl(var(--card) / 0.55);
+}
+.md-body .melon-table {
+    width: 100%;
+    margin: 0;
+    border-collapse: collapse;
+    display: table;
+    font-size: 11px;
+    line-height: 1.45;
+}
+.md-body .melon-table-head {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: hsl(var(--secondary));
+}
+.md-body .melon-table-th,
+.md-body .melon-table-td {
+    border: 1px solid hsl(var(--border) / 0.85);
+    padding: 0.35em 0.65em;
+    text-align: left;
+    vertical-align: top;
+    white-space: nowrap;
+}
+.md-body .melon-table-th {
+    font-weight: 600;
+    color: hsl(var(--foreground));
+    background: hsl(var(--secondary));
+}
+.md-body .melon-table-td {
+    color: hsl(var(--card-foreground));
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 10.5px;
 }
 
 /*
@@ -239,8 +280,7 @@
 }
 
 /* Fullscreen portals mount on document.body — keep action clusters one row. */
-[data-streamdown="mermaid-fullscreen"] > div:first-child,
-[data-streamdown="table-fullscreen"] [data-streamdown="table-wrapper"] > div:first-child {
+[data-streamdown="mermaid-fullscreen"] > div:first-child {
     display: flex !important;
     flex-direction: row !important;
     flex-wrap: nowrap !important;
@@ -248,8 +288,7 @@
     justify-content: flex-end;
     gap: 0.25rem;
 }
-[data-streamdown="mermaid-fullscreen"] > div:first-child button,
-[data-streamdown="table-fullscreen"] [data-streamdown="table-wrapper"] > div:first-child button {
+[data-streamdown="mermaid-fullscreen"] > div:first-child button {
     display: inline-flex !important;
     align-items: center !important;
     justify-content: center !important;
@@ -265,9 +304,6 @@
     border-left: 3px solid hsl(var(--primary));
     color: hsl(var(--muted-foreground));
 }
-.md-body table { border-collapse: collapse; margin: 0.6em 0; width: 100%; display: block; overflow-x: auto; }
-.md-body th, .md-body td { border: 1px solid hsl(var(--border)); padding: 0.3em 0.6em; text-align: left; }
-.md-body th { background: hsl(var(--secondary)); font-weight: 600; }
 .md-body hr { border: none; border-top: 1px solid hsl(var(--border)); margin: 0.8em 0; }
 .md-body a { color: hsl(var(--accent)); text-decoration: underline; }
 .md-body strong { font-weight: 600; }

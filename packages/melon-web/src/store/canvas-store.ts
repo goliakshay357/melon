@@ -1,6 +1,15 @@
 import { nanoid } from "nanoid";
 import { create } from "zustand";
 import {
+	clampIntoView,
+	findOpenSpot,
+	type ScreenRect,
+	SIDEBAR_COLLAPSED_WIDTH,
+	SIDEBAR_WIDTH,
+	type SpawnSize,
+	spawnSize,
+} from "@/lib/spawn";
+import {
 	type ChatMessage,
 	DEFAULT_CARD_SIZE,
 	newCardId,
@@ -14,9 +23,6 @@ export type CanvasWorktreeMode = "isolated" | "local";
 
 function cardWidth(c: SessionCard): number {
 	return c.size?.width ?? DEFAULT_CARD_SIZE.width;
-}
-function cardHeight(c: SessionCard): number {
-	return c.size?.height ?? DEFAULT_CARD_SIZE.height;
 }
 
 // cardId → live SSE stream state
@@ -289,39 +295,30 @@ function applyCardSnapshot(snapshot: SessionCard[]) {
 
 let eventIdCounter = 0;
 
-interface Box {
-	left: number;
-	right: number;
-	top: number;
-	bottom: number;
+/** Screen rect of the visible canvas area — sidebar overlays its left edge. */
+function spawnScreen(sidebarCollapsed: boolean): ScreenRect {
+	const width = typeof window === "undefined" ? 1280 : window.innerWidth;
+	const height = typeof window === "undefined" ? 800 : window.innerHeight;
+	return {
+		left: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH,
+		top: 0,
+		width,
+		height,
+	};
 }
-function boxesOverlap(a: Box, b: Box): boolean {
-	return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+
+/** Size a brand-new card should spawn at, for the current viewport + zoom. */
+export function currentSpawnSize(): SpawnSize {
+	const s = useCanvasStore.getState();
+	const vp = s.viewport ?? { x: 0, y: 0, zoom: 1 };
+	return spawnSize(spawnScreen(s.sidebarCollapsed), vp.zoom);
 }
-/** Nearest free position for a new card, so it never lands on top of another. */
-function findOpenSpot(cards: SessionCard[], sourceId: string, w: number, h: number): { x: number; y: number } {
-	const src = cards.find((c) => c.id === sourceId);
-	if (!src) return { x: 0, y: 0 };
-	const gap = 48;
-	const occupied: Box[] = cards
-		.filter((c) => c.id !== sourceId)
-		.map((c) => ({
-			left: c.position.x,
-			right: c.position.x + cardWidth(c),
-			top: c.position.y,
-			bottom: c.position.y + cardHeight(c),
-		}));
-	// Column to the right first (mind-map flow), row by row — cards flow right,
-	// then wrap down, so arrows read bottom→top naturally.
-	const spots: Array<{ x: number; y: number }> = [];
-	for (let i = 0; i < 6; i++)
-		spots.push({ x: src.position.x + cardWidth(src) + gap, y: src.position.y + i * (h + gap) });
-	for (let i = 1; i <= 4; i++) spots.push({ x: src.position.x, y: src.position.y + i * (h + gap) });
-	for (const s of spots) {
-		const box: Box = { left: s.x, right: s.x + w, top: s.y, bottom: s.y + h };
-		if (!occupied.some((o) => boxesOverlap(box, o))) return s;
-	}
-	return { x: src.position.x + cardWidth(src) + gap, y: src.position.y };
+
+/** Place a spawn position inside the visible canvas area. */
+function spawnPosition(position: { x: number; y: number }, size: SpawnSize): { x: number; y: number } {
+	const s = useCanvasStore.getState();
+	const vp = s.viewport ?? { x: 0, y: 0, zoom: 1 };
+	return clampIntoView(position, size, vp, spawnScreen(s.sidebarCollapsed));
 }
 
 /** Structured trajectory event — feeds the waterfall view. */
@@ -426,6 +423,10 @@ interface CanvasState {
 	restoreLast: () => Promise<void>;
 	restoreLastInner: () => Promise<void>;
 	startHealthPoll: () => void;
+	/** Tear down live SSE and settle streaming cards when the backend dies. */
+	markServerOffline: () => void;
+	/** After /healthz recovers while the UI stayed open — resync transcripts. */
+	healAfterReconnect: () => Promise<void>;
 	hydrateMessages: (cardId: string, sessionFile?: string) => Promise<void>;
 	flushPending: () => void;
 	renameCanvas: (cwd: string, canvasId: string, name: string) => Promise<void>;
@@ -456,6 +457,8 @@ interface CanvasState {
 		parentId?: string | null,
 		forcedId?: string,
 		kind?: "chat" | "document",
+		/** Omit to spawn at the viewport-aware default size. */
+		size?: SpawnSize,
 	) => string;
 	forkCard: (parentId: string) => Promise<string>;
 	moveCard: (id: string, position: { x: number; y: number }) => void;
@@ -508,8 +511,38 @@ function loadLastLocation(): { folder: string | null; canvasId: string | null } 
 let healthTimer: ReturnType<typeof setInterval> | null = null;
 let restoring = false;
 let startingConversation = false;
+let healingReconnect = false;
 /** Serialize canvas switches — overlapping switches corrupt the workspace cache. */
 let switchingCanvas = false;
+
+/** Close every live EventSource and clear attach state (server process is gone). */
+function tearDownAllStreams(logLine: string) {
+	for (const [cardId, st] of streams) {
+		st.es.close();
+		streams.delete(cardId);
+		pushLog(cardId, logLine);
+	}
+	attached.clear();
+}
+
+/** Settle streaming/question/queue state on a card list after the backend dies. */
+function settleCardsAfterDisconnect(cards: SessionCard[]): SessionCard[] {
+	return cards.map((c) => {
+		const streaming = c.status === "streaming";
+		const queued = c.queue ?? [];
+		if (!streaming && !c.pendingExtensionUi && queued.length === 0) return c;
+		const base = c.pendingDraft;
+		const pendingDraft =
+			queued.length === 0 ? c.pendingDraft : base ? `${base}\n\n${queued.join("\n\n")}` : queued.join("\n\n");
+		return {
+			...c,
+			status: streaming ? ("idle" as const) : c.status,
+			pendingExtensionUi: undefined,
+			queue: [],
+			pendingDraft,
+		};
+	});
+}
 
 const loc = loadLastLocation();
 
@@ -627,17 +660,71 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				const res = await fetch("/healthz", { cache: "no-store" });
 				const body = await res.json();
 				if (res.ok && body?.ok === true) {
+					const wasOffline = get().serverOffline;
 					set({ serverOffline: false });
-					if (!get().hydrated) get().restoreLast();
-				} else {
-					set({ serverOffline: true });
+					if (!get().hydrated) {
+						get().restoreLast();
+					} else if (wasOffline) {
+						void get().healAfterReconnect();
+					}
+				} else if (!get().serverOffline) {
+					get().markServerOffline();
 				}
 			} catch {
-				set({ serverOffline: true });
+				if (!get().serverOffline) get().markServerOffline();
 			}
 		};
 		tick();
 		healthTimer = setInterval(tick, 3000);
+	},
+
+	markServerOffline() {
+		if (get().serverOffline) return;
+		tearDownAllStreams("✗ connection lost — waiting for server");
+		const state = get();
+		const cards = settleCardsAfterDisconnect(state.cards);
+		const canvasActivity = { ...state.canvasActivity };
+		if (state.canvasId) canvasActivity[state.canvasId] = activityOf(cards);
+		for (const [id, ws] of workspaces) {
+			const next = settleCardsAfterDisconnect(ws.cards);
+			workspaces.set(id, { ...ws, cards: next, touchedAt: Date.now() });
+			canvasActivity[id] = activityOf(next);
+		}
+		set({ cards, canvasActivity, serverOffline: true });
+	},
+
+	async healAfterReconnect() {
+		if (healingReconnect) return;
+		healingReconnect = true;
+		try {
+			const { folder, cards } = get();
+			if (folder) {
+				try {
+					const res = await fetch(`/canvases?cwd=${encodeURIComponent(folder)}`);
+					if (res.ok) {
+						set({ canvases: (await res.json()).canvases ?? [] });
+					}
+				} catch {
+					/* list refresh is best-effort */
+				}
+			}
+			const toHeal: Array<{ id: string; sessionFile: string }> = [];
+			for (const c of cards) {
+				if (c.sessionFile) toHeal.push({ id: c.id, sessionFile: c.sessionFile });
+			}
+			for (const ws of workspaces.values()) {
+				for (const c of ws.cards) {
+					if (c.sessionFile && !toHeal.some((t) => t.id === c.id)) {
+						toHeal.push({ id: c.id, sessionFile: c.sessionFile });
+					}
+				}
+			}
+			for (const t of toHeal) {
+				await get().hydrateMessages(t.id, t.sessionFile);
+			}
+		} finally {
+			healingReconnect = false;
+		}
 	},
 
 	// Single rename path — active-canvas name, disk, and navigator stay in sync.
@@ -925,7 +1012,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	},
 
 	async createCanvas(name, opts) {
-		if (!get().folder) return;
+		if (!get().folder || get().serverOffline) return;
 		const nestedMelonWt = (get().folder ?? "").includes("/.melon/worktrees/");
 		const useWorktree = opts?.useWorktree !== false && !nestedMelonWt;
 		if (get().canvasId) {
@@ -1088,7 +1175,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	async startConversation(text, position, options) {
 		const prompt = text.trim();
 		const folder = get().folder;
-		if (startingConversation || !prompt || !folder || !options.model || get().cards.length > 0) return false;
+		if (
+			startingConversation ||
+			!prompt ||
+			!folder ||
+			!options.model ||
+			get().cards.length > 0 ||
+			get().serverOffline
+		) {
+			return false;
+		}
 		startingConversation = true;
 		try {
 			if (!get().canvasId) {
@@ -1254,18 +1350,19 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		set({ scrollAction: a });
 	},
 
-	addCard(position, parentId = null, forcedId?: string, kind: "chat" | "document" = "chat") {
+	addCard(position, parentId = null, forcedId?: string, kind: "chat" | "document" = "chat", size?: SpawnSize) {
 		pushUndo(get().cards);
 		const parent = parentId ? get().cards.find((c) => c.id === parentId) : undefined;
+		const cardSize = size ?? currentSpawnSize();
 		const card: SessionCard = {
 			id: forcedId ?? newCardId(),
 			title: parent ? `↳ ${parent.title}`.slice(0, 44) : "New card",
-			position,
+			position: spawnPosition(position, cardSize),
 			parentId,
 			kind,
 			status: "idle",
 			messages: [],
-			size: { width: DEFAULT_CARD_SIZE.width, height: DEFAULT_CARD_SIZE.height },
+			size: { width: cardSize.width, height: cardSize.height },
 			debug: false,
 			skills: [],
 			documentContent: "",
@@ -1286,12 +1383,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	},
 
 	async forkCard(parentId) {
+		if (get().serverOffline) return "";
 		// addCard pushes undo — do not push twice or one Cmd+Z is a no-op.
 		const parent = get().cards.find((c) => c.id === parentId);
 		const childCardId = newCardId();
-		const childSize = parent?.size
-			? { width: parent.size.width, height: parent.size.height }
-			: { width: DEFAULT_CARD_SIZE.width, height: DEFAULT_CARD_SIZE.height };
+		const childSize = parent?.size ?? currentSpawnSize();
 		const position = parent ? findOpenSpot(get().cards, parentId, childSize.width, childSize.height) : { x: 0, y: 0 };
 		let sessionInfo: {
 			sessionFile?: string;
@@ -1320,7 +1416,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			);
 		}
 
-		get().addCard(position, parentId, childCardId);
+		get().addCard(position, parentId, childCardId, "chat", childSize);
 		get().updateCard(childCardId, {
 			title: parent ? `↳ ${parent.title}`.slice(0, 44) : "New card",
 			size: childSize,
@@ -1363,8 +1459,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	// Inherits the source's kind: document → document, chat → chat.
 	addLinkedCard(sourceId) {
 		const src = get().cards.find((c) => c.id === sourceId);
-		const pos = findOpenSpot(get().cards, sourceId, DEFAULT_CARD_SIZE.width, DEFAULT_CARD_SIZE.height);
-		get().addCard(pos, sourceId, undefined, src?.kind ?? "chat");
+		const size = currentSpawnSize();
+		const pos = findOpenSpot(get().cards, sourceId, size.width, size.height);
+		get().addCard(pos, sourceId, undefined, src?.kind ?? "chat", size);
 	},
 
 	// Stop generation: freeze the display immediately, then abort server-side.
@@ -1665,6 +1762,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	async sendMessage(cardId, text, opts) {
 		const card = findCard(cardId);
 		if (!card || !text.trim()) return false;
+		if (get().serverOffline) return false;
 		const sessionFile = opts?.sessionFile ?? card.sessionFile;
 		const cwd = opts?.cwd ?? get().agentCwd() ?? get().folder;
 		if (!sessionFile && !cwd) {

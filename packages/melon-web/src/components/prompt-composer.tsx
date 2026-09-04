@@ -25,6 +25,8 @@ export function PromptComposer({
     placeholder = 'Ask anything…  (Enter to send, Shift+Enter for newline)',
     className,
     size = 'card',
+    /** Quiet run status (e.g. "Thinking") — shown only while the agent is live. */
+    statusLabel = null,
 }: {
     value: string;
     onChange: (value: string) => void;
@@ -44,6 +46,7 @@ export function PromptComposer({
     className?: string;
     /** `hero` = taller empty-canvas inbox; `card` = compact card footer. */
     size?: 'card' | 'hero';
+    statusLabel?: string | null;
 }) {
     const hero = size === 'hero';
     const maxHeight = hero ? 220 : 120;
@@ -97,6 +100,18 @@ export function PromptComposer({
                         : 'max-h-[120px] px-3 pt-2.5 text-xs leading-relaxed',
                 )}
             />
+            {sending && statusLabel ? (
+                <div
+                    className={cn(
+                        'flex items-center gap-1.5 text-muted-foreground',
+                        hero ? 'px-4' : 'px-3',
+                    )}
+                    aria-live="polite"
+                >
+                    <span className="size-1.5 shrink-0 rounded-full bg-[#50fa7b] animate-pulse" />
+                    <span className="text-[11px] tracking-tight">{statusLabel}</span>
+                </div>
+            ) : null}
             <div
                 className={cn(
                     'flex items-center gap-1',

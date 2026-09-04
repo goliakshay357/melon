@@ -334,6 +334,44 @@ describe("melon-server routes", () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("PUT /canvases/:id accepts bodies up to the 10 MiB limit", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "melon-canvas-big-"));
+		try {
+			const app = await buildApp();
+			await app.inject({ method: "POST", url: "/folders", payload: { cwd: dir } });
+
+			const pad = "x".repeat(1.5 * 1024 * 1024);
+			const res = await app.inject({
+				method: "PUT",
+				url: "/canvases/cv_big",
+				headers: { "content-type": "application/json" },
+				payload: {
+					cwd: dir,
+					canvas: {
+						id: "cv_big",
+						name: "Big",
+						cwd: dir,
+						viewport: { x: 0, y: 0, zoom: 1 },
+						cards: [
+							{
+								id: "card_big",
+								kind: "chat",
+								position: { x: 0, y: 0 },
+								messages: [{ role: "assistant", text: pad }],
+							},
+						],
+					},
+				},
+			});
+			expect(res.statusCode).toBe(200);
+			expect(res.json().ok).toBe(true);
+
+			await app.close();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe.skipIf(!process.env.MELON_E2E)("integration (MELON_E2E=1)", () => {

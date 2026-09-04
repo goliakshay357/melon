@@ -328,11 +328,19 @@ const NOCTIS_LUX: Theme = {
 		vizForeground: "#5a5475",
 	},
 };
-/** Registry order = order shown in Settings and cycled by the toolbar toggle. */
-export const THEMES: Theme[] = [DRACULA, GITHUB_DARK, AYU_DARK, MOONFLY, NOCTIS_LUX, LIGHT, DIMMED];
+/**
+ * Registry order = Settings list / toolbar cycle.
+ * Moonfly first so any accidental THEMES[0] fallback matches the product default.
+ */
+export const THEMES: Theme[] = [MOONFLY, DRACULA, GITHUB_DARK, AYU_DARK, NOCTIS_LUX, LIGHT, DIMMED];
 
+/** First-run / missing preference — Moonfly. */
 export const DEFAULT_THEME_ID = MOONFLY.id;
 
+export function isThemeId(id: string): boolean {
+	return THEMES.some((t) => t.id === id);
+}
+
 export function getTheme(id: string): Theme {
-	return THEMES.find((t) => t.id === id) ?? THEMES[0];
+	return THEMES.find((t) => t.id === id) ?? THEMES.find((t) => t.id === DEFAULT_THEME_ID)!;
 }
