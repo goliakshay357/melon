@@ -1,4 +1,4 @@
-import { memo as ReactMemo, useState } from 'react';
+import { memo as ReactMemo, useRef, useState } from 'react';
 import { Handle, Node, NodeProps, Position, NodeResizer } from '@xyflow/react';
 import { Plus, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
@@ -11,12 +11,12 @@ export type DocumentCardNodeType = Node<{ cardId: string }, 'documentCard'>;
 function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>) {
     const card = useCanvasStore((s) => s.cards.find((c) => c.id === id));
     const [editingTitle, setEditingTitle] = useState(false);
+    // Seed once per mount so store documentContent updates don't remount Milkdown
+    // (which would wipe Mod-Z history on every keystroke).
+    const seedRef = useRef<string | null>(null);
+    if (card && seedRef.current === null) seedRef.current = card.documentContent ?? '';
 
     if (!card) return null;
-
-    const updateDoc = (md: string) => {
-        useCanvasStore.getState().updateCard(id, { documentContent: md });
-    };
 
     // Branch a linked card from this document → the mind-map arrow starts here.
     const addLinkedCard = () => {
@@ -94,6 +94,7 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
                 minHeight={220}
                 lineClassName="!border-primary/50"
                 handleClassName="!h-2 !w-2 !rounded-sm !border-primary/60 !bg-white"
+                onResizeStart={() => useCanvasStore.getState().beginCardGesture()}
                 onResizeEnd={(_e, params) => useCanvasStore.getState().resizeCard(id, params.width, params.height)}
             />
             <Handle type="target" position={Position.Top} className="!opacity-0" />
@@ -106,7 +107,7 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
             <Handle type="source" position={Position.Right} className="!opacity-0" />
             {header}
             <div className="nodrag min-h-0 flex-1">
-                <DocumentEditor content={card.documentContent ?? ''} onChange={updateDoc} />
+                <DocumentEditor cardId={id} initialContent={seedRef.current ?? ''} />
             </div>
         </div>
     );

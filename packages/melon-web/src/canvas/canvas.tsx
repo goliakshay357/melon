@@ -91,15 +91,22 @@ export function Canvas() {
 		};
 	}, []);
 
-	// Cmd/Ctrl+Z restores the last deleted/added card — never while editing text
-	// (Milkdown/ProseMirror is contenteditable, not INPUT/TEXTAREA).
+	// Cmd/Ctrl+Z / Shift+Z / Y — canvas layout undo/redo.
+	// While focus is in an editor/input, leave the event alone (Milkdown history
+	// or the browser's native text undo/redo owns it).
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
 			if (useCanvasStore.getState().activeView !== 'canvas') return;
-			if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'z') return;
+			if (!(e.metaKey || e.ctrlKey)) return;
+			const key = e.key.toLowerCase();
+			if (key !== 'z' && key !== 'y') return;
 			if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
+
+			const wantRedo = key === 'y' || (key === 'z' && e.shiftKey);
 			e.preventDefault();
-			useCanvasStore.getState().undo();
+			e.stopPropagation();
+			if (wantRedo) useCanvasStore.getState().redo();
+			else useCanvasStore.getState().undo();
 		};
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
@@ -196,6 +203,10 @@ export function Canvas() {
     }, []);
 
     // Sync position to the store DURING drag so connected edges follow live.
+    // One undo step per gesture: snapshot on drag start only.
+    const onNodeDragStart = useCallback(() => {
+        useCanvasStore.getState().beginCardGesture();
+    }, []);
     const onNodeDrag = useCallback(
         (_e: unknown, node: AppNode) => moveCard(node.id, node.position),
         [moveCard],
@@ -247,6 +258,7 @@ export function Canvas() {
                 nodes={nodes}
                 edges={edges}
                 onNodesChange={onNodesChange}
+                onNodeDragStart={onNodeDragStart}
                 onNodeDrag={onNodeDrag}
                 onNodeDragStop={onNodeDragStop}
                 onNodesDelete={onNodesDelete}

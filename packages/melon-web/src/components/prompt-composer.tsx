@@ -78,7 +78,11 @@ export function PromptComposer({
                     growTextarea(e.target);
                 }}
                 onKeyDown={(e) => {
+                    // Keep canvas layout undo/redo from seeing composer keys, but
+                    // never preventDefault on Mod-Z/Y — browser owns text undo/redo.
                     e.stopPropagation();
+                    const key = e.key.toLowerCase();
+                    if ((e.metaKey || e.ctrlKey) && (key === 'z' || key === 'y')) return;
                     if (e.key === 'Enter' && !e.shiftKey) {
                         e.preventDefault();
                         if (canSubmit) onSubmit();

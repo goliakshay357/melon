@@ -841,6 +841,7 @@ function ChatCardNodeInner({
                     minHeight={260}
                     lineClassName="!border-primary/50"
                     handleClassName="!h-2 !w-2 !rounded-sm !border-primary/60 !bg-white"
+                    onResizeStart={() => useCanvasStore.getState().beginCardGesture()}
                     onResizeEnd={(_e, params) =>
                         useCanvasStore.getState().resizeCard(id, params.width, params.height)
                     }

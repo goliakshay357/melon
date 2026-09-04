@@ -98,6 +98,8 @@ function clearAllWorkspaces() {
 	attached.clear();
 	cardCanvas.clear();
 	workspaces.clear();
+	undoStack.length = 0;
+	redoStack.length = 0;
 }
 
 function evictIdleWorkspaces(keepId: string | null) {
@@ -181,11 +183,50 @@ function patchCardInStore(cardId: string, updater: (c: SessionCard) => SessionCa
 	}));
 }
 
-// Undo stack: pre-mutation card snapshots (in-memory only).
+// Canvas layout undo/redo (add/delete/move/resize/fork). Document text and
+// composer drafts own their own history (Milkdown / browser) and must not
+// share this stack — see isTypingTarget() focus routing in canvas.tsx.
+const UNDO_LIMIT = 25;
 const undoStack: SessionCard[][] = [];
+const redoStack: SessionCard[][] = [];
+
+function cloneCards(cards: SessionCard[]): SessionCard[] {
+	try {
+		return structuredClone(cards);
+	} catch {
+		return JSON.parse(JSON.stringify(cards)) as SessionCard[];
+	}
+}
+
 function pushUndo(cards: SessionCard[]) {
-	undoStack.push(cards.map((c) => ({ ...c })));
-	if (undoStack.length > 25) undoStack.shift();
+	undoStack.push(cloneCards(cards));
+	if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+	redoStack.length = 0;
+}
+
+function applyCardSnapshot(snapshot: SessionCard[]) {
+	const canvasId = useCanvasStore.getState().canvasId;
+	useCanvasStore.setState({
+		cards: snapshot,
+		...(canvasId
+			? {
+					canvasActivity: {
+						...useCanvasStore.getState().canvasActivity,
+						[canvasId]: activityOf(snapshot),
+					},
+				}
+			: {}),
+	});
+	if (canvasId) {
+		const prev = workspaces.get(canvasId);
+		workspaces.set(canvasId, {
+			cards: snapshot,
+			viewport: useCanvasStore.getState().viewport,
+			name: prev?.name ?? useCanvasStore.getState().canvasName,
+			touchedAt: Date.now(),
+		});
+		reindexCanvasCards(canvasId, snapshot);
+	}
 }
 
 let eventIdCounter = 0;
@@ -343,7 +384,10 @@ interface CanvasState {
 	abortCard: (id: string) => void;
 	addLinkedCard: (sourceId: string) => void;
 	resizeCard: (id: string, width: number, height: number) => void;
+	/** Snapshot layout before a drag/resize so one gesture = one undo step. */
+	beginCardGesture: () => void;
 	undo: () => boolean;
+	redo: () => boolean;
 	deleteCards: (ids: string[]) => void;
 	sendMessage: (cardId: string, text: string, opts?: { cwd?: string; sessionFile?: string }) => Promise<boolean>;
 	resumeSession: (sessionFile: string) => Promise<string | null>;
@@ -519,6 +563,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				stashActiveWorkspace();
 				await get().saveCanvas();
 			}
+			// Layout history is per active canvas view — don't undo across switches.
+			undoStack.length = 0;
+			redoStack.length = 0;
 
 			const cached = workspaces.get(id);
 			if (cached) {
@@ -585,6 +632,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			stashActiveWorkspace();
 			await get().saveCanvas();
 		}
+		undoStack.length = 0;
+		redoStack.length = 0;
 		const id = `cv_${nanoid(8)}`;
 		set({
 			canvasId: id,
@@ -691,7 +740,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	},
 
 	async forkCard(parentId) {
-		pushUndo(get().cards);
+		// addCard pushes undo — do not push twice or one Cmd+Z is a no-op.
 		const parent = get().cards.find((c) => c.id === parentId);
 		const childCardId = newCardId();
 		const childSize = parent?.size
@@ -907,22 +956,23 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	undo() {
 		const snapshot = undoStack.pop();
 		if (!snapshot) return false;
-		const canvasId = get().canvasId;
-		set({
-			cards: snapshot,
-			...(canvasId ? { canvasActivity: { ...get().canvasActivity, [canvasId]: activityOf(snapshot) } } : {}),
-		});
-		if (canvasId) {
-			const prev = workspaces.get(canvasId);
-			workspaces.set(canvasId, {
-				cards: snapshot,
-				viewport: get().viewport,
-				name: prev?.name ?? get().canvasName,
-				touchedAt: Date.now(),
-			});
-			reindexCanvasCards(canvasId, snapshot);
-		}
+		redoStack.push(cloneCards(get().cards));
+		if (redoStack.length > UNDO_LIMIT) redoStack.shift();
+		applyCardSnapshot(snapshot);
 		return true;
+	},
+
+	redo() {
+		const snapshot = redoStack.pop();
+		if (!snapshot) return false;
+		undoStack.push(cloneCards(get().cards));
+		if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+		applyCardSnapshot(snapshot);
+		return true;
+	},
+
+	beginCardGesture() {
+		pushUndo(get().cards);
 	},
 
 	resizeCard(id, width, height) {
