@@ -45,6 +45,7 @@ import {
 } from "./cursor-extension.ts";
 import { activateCursorSessionBinding, stripCursorResumeEntriesFromSessionFile } from "./cursor-session-binding.ts";
 import { CardExtensionUiBridge } from "./extension-ui.ts";
+import { fuzzyScore } from "./fuzzy.ts";
 import { SessionRegistry } from "./session-registry.ts";
 import {
 	clearProviderDenylist,
@@ -166,6 +167,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		"- Small self-contained HTML scenes (few KB): emit a ```viz-html``` fence containing ONE complete HTML document. It renders in a \u2248380px-wide frame (auto-height up to 700px). Design for \u2264380px width, no horizontal overflow.",
 		"- Files on disk (archify deliver output, or any complete HTML artifact you wrote via a tool): emit a ```viz-file``` fence whose body is EXACTLY one line: the absolute file path, a pipe (|), then the session working directory. Example: ```/abs/path/to/artifact.html|/abs/session/cwd```. Melon fetches that file and renders it inline in the chat card. NEVER paste large HTML inline, and NEVER just link the file in prose \u2014 the fence is the embedding mechanism.",
 		"- NEVER claim the chat is text-only or that you cannot embed. When you produce an HTML artifact, the ```viz-file``` fence embeds it.",
+		'- When the user asks for a diagram, visual, figure, or to "show" how something works, include a ```viz-html``` scene in that reply (do not wait to be told the fence name).',
+		"- Default those scenes to simple HTML + CSS (inline SVG ok). Few KB. No three.js, WebGL, or CDN-heavy libraries unless the user asks for 3D / orbit / interactive WebGL, or you have loaded the visualization skill for this turn.",
+		"- Do not force a viz block on ordinary Q&A that did not ask for a visual.",
 	].join("\n");
 
 	async function createRuntimeFor(
@@ -716,10 +720,56 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { canvases: out };
 	});
 
-	// Recent canvases across ALL known folders (by last-modified), for the sidebar.
-	app.get("/canvases/recent", async () => {
-		const recents: Array<{ id: string; name: string; cwd: string; folderName: string; modified: string }> = [];
+	type CanvasMeta = {
+		id: string;
+		name: string;
+		cwd: string;
+		folderName: string;
+		modified: string;
+	};
+
+	type CanvasSearchMatchKind = "title" | "card" | "message" | "document";
+
+	type CanvasSearchHit = CanvasMeta & {
+		match: CanvasSearchMatchKind;
+		/** Fuzzy score — lower is better (nearest). */
+		score: number;
+		/** Short context around the match (card title or message snippet). */
+		snippet?: string;
+		cardId?: string;
+		cardTitle?: string;
+	};
+
+	const MATCH_RANK: Record<CanvasSearchMatchKind, number> = {
+		title: 0,
+		card: 1,
+		message: 2,
+		document: 3,
+	};
+
+	/** Collapse whitespace and clip a window around the first contiguous needle, else start. */
+	function snippetAround(text: string, needle: string, radius = 36): string {
+		const flat = text.replace(/\s+/g, " ").trim();
+		if (!flat) return "";
+		const lower = flat.toLowerCase();
+		const contiguous = needle.toLowerCase().replace(/\s+/g, " ").trim();
+		let i = contiguous ? lower.indexOf(contiguous) : -1;
+		if (i < 0) {
+			// Fuzzy: window from first matching character of the query.
+			const q0 = contiguous[0];
+			i = q0 ? lower.indexOf(q0) : 0;
+			if (i < 0) i = 0;
+		}
+		const start = Math.max(0, i - radius);
+		const end = Math.min(flat.length, i + Math.max(contiguous.length, 1) + radius);
+		return `${start > 0 ? "…" : ""}${flat.slice(start, end)}${end < flat.length ? "…" : ""}`;
+	}
+
+	/** Lightweight meta for every canvas under known folders (skips missing/corrupt). */
+	function listCanvasMetaAcrossFolders(): CanvasMeta[] {
+		const out: CanvasMeta[] = [];
 		for (const f of loadFolderHistory()) {
+			if (statSync(f.cwd, { throwIfNoEntry: false })?.isDirectory() !== true) continue;
 			const dir = canvasesDir(f.cwd);
 			let files: string[];
 			try {
@@ -727,15 +777,16 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			} catch {
 				continue;
 			}
+			const folderName = f.cwd.split("/").pop() ?? f.cwd;
 			for (const file of files) {
 				if (!file.endsWith(".json")) continue;
 				try {
 					const raw = JSON.parse(readFileSync(join(dir, file), "utf8"));
-					recents.push({
+					out.push({
 						id: raw.id ?? file.replace(/\.json$/, ""),
-						name: raw.name ?? "Untitled",
+						name: typeof raw.name === "string" && raw.name.trim() ? raw.name : "Untitled",
 						cwd: f.cwd,
-						folderName: f.cwd.split("/").pop() ?? f.cwd,
+						folderName,
 						modified: raw.modified ?? "",
 					});
 				} catch {
@@ -743,8 +794,149 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				}
 			}
 		}
+		return out;
+	}
+
+	/**
+	 * Cross-folder fuzzy canvas search: title → card → message → document.
+	 * Subsequence match (brd → board); nearest scores first. One hit per canvas.
+	 */
+	function searchCanvasesAcrossFolders(query: string): CanvasSearchHit[] {
+		const hits: CanvasSearchHit[] = [];
+		for (const f of loadFolderHistory()) {
+			if (statSync(f.cwd, { throwIfNoEntry: false })?.isDirectory() !== true) continue;
+			const dir = canvasesDir(f.cwd);
+			let files: string[];
+			try {
+				files = readdirSync(dir);
+			} catch {
+				continue;
+			}
+			const folderName = f.cwd.split("/").pop() ?? f.cwd;
+			for (const file of files) {
+				if (!file.endsWith(".json")) continue;
+				let raw: {
+					id?: string;
+					name?: string;
+					modified?: string;
+					cards?: Array<{
+						id?: string;
+						title?: string;
+						kind?: string;
+						documentContent?: string;
+						messages?: Array<{ text?: string }>;
+					}>;
+				};
+				try {
+					raw = JSON.parse(readFileSync(join(dir, file), "utf8"));
+				} catch {
+					continue;
+				}
+				const id = raw.id ?? file.replace(/\.json$/, "");
+				const name =
+					typeof raw.name === "string" && raw.name.trim() ? raw.name : "Untitled";
+				const base: CanvasMeta = {
+					id,
+					name,
+					cwd: f.cwd,
+					folderName,
+					modified: raw.modified ?? "",
+				};
+
+				let best: CanvasSearchHit | null = null;
+				const consider = (hit: CanvasSearchHit) => {
+					if (!best) {
+						best = hit;
+						return;
+					}
+					const kindDelta = MATCH_RANK[hit.match] - MATCH_RANK[best.match];
+					if (kindDelta < 0 || (kindDelta === 0 && hit.score < best.score)) best = hit;
+				};
+
+				const titleScore = fuzzyScore(query, name);
+				if (titleScore !== null) {
+					consider({ ...base, match: "title", score: titleScore });
+				}
+				// Also allow matching via folder basename (same title in many folders).
+				const folderScore = fuzzyScore(query, folderName);
+				if (folderScore !== null && titleScore === null) {
+					consider({
+						...base,
+						match: "title",
+						score: folderScore + 20,
+						snippet: folderName,
+					});
+				}
+
+				for (const card of raw.cards ?? []) {
+					const cardTitle =
+						typeof card.title === "string" && card.title.trim()
+							? card.title
+							: "Untitled chat";
+					const cardScore = fuzzyScore(query, cardTitle);
+					if (cardScore !== null) {
+						consider({
+							...base,
+							match: "card",
+							score: cardScore,
+							snippet: cardTitle,
+							cardId: card.id,
+							cardTitle,
+						});
+					}
+					if (card.kind === "document" && typeof card.documentContent === "string") {
+						const docScore = fuzzyScore(query, card.documentContent);
+						if (docScore !== null) {
+							consider({
+								...base,
+								match: "document",
+								score: docScore,
+								snippet: snippetAround(card.documentContent, query),
+								cardId: card.id,
+								cardTitle,
+							});
+						}
+					}
+					for (const msg of card.messages ?? []) {
+						if (typeof msg.text !== "string" || !msg.text) continue;
+						const msgScore = fuzzyScore(query, msg.text);
+						if (msgScore === null) continue;
+						consider({
+							...base,
+							match: "message",
+							score: msgScore,
+							snippet: snippetAround(msg.text, query),
+							cardId: card.id,
+							cardTitle,
+						});
+						break;
+					}
+				}
+
+				if (best) hits.push(best);
+			}
+		}
+		hits.sort((a, b) => {
+			const kindDelta = MATCH_RANK[a.match] - MATCH_RANK[b.match];
+			if (kindDelta !== 0) return kindDelta;
+			if (a.score !== b.score) return a.score - b.score;
+			return (b.modified ?? "").localeCompare(a.modified ?? "");
+		});
+		return hits;
+	}
+
+	// Recent canvases across ALL known folders (by last-modified), for the sidebar.
+	app.get("/canvases/recent", async () => {
+		const recents = listCanvasMetaAcrossFolders();
 		recents.sort((a, b) => (b.modified ?? "").localeCompare(a.modified ?? ""));
 		return { recent: recents.slice(0, 12) };
+	});
+
+	// Search canvases across ALL known folders (sidebar): title, card title, messages, docs.
+	app.get("/canvases/search", async (req) => {
+		const q = String((req.query as { q?: string })?.q ?? "").trim();
+		if (!q) return { query: q, results: [] as CanvasSearchHit[] };
+		return { query: q, results: searchCanvasesAcrossFolders(q).slice(0, 50) };
 	});
 
 	// Allocate a git worktree for a canvas under <cwd>/.melon/worktrees/.
@@ -837,6 +1029,28 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const file = join(canvasesDir(expandHome(q.cwd)), `${(req.params as any).id}.json`);
 		try {
 			return JSON.parse(readFileSync(file, "utf8"));
+		} catch {
+			return reply.code(404).send({ error: "canvas not found" });
+		}
+	});
+
+	// Bump modified time only — keeps Recent / Workspaces order in sync on open.
+	app.post("/canvases/:id/touch", async (req, reply) => {
+		const body = (req.body ?? {}) as { cwd?: string };
+		let dir: string;
+		try {
+			dir = assertCwd(body.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const id = (req.params as { id: string }).id;
+		const file = join(canvasesDir(dir), `${id}.json`);
+		try {
+			const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+			const modified = new Date().toISOString();
+			raw.modified = modified;
+			writeFileSync(file, JSON.stringify(raw));
+			return { ok: true, id, modified };
 		} catch {
 			return reply.code(404).send({ error: "canvas not found" });
 		}

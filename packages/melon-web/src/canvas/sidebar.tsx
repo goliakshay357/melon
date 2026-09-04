@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
     ChevronRight,
     FileText,
@@ -9,16 +9,88 @@ import {
     PanelLeftClose,
     PanelLeftOpen,
     Plus,
+    Search,
     Settings,
     X,
 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { askText, confirmAction } from '@/components/dialogs';
 import { cn } from '@/lib/utils';
+import { fuzzyMatchIndices, fuzzyScore } from '@/lib/fuzzy';
 import { pickFolder } from '@/lib/pick-folder';
 import { Sparkles, Palette } from 'lucide-react';
 
+type CanvasListItem = {
+    id: string;
+    name: string;
+    cwd: string;
+    folderName: string;
+    modified: string;
+};
 
+type CanvasSearchMatchKind = 'title' | 'card' | 'message' | 'document';
+
+type CanvasSearchHit = CanvasListItem & {
+    match?: CanvasSearchMatchKind;
+    score?: number;
+    snippet?: string;
+    cardId?: string;
+    cardTitle?: string;
+};
+
+function matchKindLabel(kind: CanvasSearchMatchKind | undefined): string | null {
+    if (kind === 'card') return 'Card';
+    if (kind === 'message') return 'Message';
+    if (kind === 'document') return 'Document';
+    return null;
+}
+
+function formatModified(iso: string): string {
+    if (!iso) return '';
+    const t = Date.parse(iso);
+    if (Number.isNaN(t)) return '';
+    const diff = Date.now() - t;
+    if (diff < 60_000) return 'just now';
+    if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
+    if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
+    if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d ago`;
+    return new Date(t).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
+
+function HighlightMatch({ text, query }: { text: string; query: string }): ReactNode {
+    const q = query.trim();
+    if (!q) return text;
+    const indices = fuzzyMatchIndices(q, text);
+    if (!indices || indices.length === 0) return text;
+    const set = new Set(indices);
+    const parts: ReactNode[] = [];
+    let buf = '';
+    let inMark = false;
+    const flush = (marked: boolean, key: number) => {
+        if (!buf) return;
+        if (marked) {
+            parts.push(
+                <mark key={key} className="rounded-sm bg-primary/20 px-0.5 text-inherit">
+                    {buf}
+                </mark>,
+            );
+        } else {
+            parts.push(<span key={key}>{buf}</span>);
+        }
+        buf = '';
+    };
+    for (let i = 0; i < text.length; i++) {
+        const marked = set.has(i);
+        if (i === 0) inMark = marked;
+        else if (marked !== inMark) {
+            flush(inMark, i);
+            inMark = marked;
+        }
+        buf += text[i];
+    }
+    flush(inMark, text.length);
+    return <>{parts}</>;
+}
 
 export function Sidebar() {
     const collapsed = useCanvasStore((s) => s.sidebarCollapsed);
@@ -32,8 +104,14 @@ export function Sidebar() {
     const setActiveView = useCanvasStore((s) => s.setActiveView);
     const openView = (v: 'skills' | 'themes') => {
         setActiveView(v);
-    };    const [recent, setRecent] = useState<Array<{ id: string; name: string; cwd: string; folderName: string; modified: string }>>([]);
+    };
+    const [recent, setRecent] = useState<CanvasListItem[]>([]);
     const [switchingCanvasId, setSwitchingCanvasId] = useState<string | null>(null);
+    const [searchQuery, setSearchQuery] = useState('');
+    const [debouncedQuery, setDebouncedQuery] = useState('');
+    const [searchResults, setSearchResults] = useState<CanvasSearchHit[]>([]);
+    const [searchStatus, setSearchStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+    const searchInputRef = useRef<HTMLInputElement>(null);
 
     const folder = useCanvasStore((s) => s.folder);
     const canvasId = useCanvasStore((s) => s.canvasId);
@@ -89,7 +167,130 @@ export function Sidebar() {
             .then((r) => r.json())
             .then((d) => setRecent(d.recent ?? []))
             .catch(() => {});
-    }, [loadTree, folder, canvasId, canvasTreeRev]);
+        // canvasId alone used to refetch before touch finished and clobber Recent order.
+        // Open/rename/delete/create bump canvasTreeRev after disk is updated.
+    }, [loadTree, folder, canvasTreeRev]);
+
+    useEffect(() => {
+        const t = window.setTimeout(() => setDebouncedQuery(searchQuery.trim()), 120);
+        return () => window.clearTimeout(t);
+    }, [searchQuery]);
+
+    /** Instant fuzzy over the already-loaded navigator tree (titles + folder names). */
+    const localTitleHits = useCallback(
+        (q: string): CanvasSearchHit[] => {
+            if (!q) return [];
+            const hits: CanvasSearchHit[] = [];
+            for (const [cwd, entry] of Object.entries(tree)) {
+                const folderName = cwd.split('/').pop() ?? cwd;
+                for (const cv of entry.canvases ?? []) {
+                    const name =
+                        typeof cv.name === 'string' && cv.name.trim() ? cv.name : 'Untitled';
+                    const titleScore = fuzzyScore(q, name);
+                    const folderScore = fuzzyScore(q, folderName);
+                    if (titleScore === null && folderScore === null) continue;
+                    hits.push({
+                        id: cv.id,
+                        name,
+                        cwd,
+                        folderName,
+                        modified: '',
+                        match: 'title',
+                        score:
+                            titleScore !== null
+                                ? titleScore
+                                : (folderScore ?? 0) + 20,
+                        snippet: titleScore === null ? folderName : undefined,
+                    });
+                }
+            }
+            // Recent may include canvases not yet in an expanded tree fetch.
+            for (const cv of recent) {
+                if (hits.some((h) => h.cwd === cv.cwd && h.id === cv.id)) continue;
+                const titleScore = fuzzyScore(q, cv.name);
+                const folderScore = fuzzyScore(q, cv.folderName);
+                if (titleScore === null && folderScore === null) continue;
+                hits.push({
+                    ...cv,
+                    match: 'title',
+                    score: titleScore !== null ? titleScore : (folderScore ?? 0) + 20,
+                });
+            }
+            hits.sort((a, b) => (a.score ?? 0) - (b.score ?? 0));
+            return hits;
+        },
+        [tree, recent],
+    );
+
+    useEffect(() => {
+        if (!debouncedQuery) {
+            setSearchResults([]);
+            setSearchStatus('idle');
+            return;
+        }
+        let alive = true;
+        const local = localTitleHits(debouncedQuery);
+        // Show local hits immediately so typing feels live even before the server answers.
+        setSearchResults(local);
+        setSearchStatus('loading');
+        fetch(`/canvases/search?q=${encodeURIComponent(debouncedQuery)}`)
+            .then((r) => {
+                if (!r.ok) throw new Error(`search ${r.status}`);
+                return r.json();
+            })
+            .then((d: { results?: CanvasSearchHit[] }) => {
+                if (!alive) return;
+                const remote = d.results ?? [];
+                // Merge: keep best (kind + score) per cwd::id; prefer remote metadata.
+                const byKey = new Map<string, CanvasSearchHit>();
+                const rank = (m?: CanvasSearchMatchKind) =>
+                    m === 'title' ? 0 : m === 'card' ? 1 : m === 'message' ? 2 : m === 'document' ? 3 : 9;
+                const better = (a: CanvasSearchHit, b: CanvasSearchHit) => {
+                    const kd = rank(a.match) - rank(b.match);
+                    if (kd !== 0) return kd < 0 ? a : b;
+                    return (a.score ?? 0) <= (b.score ?? 0) ? a : b;
+                };
+                for (const hit of [...local, ...remote]) {
+                    const key = `${hit.cwd}::${hit.id}`;
+                    const prev = byKey.get(key);
+                    byKey.set(key, prev ? better(prev, hit) : hit);
+                }
+                const merged = [...byKey.values()].sort((a, b) => {
+                    const kd = rank(a.match) - rank(b.match);
+                    if (kd !== 0) return kd;
+                    if ((a.score ?? 0) !== (b.score ?? 0)) return (a.score ?? 0) - (b.score ?? 0);
+                    return (b.modified ?? '').localeCompare(a.modified ?? '');
+                });
+                setSearchResults(merged.slice(0, 50));
+                setSearchStatus('idle');
+            })
+            .catch(() => {
+                if (!alive) return;
+                // Server down / old build: still keep local fuzzy hits.
+                setSearchResults(local.slice(0, 50));
+                setSearchStatus(local.length > 0 ? 'idle' : 'error');
+            });
+        return () => {
+            alive = false;
+        };
+    }, [debouncedQuery, canvasTreeRev, localTitleHits]);
+
+    // Cmd/Ctrl+K focuses sidebar canvas search (expands nav if collapsed).
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'k') return;
+            if (e.altKey || e.shiftKey) return;
+            const tag = (e.target as HTMLElement | null)?.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement | null)?.isContentEditable)
+                return;
+            e.preventDefault();
+            if (collapsed) setCollapsed(false);
+            if (activeView !== 'canvas') setActiveView('canvas');
+            queueMicrotask(() => searchInputRef.current?.focus());
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, [collapsed, setCollapsed, activeView, setActiveView]);
 
     const toggleFolder = (cwd: string) =>
         setOpenFolders((prev) => {
@@ -104,6 +305,70 @@ export function Sidebar() {
             next.has(key) ? next.delete(key) : next.add(key);
             return next;
         });
+
+    const clearSearch = () => {
+        setSearchQuery('');
+        setDebouncedQuery('');
+        setSearchResults([]);
+        setSearchStatus('idle');
+    };
+
+    const openCanvasHit = (cv: { id: string; cwd: string; name?: string; folderName?: string }) => {
+        // Leave search mode → normal Recent/Workspaces tree, with this canvas focused.
+        clearSearch();
+        setActiveView('canvas');
+        // Optimistic: put this canvas at the top of Recent immediately (matches Workspaces focus).
+        setRecent((prev) => {
+            const folderName = cv.folderName ?? cv.cwd.split('/').pop() ?? cv.cwd;
+            const name = cv.name ?? prev.find((r) => r.id === cv.id && r.cwd === cv.cwd)?.name ?? 'Untitled';
+            const next: CanvasListItem = {
+                id: cv.id,
+                cwd: cv.cwd,
+                name,
+                folderName,
+                modified: new Date().toISOString(),
+            };
+            return [next, ...prev.filter((r) => !(r.id === cv.id && r.cwd === cv.cwd))].slice(0, 12);
+        });
+        setOpenFolders((prev) => {
+            const next = new Set(prev);
+            next.add(cv.cwd);
+            return next;
+        });
+        setSwitchingCanvasId(cv.id);
+        const revealInTree = () => {
+            // Two frames: search unmounts, then folder/canvas row paints.
+            requestAnimationFrame(() => {
+                requestAnimationFrame(() => {
+                    const el = document.querySelector(
+                        `[data-sidebar-canvas-id="${CSS.escape(cv.id)}"][data-sidebar-cwd="${CSS.escape(cv.cwd)}"]`,
+                    );
+                    el?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                });
+            });
+        };
+        const doSwitch = () => {
+            void switchCanvas(cv.id)
+                .catch(() => {})
+                .finally(() => {
+                    setSwitchingCanvasId(null);
+                    revealInTree();
+                });
+        };
+        if (folder !== cv.cwd) {
+            void openFolder(cv.cwd)
+                .then(doSwitch)
+                .catch(() => setSwitchingCanvasId(null));
+        } else if (canvasId === cv.id) {
+            // Already on this canvas — still clear search + expand/scroll + touch Recent.
+            void switchCanvas(cv.id).finally(() => {
+                setSwitchingCanvasId(null);
+                revealInTree();
+            });
+        } else {
+            doSwitch();
+        }
+    };
 
     // Native OS dialog — the only way in. Cancel = no-op.
     const addFolder = async () => {
@@ -153,6 +418,9 @@ export function Sidebar() {
         await fetch(`/canvases/${id}?cwd=${encodeURIComponent(cwd)}`, {
             method: 'DELETE',
         });
+        // Drop from Recent immediately + bump rev so Workspaces tree refetch matches.
+        setRecent((prev) => prev.filter((r) => !(r.id === id && r.cwd === cwd)));
+        useCanvasStore.setState((s) => ({ canvasTreeRev: s.canvasTreeRev + 1 }));
         loadTree();
     };
 
@@ -161,6 +429,9 @@ export function Sidebar() {
         if (!name || name === cv.name) return;
         await useCanvasStore.getState().renameCanvas(cwd, cv.id, name);
     };
+
+    const searching = searchQuery.trim().length > 0;
+    const searchPending = searching && (searchStatus === 'loading' || searchQuery.trim() !== debouncedQuery);
 
     return (
         <div
@@ -176,6 +447,17 @@ export function Sidebar() {
                         onClick={() => setCollapsed(false)}
                     >
                         <PanelLeftOpen className="size-4" />
+                    </button>
+                    <button
+                        className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                        title="Search canvases (⌘K)"
+                        onClick={() => {
+                            setCollapsed(false);
+                            setActiveView('canvas');
+                            queueMicrotask(() => searchInputRef.current?.focus());
+                        }}
+                    >
+                        <Search className="size-4" />
                     </button>
                     {activeView !== 'canvas' && (
                         <>
@@ -234,7 +516,7 @@ export function Sidebar() {
                     {activeView === 'canvas' ? (
                         <>
                     {/* Primary action */}
-                    <div className="px-3 pb-1">
+                    <div className="space-y-2 px-3 pb-1">
                         <button
                             className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-dashed border-border px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-ring hover:bg-secondary hover:text-foreground"
                             onClick={addFolder}
@@ -242,10 +524,158 @@ export function Sidebar() {
                             <FolderPlus className="size-3.5" />
                             {pickingNative ? 'Opening Finder…' : 'Add folder'}
                         </button>
+                        <div className="relative">
+                            <Search className="pointer-events-none absolute left-2 top-1/2 size-3 -translate-y-1/2 text-muted-foreground" />
+                            <input
+                                ref={searchInputRef}
+                                type="search"
+                                value={searchQuery}
+                                placeholder="Search titles, cards, messages…"
+                                aria-label="Search canvases by title, card, or message"
+                                className="w-full rounded-lg border border-border bg-background py-1.5 pl-7 pr-7 text-xs text-card-foreground outline-none placeholder:text-muted-foreground focus:border-ring"
+                                onChange={(e) => setSearchQuery(e.target.value)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Escape') {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        if (searchQuery) clearSearch();
+                                        else (e.target as HTMLInputElement).blur();
+                                    }
+                                }}
+                            />
+                            {searchQuery ? (
+                                <button
+                                    type="button"
+                                    className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
+                                    title="Clear search"
+                                    onClick={clearSearch}
+                                >
+                                    <X className="size-3" />
+                                </button>
+                            ) : (
+                                <kbd className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 rounded border border-border px-1 text-[9px] text-muted-foreground/80">
+                                    {typeof navigator !== 'undefined' &&
+                                    /Mac|iPhone|iPad/.test(navigator.platform)
+                                        ? '⌘K'
+                                        : 'Ctrl+K'}
+                                </kbd>
+                            )}
+                        </div>
                     </div>
 
                     {/* Scrollable body */}
                     <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+                        {searching ? (
+                            <>
+                                <p className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                                    Search results
+                                    {searchPending ? '…' : ''}
+                                </p>
+                                {searchStatus === 'error' && !searchPending ? (
+                                    <p className="px-2 py-3 text-center text-xs text-muted-foreground">
+                                        Couldn’t search. Check that Melon is running.
+                                    </p>
+                                ) : searchResults.length === 0 && !searchPending ? (
+                                    <p className="px-2 py-3 text-center text-xs text-muted-foreground">
+                                        No canvases match “{searchQuery.trim()}”.
+                                    </p>
+                                ) : searchResults.length === 0 && searchPending ? (
+                                    <p className="px-2 py-3 text-center text-xs text-muted-foreground">
+                                        Searching…
+                                    </p>
+                                ) : (
+                                    <div className="mb-2 space-y-0.5 pb-2">
+                                        {searchResults.map((cv) => {
+                                            const isActive = folder === cv.cwd && cv.id === canvasId;
+                                            const when = formatModified(cv.modified);
+                                            const kindLabel = matchKindLabel(cv.match);
+                                            const displayName =
+                                                cv.name === 'Untitled'
+                                                    ? `Untitled · ${cv.folderName}`
+                                                    : cv.name;
+                                            const titleTip = [
+                                                cv.name,
+                                                cv.folderName,
+                                                kindLabel,
+                                                cv.snippet,
+                                                when,
+                                            ]
+                                                .filter(Boolean)
+                                                .join(' · ');
+                                            return (
+                                                <button
+                                                    key={`${cv.cwd}::${cv.id}`}
+                                                    className={cn(
+                                                        'flex w-full flex-col gap-0.5 rounded-lg px-2 py-1.5 text-left transition-colors',
+                                                        isActive ? 'bg-primary/10' : 'hover:bg-secondary/70',
+                                                    )}
+                                                    title={titleTip}
+                                                    onClick={() => openCanvasHit(cv)}
+                                                >
+                                                    <span className="flex min-w-0 items-center gap-1.5">
+                                                        <Layers
+                                                            className={cn(
+                                                                'size-3 shrink-0',
+                                                                isActive ? 'text-primary' : 'text-muted-foreground',
+                                                            )}
+                                                        />
+                                                        <span
+                                                            className={cn(
+                                                                'min-w-0 flex-1 truncate text-xs',
+                                                                isActive
+                                                                    ? 'font-medium text-primary'
+                                                                    : 'text-card-foreground',
+                                                            )}
+                                                        >
+                                                            <HighlightMatch
+                                                                text={displayName}
+                                                                query={searchQuery}
+                                                            />
+                                                            {switchingCanvasId === cv.id ? (
+                                                                <span
+                                                                    className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-blue-400"
+                                                                    title="Loading..."
+                                                                />
+                                                            ) : canvasActivity[cv.id] === 'streaming' ? (
+                                                                <span
+                                                                    className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-amber-400"
+                                                                    title="AI is running"
+                                                                />
+                                                            ) : canvasActivity[cv.id] === 'error' ? (
+                                                                <span
+                                                                    className="ml-1 inline-block size-1.5 rounded-full bg-red-500"
+                                                                    title="Error"
+                                                                />
+                                                            ) : null}
+                                                        </span>
+                                                        {kindLabel ? (
+                                                            <span className="shrink-0 rounded border border-border px-1 text-[9px] text-muted-foreground">
+                                                                {kindLabel}
+                                                            </span>
+                                                        ) : null}
+                                                    </span>
+                                                    {cv.snippet && cv.match !== 'title' ? (
+                                                        <span className="truncate pl-4 text-[9px] text-muted-foreground">
+                                                            <HighlightMatch
+                                                                text={cv.snippet}
+                                                                query={searchQuery}
+                                                            />
+                                                        </span>
+                                                    ) : null}
+                                                    <span className="flex min-w-0 items-center justify-between gap-2 pl-4 text-[9px] text-muted-foreground">
+                                                        <span className="truncate">📁 {cv.folderName}</span>
+                                                        {when ? (
+                                                            <span className="shrink-0 tabular-nums">{when}</span>
+                                                        ) : null}
+                                                    </span>
+                                                </button>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </>
+                        ) : (
+                            <>
                         {recent.length > 0 && (
                             <>
                                 <p className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
@@ -253,23 +683,31 @@ export function Sidebar() {
                                 </p>
                                 <div className="mb-2 space-y-0.5 pb-2">
                                     {recent.map((cv) => {
+                                        const isActive = folder === cv.cwd && cv.id === canvasId;
                                         return (
                                             <button
                                                 key={`${cv.cwd}::${cv.id}`}
-                                                className="flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left transition-colors hover:bg-secondary/70"
+                                                className={cn(
+                                                    'flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left transition-colors',
+                                                    isActive ? 'bg-primary/10' : 'hover:bg-secondary/70',
+                                                )}
                                                 title={`${cv.name} — ${cv.folderName}`}
-                                                onClick={() => {
-                                                    setSwitchingCanvasId(cv.id);
-                                                    const doSwitch = () => {
-                                                        switchCanvas(cv.id).finally(() => setSwitchingCanvasId(null));
-                                                    };
-                                                    if (folder !== cv.cwd)
-                                                        openFolder(cv.cwd).then(doSwitch);
-                                                    else doSwitch();
-                                                }}
+                                                onClick={() => openCanvasHit(cv)}
                                             >
-                                                <Layers className="size-3 shrink-0 text-muted-foreground" />
-                                                <span className="min-w-0 flex-1 truncate text-xs text-card-foreground">
+                                                <Layers
+                                                    className={cn(
+                                                        'size-3 shrink-0',
+                                                        isActive ? 'text-primary' : 'text-muted-foreground',
+                                                    )}
+                                                />
+                                                <span
+                                                    className={cn(
+                                                        'min-w-0 flex-1 truncate text-xs',
+                                                        isActive
+                                                            ? 'font-medium text-primary'
+                                                            : 'text-card-foreground',
+                                                    )}
+                                                >
                                                     {cv.name}
                                                     {switchingCanvasId === cv.id ? (
                                                         <span className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-blue-400" title="Loading..." />
@@ -353,6 +791,8 @@ export function Sidebar() {
                                                 return (
                                                     <div key={cv.id}>
                                                         <div
+                                                            data-sidebar-canvas-id={cv.id}
+                                                            data-sidebar-cwd={cwd}
                                                             className={cn(
                                                                 'group/cv flex items-center gap-1.5 rounded-lg py-1 pl-1 pr-1 transition-colors',
                                                                 isActive
@@ -388,11 +828,7 @@ export function Sidebar() {
                                                                 )}
                                                                 title={`${cv.name} — click to open, double-click to rename`}
                                                                 onClick={() => {
-                                                                    if (folder !== cwd)
-                                                                        openFolder(cwd).then(() =>
-                                                                            switchCanvas(cv.id),
-                                                                        );
-                                                                    else switchCanvas(cv.id);
+                                                                    openCanvasHit({ id: cv.id, cwd });
                                                                 }}
                                                                 onDoubleClick={(e) => {
                                                                     e.stopPropagation();
@@ -492,6 +928,8 @@ export function Sidebar() {
                                 </div>
                             );
                         })}
+                            </>
+                        )}
                     </div>
 
                         </>

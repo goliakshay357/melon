@@ -25,7 +25,8 @@ const streams = new Map<
 		thinkingBuffer: string;
 		/** Text after this point belongs to the NEXT assistant message. */
 		segSealed: boolean;
-		flushTimer?: ReturnType<typeof setTimeout>;
+		/** rAF id for coalescing text/thinking patches (~1 paint), not a slow timer. */
+		flushRaf?: number;
 		/** Batched message mutation carried between SSE frames until applied. */
 		pendingPatch?: (m: ChatMessage) => ChatMessage;
 		pendingApply?: () => void;
@@ -622,8 +623,23 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	async switchCanvas(id) {
 		const folder = get().folder;
 		if (!folder) return;
-		if (get().canvasId === id) return;
 		if (switchingCanvas) return;
+
+		const touchOpened = async () => {
+			await fetch(`/canvases/${id}/touch`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ cwd: folder }),
+			}).catch(() => null);
+			set((s) => ({ canvasTreeRev: s.canvasTreeRev + 1 }));
+		};
+
+		// Already open — still bump Recent so sidebar stays in sync.
+		if (get().canvasId === id) {
+			await touchOpened();
+			return;
+		}
+
 		switchingCanvas = true;
 		try {
 			const prevId = get().canvasId;
@@ -671,6 +687,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				reindexCanvasCards(id, cached.cards);
 				workspaces.set(id, { ...cached, ...wt, touchedAt: Date.now() });
 				localStorage.setItem("melon:lastCanvas", id);
+				await touchOpened();
 				return;
 			}
 
@@ -701,6 +718,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			for (const c of get().cards) {
 				if (c.sessionFile && !streams.has(c.id)) await get().hydrateMessages(c.id, c.sessionFile);
 			}
+			await touchOpened();
 		} finally {
 			switchingCanvas = false;
 		}
@@ -791,6 +809,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		// refresh list
 		const res = await fetch(`/canvases?cwd=${encodeURIComponent(get().folder ?? "")}`).catch(() => null);
 		if (res?.ok) set({ canvases: (await res.json()).canvases ?? [] });
+		set((s) => ({ canvasTreeRev: s.canvasTreeRev + 1 }));
 	},
 
 	async startConversation(text, position, options) {
@@ -1221,9 +1240,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	// Force-apply batched stream patches (tab close / visibility loss).
 	flushPending() {
 		for (const [cardId, st] of streams.entries()) {
-			if (st.flushTimer) {
-				clearTimeout(st.flushTimer);
-				st.flushTimer = undefined;
+			if (st.flushRaf != null) {
+				cancelAnimationFrame(st.flushRaf);
+				st.flushRaf = undefined;
 			}
 			if (!st.pendingPatch) continue;
 			const fn = st.pendingPatch;
@@ -1394,14 +1413,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					  }
 					| { type: "extension_ui_clear"; id?: string };
 
-				// Batched mutation of the newest assistant message (~8fps, anti-flicker).
-				// Pending state lives on the STREAM (not this per-frame closure) so it
-				// survives across frames, and is never re-targeted — a slow flush can't
-				// spill into the NEXT output segment.
+				// Coalesce text/thinking patches to the next animation frame so the
+				// UI tracks the stream closely (ChatGPT-style append) without a
+				// 130ms "chunk dump". Pending state lives on the STREAM so a slow
+				// flush can't spill into the NEXT output segment.
 				const cancelFlush = () => {
-					if (st!.flushTimer) {
-						clearTimeout(st!.flushTimer);
-						st!.flushTimer = undefined;
+					if (st!.flushRaf != null) {
+						cancelAnimationFrame(st!.flushRaf);
+						st!.flushRaf = undefined;
 					}
 				};
 				const applyPending = () => {
@@ -1424,11 +1443,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						applyPending();
 						return;
 					}
-					if (!st!.flushTimer) {
-						st!.flushTimer = setTimeout(() => {
-							st!.flushTimer = undefined;
+					if (st!.flushRaf == null) {
+						st!.flushRaf = requestAnimationFrame(() => {
+							st!.flushRaf = undefined;
 							applyPending();
-						}, 130);
+						});
 					}
 				};
 
