@@ -43,3 +43,7 @@ plans/
 .pi/hf-sessions-backup/
 collect.sh
 .melon/
+
+# Local archify / design dumps at repo root
+cursor-*.html
+cursor-*.json
