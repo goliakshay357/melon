@@ -66,6 +66,199 @@
     overflow-x: hidden;
 }
 .md-body pre code { background: none; padding: 0; font-size: 11px; }
+
+/*
+ * Melon fenced-code chrome (see components/melon-code-fence.tsx).
+ *
+ * Toolbar is a real flex row Melon owns — not Streamdown's sticky/-mt-10
+ * overlay — so inline React Flow cards and the maximized-card portal match.
+ */
+.md-body .melon-code-fence {
+    margin: 0.6em 0;
+    max-width: 100%;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 0.5rem;
+    border: 1px solid hsl(var(--border));
+    border-radius: 0.75rem;
+    background: hsl(var(--secondary));
+    box-sizing: border-box;
+}
+.md-body .melon-code-fence-toolbar {
+    display: flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    min-height: 1.75rem;
+}
+.md-body .melon-code-fence-lang {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    padding-left: 0.25rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.75rem;
+    line-height: 1;
+    text-transform: lowercase;
+    color: hsl(var(--muted-foreground));
+}
+.md-body .melon-code-fence-actions {
+    display: inline-flex;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    align-items: center;
+    justify-content: center;
+    gap: 0.125rem;
+    flex-shrink: 0;
+    height: 1.75rem;
+    box-sizing: border-box;
+    padding: 0.125rem;
+    border: 1px solid hsl(var(--border));
+    border-radius: 0.375rem;
+    background: hsl(var(--card) / 0.95);
+}
+.md-body .melon-code-fence-actions [data-streamdown="code-block-copy-button"],
+.md-body .melon-code-fence-actions [data-streamdown="code-block-download-button"] {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-sizing: border-box;
+    width: 1.5rem !important;
+    height: 1.5rem !important;
+    min-width: 1.5rem !important;
+    min-height: 1.5rem !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border-radius: 0.25rem;
+    flex-shrink: 0;
+    line-height: 0;
+}
+/* Nested Streamdown CodeBlock: keep highlighter body, drop its duplicate chrome. */
+.md-body .melon-code-fence [data-streamdown="code-block"] {
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    background: transparent !important;
+    gap: 0 !important;
+    max-width: 100%;
+    min-width: 0;
+}
+.md-body .melon-code-fence [data-streamdown="code-block-header"] {
+    display: none !important;
+}
+.md-body .melon-code-fence [data-streamdown="code-block-body"] {
+    min-width: 0;
+    max-width: 100%;
+}
+.md-body .melon-code-fence [data-streamdown="code-block"] pre {
+    background: transparent !important;
+    border: none !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    max-width: none;
+    white-space: pre;
+    word-break: normal;
+    overflow-wrap: normal;
+    overflow-x: auto;
+}
+.md-body .melon-code-fence [data-streamdown="code-block"] pre code {
+    font-size: 11px;
+}
+
+/*
+ * Mermaid (if @streamdown/mermaid is enabled later) still ships sticky/-mt-10.
+ * Same card vs maximize split as code — pin actions to the block padding box.
+ */
+.md-body [data-streamdown="mermaid-block"] {
+    position: relative !important;
+    max-width: 100%;
+    min-width: 0;
+    margin: 0.6em 0;
+}
+.md-body [data-streamdown="mermaid-block"] > div:first-child {
+    display: flex !important;
+    align-items: center;
+    height: 1.75rem !important;
+    min-width: 0;
+    padding-right: 4.5rem;
+    box-sizing: border-box;
+}
+.md-body [data-streamdown="mermaid-block"] > div:has(> [data-streamdown="mermaid-block-actions"]) {
+    position: absolute !important;
+    top: 0.5rem !important;
+    right: 0.5rem !important;
+    bottom: auto !important;
+    left: auto !important;
+    z-index: 2;
+    margin: 0 !important;
+    height: auto !important;
+    width: auto !important;
+    pointer-events: none !important;
+    display: flex !important;
+    align-items: center;
+    justify-content: flex-end;
+}
+.md-body [data-streamdown="mermaid-block-actions"] {
+    pointer-events: auto !important;
+    display: inline-flex !important;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    gap: 0.125rem !important;
+    height: 1.75rem;
+    box-sizing: border-box;
+    border: 1px solid hsl(var(--border)) !important;
+    background: hsl(var(--card) / 0.95) !important;
+    border-radius: 0.375rem;
+    padding: 0.125rem !important;
+}
+.md-body [data-streamdown="mermaid-block-actions"] > button {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-sizing: border-box;
+    width: 1.5rem !important;
+    height: 1.5rem !important;
+    min-width: 1.5rem !important;
+    min-height: 1.5rem !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border-radius: 0.25rem;
+    flex-shrink: 0;
+    line-height: 0;
+}
+.md-body [data-streamdown="mermaid-block"] > div:last-child {
+    min-width: 0;
+}
+
+/* Fullscreen portals mount on document.body — keep action clusters one row. */
+[data-streamdown="mermaid-fullscreen"] > div:first-child,
+[data-streamdown="table-fullscreen"] [data-streamdown="table-wrapper"] > div:first-child {
+    display: flex !important;
+    flex-direction: row !important;
+    flex-wrap: nowrap !important;
+    align-items: center !important;
+    justify-content: flex-end;
+    gap: 0.25rem;
+}
+[data-streamdown="mermaid-fullscreen"] > div:first-child button,
+[data-streamdown="table-fullscreen"] [data-streamdown="table-wrapper"] > div:first-child button {
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    box-sizing: border-box;
+    width: 2rem;
+    height: 2rem;
+    padding: 0 !important;
+    flex-shrink: 0;
+}
 .md-body blockquote {
     margin: 0.6em 0;
     padding: 0.1em 1em;
