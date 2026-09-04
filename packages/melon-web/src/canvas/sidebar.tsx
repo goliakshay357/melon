@@ -29,7 +29,6 @@ export function Sidebar() {
     const [openCanvasSessions, setOpenCanvasSessions] = useState<Set<string>>(new Set());
     const [pickingNative, setPickingNative] = useState(false);
     const activeView = useCanvasStore((s) => s.activeView);
-    const cards = useCanvasStore((s) => s.cards);
     const setActiveView = useCanvasStore((s) => s.setActiveView);
     const openView = (v: 'skills' | 'themes') => {
         setActiveView(v);
@@ -38,10 +37,12 @@ export function Sidebar() {
 
     const folder = useCanvasStore((s) => s.folder);
     const canvasId = useCanvasStore((s) => s.canvasId);
+    const canvasActivity = useCanvasStore((s) => s.canvasActivity);
     const createCanvas = useCanvasStore((s) => s.createCanvas);
     const switchCanvas = useCanvasStore((s) => s.switchCanvas);
     const openFolder = useCanvasStore((s) => s.openFolder);
     const resumeSession = useCanvasStore((s) => s.resumeSession);
+    const forgetCanvas = useCanvasStore((s) => s.forgetCanvas);
     const canvasTreeRev = useCanvasStore((s) => s.canvasTreeRev);
     const [appVersion, setAppVersion] = useState<string | null>(null);
 
@@ -136,6 +137,7 @@ export function Sidebar() {
             confirmLabel: 'Delete',
         })))
             return;
+        forgetCanvas(id);
         if (canvasId === id && folder === cwd) {
             localStorage.removeItem('melon:lastCanvas');
             useCanvasStore.setState({ cards: [], canvasId: null, canvasName: '' });
@@ -262,15 +264,13 @@ export function Sidebar() {
                                                 <Layers className="size-3 shrink-0 text-muted-foreground" />
                                                 <span className="min-w-0 flex-1 truncate text-xs text-card-foreground">
                                                     {cv.name}
-                                                    {(isActive || switchingCanvasId === cv.id) && (
-                                                        switchingCanvasId === cv.id ? (
-                                                            <span className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-blue-400" title="Loading..." />
-                                                        ) : cards.some((c) => c.status === "streaming") ? (
-                                                            <span className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-amber-400" title="AI is running" />
-                                                        ) : cards.some((c) => c.status === "error") ? (
-                                                            <span className="ml-1 inline-block size-1.5 rounded-full bg-red-500" title="Error" />
-                                                        ) : null
-                                                    )}
+                                                    {switchingCanvasId === cv.id ? (
+                                                        <span className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-blue-400" title="Loading..." />
+                                                    ) : canvasActivity[cv.id] === "streaming" ? (
+                                                        <span className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-amber-400" title="AI is running" />
+                                                    ) : canvasActivity[cv.id] === "error" ? (
+                                                        <span className="ml-1 inline-block size-1.5 rounded-full bg-red-500" title="Error" />
+                                                    ) : null}
                                                 </span>
                                                 <span className="shrink-0 truncate text-[9px] text-muted-foreground">
                                                     📁 {cv.folderName}
@@ -393,11 +393,11 @@ export function Sidebar() {
                                                                 }}
                                                             >
                                                                 {cv.name}
-                                                                {isActive && (cards.some((c) => c.status === "streaming") ? (
+                                                                {canvasActivity[cv.id] === "streaming" ? (
                                                                     <span className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-amber-400" title="AI is running" />
-                                                                ) : cards.some((c) => c.status === "error") ? (
+                                                                ) : canvasActivity[cv.id] === "error" ? (
                                                                     <span className="ml-1 inline-block size-1.5 rounded-full bg-red-500" title="Error" />
-                                                                ) : null)}
+                                                                ) : null}
                                                             </span>
                                                             <span className="shrink-0 rounded-full bg-secondary px-1.5 text-[9px] tabular-nums text-muted-foreground">
                                                                 {cv.sessions.length}

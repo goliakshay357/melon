@@ -42,6 +42,7 @@ import {
 	loadCursorProviderInto,
 	rewriteCursorError,
 } from "./cursor-extension.ts";
+import { activateCursorSessionBinding, stripCursorResumeEntriesFromSessionFile } from "./cursor-session-binding.ts";
 import { SessionRegistry } from "./session-registry.ts";
 import {
 	clearProviderDenylist,
@@ -126,6 +127,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				registry.broadcast(cardId, { type: "user_message", text: next });
 				s.busy = true;
 				try {
+					await activateCursorSessionBinding(s.runtime);
 					await s.runtime.session.prompt(next, { streamingBehavior: "followUp" });
 				} catch (e) {
 					console.error(`[${cardId}] queued prompt THREW ${(e as Error).stack}`);
@@ -590,6 +592,11 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	// Fork: copy root→leaf path into a NEW .jsonl (pi-native clone).
 	// Child becomes a live session under newCardId; the parent keeps its own
 	// runtime re-opened on its original file.
+	//
+	// Cursor: the branched jsonl copies `cursor-sdk-agent-resume` handles. In
+	// Melon's multi-card process those make the child resume the parent's
+	// Cursor agent. Strip them, then reopen both cards as distinct runtimes so
+	// the child bootstraps a NEW Cursor agent from the inherited transcript.
 	app.post("/sessions/:cardId/fork", async (req, reply) => {
 		const parentCardId = (req.params as any).cardId;
 		const body = req.body as any;
@@ -613,13 +620,26 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			return reply.code(400).send({ error: "nothing to fork yet — send a message first" });
 		}
 		const leaf = s.runtime.session.sessionManager.getLeafEntry();
+		const parentModel = modelToString(s.runtime.session.model);
+		const parentSkills = s.activeSkills ?? [];
 
 		const res = await s.runtime.fork(leaf?.id ?? "", { position: "at" });
 		if (res.cancelled) return reply.code(409).send({ error: "fork cancelled" });
 
-		wireEvents(newCardId, s.runtime);
-		registry.set(newCardId, { runtime: s.runtime, clients: new Set(), busy: false, promptQueue: [] });
-		await attachSession(parentCardId, SessionManager.open(parentSessionFile));
+		const childSessionFile = s.runtime.session.sessionFile;
+		if (!childSessionFile) {
+			return reply.code(500).send({ error: "fork produced no child session file" });
+		}
+		const stripped = stripCursorResumeEntriesFromSessionFile(childSessionFile);
+		if (stripped > 0) {
+			console.log(
+				`[melon] fork ${parentCardId}→${newCardId}: stripped ${stripped} cursor resume handle(s) from child session`,
+			);
+		}
+
+		// Fresh runtimes for both cards (fork left `s.runtime` on the child file).
+		await attachSession(newCardId, SessionManager.open(childSessionFile), parentModel, parentSkills);
+		await attachSession(parentCardId, SessionManager.open(parentSessionFile), parentModel, parentSkills);
 
 		const childRuntime = registry.get(newCardId)!;
 		return {
@@ -629,6 +649,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			model: modelToString(childRuntime.runtime.session.model),
 			forkedFromEntryId: leaf?.id,
 			parentSessionFile,
+			strippedCursorResumeEntries: stripped,
 		};
 	});
 
@@ -1319,6 +1340,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			const text = (req.body as any)?.text ?? "";
 			// Skills are activated via pi's native /skill: followUp on toggle —
 			// NOT appended per-prompt (that bloated the context window).
+			await activateCursorSessionBinding(s.runtime);
 			await s.runtime.session.prompt(text);
 			console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
 		} catch (e) {

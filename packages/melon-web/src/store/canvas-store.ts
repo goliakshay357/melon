@@ -31,6 +31,156 @@ const streams = new Map<
 >();
 const attached = new Set<string>(); // cardIds with an existing server-side session
 
+/** Live in-memory canvases (including background ones still streaming). */
+export type CanvasActivity = "idle" | "streaming" | "error";
+
+interface WorkspaceSnapshot {
+	cards: SessionCard[];
+	viewport?: { x: number; y: number; zoom: number };
+	name: string;
+	touchedAt: number;
+}
+
+const WORKSPACE_LRU_MAX = 8;
+const workspaces = new Map<string, WorkspaceSnapshot>();
+/** cardId → canvasId so SSE can patch background canvases. */
+const cardCanvas = new Map<string, string>();
+
+function activityOf(cards: SessionCard[]): CanvasActivity {
+	if (cards.some((c) => c.status === "streaming")) return "streaming";
+	if (cards.some((c) => c.status === "error")) return "error";
+	return "idle";
+}
+
+function reindexCanvasCards(canvasId: string, cards: SessionCard[]) {
+	for (const [cid, cv] of cardCanvas) {
+		if (cv === canvasId) cardCanvas.delete(cid);
+	}
+	for (const c of cards) cardCanvas.set(c.id, canvasId);
+}
+
+function forgetWorkspace(canvasId: string) {
+	const ws = workspaces.get(canvasId);
+	if (ws) {
+		for (const c of ws.cards) {
+			const st = streams.get(c.id);
+			if (st) {
+				st.es.close();
+				streams.delete(c.id);
+			}
+			attached.delete(c.id);
+			cardCanvas.delete(c.id);
+		}
+		workspaces.delete(canvasId);
+	}
+	// Active canvas may never have been stashed (never switched away). Still
+	// tear down its live SSE so delete/openFolder cannot leak streams.
+	const active = useCanvasStore.getState();
+	if (active.canvasId === canvasId) {
+		for (const c of active.cards) {
+			const st = streams.get(c.id);
+			if (st) {
+				st.es.close();
+				streams.delete(c.id);
+			}
+			attached.delete(c.id);
+			cardCanvas.delete(c.id);
+		}
+	}
+}
+
+function clearAllWorkspaces() {
+	for (const id of [...workspaces.keys()]) forgetWorkspace(id);
+	for (const [cardId, st] of streams) {
+		st.es.close();
+		streams.delete(cardId);
+	}
+	attached.clear();
+	cardCanvas.clear();
+	workspaces.clear();
+}
+
+function evictIdleWorkspaces(keepId: string | null) {
+	const idle = [...workspaces.entries()]
+		.filter(([id, w]) => {
+			if (keepId && id === keepId) return false;
+			if (activityOf(w.cards) !== "idle") return false;
+			if (w.cards.some((c) => streams.has(c.id) || attached.has(c.id))) return false;
+			return true;
+		})
+		.sort((a, b) => a[1].touchedAt - b[1].touchedAt);
+	while (workspaces.size > WORKSPACE_LRU_MAX && idle.length > 0) {
+		const [id] = idle.shift()!;
+		const w = workspaces.get(id);
+		workspaces.delete(id);
+		if (w) for (const c of w.cards) cardCanvas.delete(c.id);
+	}
+}
+
+function findCard(cardId: string): SessionCard | undefined {
+	const state = useCanvasStore.getState();
+	const active = state.cards.find((c) => c.id === cardId);
+	if (active) return active;
+	const canvasId = cardCanvas.get(cardId);
+	if (!canvasId) return undefined;
+	return workspaces.get(canvasId)?.cards.find((c) => c.id === cardId);
+}
+
+function stashActiveWorkspace() {
+	const { canvasId, cards, viewport, canvasName, canvasActivity } = useCanvasStore.getState();
+	if (!canvasId) return;
+	workspaces.set(canvasId, {
+		cards: cards.map((c) => ({ ...c })),
+		viewport,
+		name: canvasName,
+		touchedAt: Date.now(),
+	});
+	reindexCanvasCards(canvasId, cards);
+	useCanvasStore.setState({
+		canvasActivity: { ...canvasActivity, [canvasId]: activityOf(cards) },
+	});
+	evictIdleWorkspaces(canvasId);
+}
+
+/**
+ * Patch a card whether it lives on the active canvas or a background workspace.
+ * Keeps SSE streaming updates alive after switchCanvas.
+ */
+function patchCardInStore(cardId: string, updater: (c: SessionCard) => SessionCard) {
+	const state = useCanvasStore.getState();
+	if (state.cards.some((c) => c.id === cardId)) {
+		const cards = state.cards.map((c) => (c.id === cardId ? updater(c) : c));
+		const canvasId = state.canvasId;
+		const canvasActivity = canvasId
+			? { ...state.canvasActivity, [canvasId]: activityOf(cards) }
+			: state.canvasActivity;
+		useCanvasStore.setState({ cards, canvasActivity });
+		if (canvasId) {
+			const prev = workspaces.get(canvasId);
+			if (prev) workspaces.set(canvasId, { ...prev, cards, touchedAt: Date.now() });
+			else {
+				workspaces.set(canvasId, {
+					cards,
+					viewport: state.viewport,
+					name: state.canvasName,
+					touchedAt: Date.now(),
+				});
+			}
+			reindexCanvasCards(canvasId, cards);
+		}
+		return;
+	}
+	const canvasId = cardCanvas.get(cardId);
+	if (!canvasId) return;
+	const ws = workspaces.get(canvasId);
+	if (!ws) return;
+	const cards = ws.cards.map((c) => (c.id === cardId ? updater(c) : c));
+	workspaces.set(canvasId, { ...ws, cards, touchedAt: Date.now() });
+	useCanvasStore.setState((s) => ({
+		canvasActivity: { ...s.canvasActivity, [canvasId]: activityOf(cards) },
+	}));
+}
+
 // Undo stack: pre-mutation card snapshots (in-memory only).
 const undoStack: SessionCard[][] = [];
 function pushUndo(cards: SessionCard[]) {
@@ -81,17 +231,10 @@ function pushEvent(
 	ev: { kind: import("@/types/session-card").TraceKind; name: string; detail?: string },
 ): string {
 	const id = `ev_${++eventIdCounter}`;
-	useCanvasStore.setState((s) => ({
-		cards: s.cards.map((c) =>
-			c.id === cardId
-				? {
-						...c,
-						events: [
-							...(c.events ?? []),
-							{ id, ts: Date.now(), kind: ev.kind, name: ev.name, detail: ev.detail },
-						].slice(-400),
-					}
-				: c,
+	patchCardInStore(cardId, (c) => ({
+		...c,
+		events: [...(c.events ?? []), { id, ts: Date.now(), kind: ev.kind, name: ev.name, detail: ev.detail }].slice(
+			-400,
 		),
 	}));
 	return id;
@@ -99,29 +242,17 @@ function pushEvent(
 
 /** Update the latest event of a card (duration/status/detail). */
 function patchEvent(cardId: string, id: string, patch: Partial<import("@/types/session-card").TraceEvent>) {
-	useCanvasStore.setState((s) => ({
-		cards: s.cards.map((c) =>
-			c.id === cardId
-				? {
-						...c,
-						events: (c.events ?? []).map((e) => (e.id === id ? { ...e, ...patch } : e)),
-					}
-				: c,
-		),
+	patchCardInStore(cardId, (c) => ({
+		...c,
+		events: (c.events ?? []).map((e) => (e.id === id ? { ...e, ...patch } : e)),
 	}));
 }
 
 function pushLog(cardId: string, line: string) {
 	const t = new Date().toLocaleTimeString([], { hour12: false });
-	useCanvasStore.setState((s) => ({
-		cards: s.cards.map((c) =>
-			c.id === cardId
-				? {
-						...c,
-						logs: [...(c.logs ?? []), `${t}  ${line}`].slice(-60),
-					}
-				: c,
-		),
+	patchCardInStore(cardId, (c) => ({
+		...c,
+		logs: [...(c.logs ?? []), `${t}  ${line}`].slice(-60),
 	}));
 }
 
@@ -160,6 +291,8 @@ interface CanvasState {
 	serverOffline: boolean;
 	canvases: CanvasMeta[]; // canvases within current folder
 	canvasTreeRev: number; // bumped on every canvas mutation — navigator listens
+	/** Per-canvas run status — drives navbar dots for active AND background canvases. */
+	canvasActivity: Record<string, CanvasActivity>;
 	viewport?: { x: number; y: number; zoom: number };
 	setViewport: (v: { x: number; y: number; zoom: number }) => void;
 	restoreLast: () => Promise<void>;
@@ -171,6 +304,8 @@ interface CanvasState {
 	openFolder: (folder: string) => Promise<void>;
 	switchCanvas: (id: string) => Promise<void>;
 	createCanvas: (name: string) => Promise<void>;
+	/** Drop a canvas from the live cache (SSE, activity). Call when deleting. */
+	forgetCanvas: (id: string) => void;
 	startConversation: (
 		text: string,
 		position: { x: number; y: number },
@@ -228,6 +363,8 @@ function loadLastLocation(): { folder: string | null; canvasId: string | null } 
 let healthTimer: ReturnType<typeof setInterval> | null = null;
 let restoring = false;
 let startingConversation = false;
+/** Serialize canvas switches — overlapping switches corrupt the workspace cache. */
+let switchingCanvas = false;
 
 const loc = loadLastLocation();
 
@@ -242,6 +379,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	canvasName: "",
 	canvases: [],
 	canvasTreeRev: 0,
+	canvasActivity: {},
 	hydrated: false,
 	serverOffline: false,
 	setViewport(v) {
@@ -335,21 +473,21 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		} catch {
 			return;
 		}
-		// Reflect immediately everywhere.
+		// Reflect immediately everywhere (active title + background cache name).
 		set((s) => ({
 			canvasName: s.canvasId === canvasId ? trimmed : s.canvasName,
 			canvasTreeRev: s.canvasTreeRev + 1,
 		}));
+		const cached = workspaces.get(canvasId);
+		if (cached) workspaces.set(canvasId, { ...cached, name: trimmed, touchedAt: Date.now() });
 	},
 
 	async saveCanvas() {
 		const { folder, canvasId, canvasName, cards, viewport, hydrated } = get();
 		if (!folder || !canvasId || !hydrated) return;
+		const cold = settleTransientStatuses(cards);
 		try {
-			localStorage.setItem(
-				`melon:backup:${canvasId}`,
-				JSON.stringify({ name: canvasName, viewport, cards: settleTransientStatuses(cards) }),
-			);
+			localStorage.setItem(`melon:backup:${canvasId}`, JSON.stringify({ name: canvasName, viewport, cards: cold }));
 		} catch {
 			/* quota — non-fatal */
 		}
@@ -363,7 +501,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					name: canvasName || "Untitled",
 					cwd: folder,
 					viewport,
-					cards: settleTransientStatuses(cards),
+					cards: cold,
 				},
 			}),
 		}).catch(() => {});
@@ -372,26 +510,89 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	async switchCanvas(id) {
 		const folder = get().folder;
 		if (!folder) return;
-		const res = await fetch(`/canvases/${id}?cwd=${encodeURIComponent(folder)}`).catch(() => null);
-		if (!res?.ok) return;
-		const cv = await res.json();
-		set({
-			cards: settleTransientStatuses(Array.isArray(cv.cards) ? cv.cards : []),
-			canvasId: id,
-			canvasName: cv.name ?? "Untitled",
-			viewport: cv.viewport,
-		});
-		localStorage.setItem("melon:lastCanvas", id);
-		// Ground truth pass: rebuild chats from pi .jsonl files.
-		for (const c of get().cards) {
-			if (c.sessionFile) await get().hydrateMessages(c.id, c.sessionFile);
+		if (get().canvasId === id) return;
+		if (switchingCanvas) return;
+		switchingCanvas = true;
+		try {
+			const prevId = get().canvasId;
+			if (prevId) {
+				stashActiveWorkspace();
+				await get().saveCanvas();
+			}
+
+			const cached = workspaces.get(id);
+			if (cached) {
+				set({
+					cards: cached.cards,
+					canvasId: id,
+					canvasName: cached.name,
+					viewport: cached.viewport,
+					canvasActivity: {
+						...get().canvasActivity,
+						[id]: activityOf(cached.cards),
+					},
+				});
+				reindexCanvasCards(id, cached.cards);
+				workspaces.set(id, { ...cached, touchedAt: Date.now() });
+				localStorage.setItem("melon:lastCanvas", id);
+				return;
+			}
+
+			const res = await fetch(`/canvases/${id}?cwd=${encodeURIComponent(folder)}`).catch(() => null);
+			if (!res?.ok) return;
+			const cv = await res.json();
+			const loaded = Array.isArray(cv.cards) ? (cv.cards as SessionCard[]) : [];
+			// Cold load: no live SSE for these cards yet. Keep any still-attached
+			// stream state if the card id somehow survived (should not after clear).
+			const cards = loaded.map((c) => {
+				if (streams.has(c.id)) return c;
+				return c.status === "idle" ? c : { ...c, status: "idle" as const };
+			});
+			const name = cv.name ?? "Untitled";
+			const viewport = cv.viewport as CanvasState["viewport"];
+			set({
+				cards,
+				canvasId: id,
+				canvasName: name,
+				viewport,
+				canvasActivity: { ...get().canvasActivity, [id]: activityOf(cards) },
+			});
+			workspaces.set(id, { cards, viewport, name, touchedAt: Date.now() });
+			reindexCanvasCards(id, cards);
+			localStorage.setItem("melon:lastCanvas", id);
+			evictIdleWorkspaces(id);
+			// Ground truth pass only for cards without a live stream.
+			for (const c of get().cards) {
+				if (c.sessionFile && !streams.has(c.id)) await get().hydrateMessages(c.id, c.sessionFile);
+			}
+		} finally {
+			switchingCanvas = false;
 		}
+	},
+
+	forgetCanvas(id) {
+		forgetWorkspace(id);
+		set((s) => {
+			const next = { ...s.canvasActivity };
+			delete next[id];
+			return { canvasActivity: next };
+		});
 	},
 
 	async createCanvas(name) {
 		if (!get().folder) return;
+		if (get().canvasId) {
+			stashActiveWorkspace();
+			await get().saveCanvas();
+		}
 		const id = `cv_${nanoid(8)}`;
-		set({ canvasId: id, canvasName: name || "Untitled", cards: [] });
+		set({
+			canvasId: id,
+			canvasName: name || "Untitled",
+			cards: [],
+			canvasActivity: { ...get().canvasActivity, [id]: "idle" },
+		});
+		workspaces.set(id, { cards: [], name: name || "Untitled", touchedAt: Date.now() });
 		localStorage.setItem("melon:lastCanvas", id);
 		await get().saveCanvas();
 		// refresh list
@@ -431,12 +632,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		// Keep the empty-state composer up: set the folder, load the canvas
 		// list for the sidebar, but do not auto-open an existing canvas.
 		// First send (or an explicit sidebar click) creates/opens a canvas.
+		clearAllWorkspaces();
 		set({
 			folder: rawFolder,
 			canvases: [],
 			cards: [],
 			canvasId: null,
 			canvasName: "",
+			canvasActivity: {},
 		});
 		localStorage.setItem("melon:lastFolder", rawFolder);
 		localStorage.removeItem("melon:lastCanvas");
@@ -468,7 +671,22 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			skills: [],
 			documentContent: "",
 		};
-		set((s) => ({ cards: [...s.cards, card] }));
+		set((s) => {
+			const cards = [...s.cards, card];
+			const canvasId = s.canvasId;
+			if (canvasId) {
+				cardCanvas.set(card.id, canvasId);
+				const prev = workspaces.get(canvasId);
+				workspaces.set(canvasId, {
+					cards,
+					viewport: s.viewport,
+					name: s.canvasName,
+					touchedAt: Date.now(),
+					...(prev ? {} : {}),
+				});
+			}
+			return { cards };
+		});
 		return card.id;
 	},
 
@@ -524,9 +742,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	},
 
 	updateCard(id, patch) {
-		set((s) => ({
-			cards: s.cards.map((c) => (c.id === id ? { ...c, ...patch } : c)),
-		}));
+		patchCardInStore(id, (c) => ({ ...c, ...patch }));
 	},
 
 	// Toggle a card's active skills (persists via autosave; live-switches if attached).
@@ -576,7 +792,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	// returns so the client mirror can never drift from what will execute.
 	queueToDraft(id, texts) {
 		if (texts.length === 0) return;
-		const cur = get().cards.find((c) => c.id === id);
+		const cur = findCard(id);
 		const base = cur?.pendingDraft;
 		get().updateCard(id, {
 			pendingDraft: base ? `${base}\n\n${texts.join("\n\n")}` : texts.join("\n\n"),
@@ -600,7 +816,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			// 404s — clearing the queue there would silently drop live text.
 			const body = (await res.json().catch(() => ({}))) as { error?: string };
 			if (body.error === "unknown card") {
-				const cur = get().cards.find((c) => c.id === id);
+				const cur = findCard(id);
 				const orphans = [...(cur?.queue ?? [])];
 				get().updateCard(id, { queue: [] });
 				if (orphans.length) get().queueToDraft(id, orphans);
@@ -637,7 +853,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			// server without this route) must NOT touch the queue.
 			const body = (await res.json().catch(() => ({}))) as { error?: string };
 			if (body.error !== "unknown card") return;
-			const cur = get().cards.find((c) => c.id === id);
+			const cur = findCard(id);
 			const orphans = [...(cur?.queue ?? [])];
 			get().updateCard(id, { queue: [] });
 			if (orphans.length) get().queueToDraft(id, orphans);
@@ -650,7 +866,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
 	// One path for model changes — keeps UI and backend in sync always.
 	setModel(id, model) {
-		const prev = get().cards.find((c) => c.id === id)?.model;
+		const prev = findCard(id)?.model;
 		get().updateCard(id, { model });
 		// Persist as the new default for future cards.
 		fetch("/settings/model", {
@@ -691,7 +907,21 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	undo() {
 		const snapshot = undoStack.pop();
 		if (!snapshot) return false;
-		set({ cards: snapshot });
+		const canvasId = get().canvasId;
+		set({
+			cards: snapshot,
+			...(canvasId ? { canvasActivity: { ...get().canvasActivity, [canvasId]: activityOf(snapshot) } } : {}),
+		});
+		if (canvasId) {
+			const prev = workspaces.get(canvasId);
+			workspaces.set(canvasId, {
+				cards: snapshot,
+				viewport: get().viewport,
+				name: prev?.name ?? get().canvasName,
+				touchedAt: Date.now(),
+			});
+			reindexCanvasCards(canvasId, snapshot);
+		}
 		return true;
 	},
 
@@ -703,12 +933,31 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		if (ids.length === 0) return;
 		pushUndo(get().cards);
 		const dead = new Set(ids);
-		set((s) => ({
-			// Orphan children rather than cascading — forks survive parents in v1.
-			cards: s.cards
+		for (const id of ids) {
+			const st = streams.get(id);
+			if (st) {
+				st.es.close();
+				streams.delete(id);
+			}
+			attached.delete(id);
+			cardCanvas.delete(id);
+			fetch(`/sessions/${id}/abort`, { method: "POST" }).catch(() => {});
+		}
+		set((s) => {
+			const cards = s.cards
 				.filter((c) => !dead.has(c.id))
-				.map((c) => (c.parentId && dead.has(c.parentId) ? { ...c, parentId: null } : c)),
-		}));
+				.map((c) => (c.parentId && dead.has(c.parentId) ? { ...c, parentId: null } : c));
+			const canvasId = s.canvasId;
+			if (canvasId) {
+				const prev = workspaces.get(canvasId);
+				if (prev) workspaces.set(canvasId, { ...prev, cards, touchedAt: Date.now() });
+				reindexCanvasCards(canvasId, cards);
+			}
+			return {
+				cards,
+				canvasActivity: canvasId ? { ...s.canvasActivity, [canvasId]: activityOf(cards) } : s.canvasActivity,
+			};
+		});
 	},
 
 	async resumeSession(sessionFile) {
@@ -755,21 +1004,19 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			if (!st.pendingPatch) continue;
 			const fn = st.pendingPatch;
 			st.pendingPatch = undefined;
-			const cur = get().cards.find((c) => c.id === cardId);
+			const cur = findCard(cardId);
 			if (!cur) continue;
 			const msgs = [...cur.messages];
 			const last = msgs[msgs.length - 1];
 			if (last?.role === "assistant") msgs[msgs.length - 1] = fn(last);
 			else msgs.push(fn({ role: "assistant", text: "" }));
-			useCanvasStore.setState((s) => ({
-				cards: s.cards.map((c) => (c.id === cardId ? { ...c, messages: msgs } : c)),
-			}));
+			patchCardInStore(cardId, (c) => ({ ...c, messages: msgs }));
 		}
 	},
 
 	// Rebuild chat from pi session ground truth (.jsonl).
 	async hydrateMessages(cardId, sessionFile) {
-		const file = sessionFile ?? get().cards.find((c) => c.id === cardId)?.sessionFile;
+		const file = sessionFile ?? findCard(cardId)?.sessionFile;
 		if (!file) return;
 		try {
 			const res = await fetch(`/transcript?sessionFile=${encodeURIComponent(file)}`);
@@ -795,7 +1042,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	},
 
 	async sendMessage(cardId, text, opts) {
-		const card = get().cards.find((c) => c.id === cardId);
+		const card = findCard(cardId);
 		if (!card || !text.trim()) return false;
 		const sessionFile = opts?.sessionFile ?? card.sessionFile;
 		const cwd = opts?.cwd ?? get().folder;
@@ -926,18 +1173,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					const fn = st!.pendingPatch;
 					if (!fn) return;
 					st!.pendingPatch = undefined;
-					const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
-					if (!cur) return;
-					const msgs = [...cur.messages];
-					const last = msgs[msgs.length - 1];
-					if (last?.role === "assistant") {
-						msgs[msgs.length - 1] = fn(last);
-					} else {
-						msgs.push(fn({ role: "assistant", text: "" }));
-					}
-					useCanvasStore.setState((s) => ({
-						cards: s.cards.map((c) => (c.id === cardId ? { ...c, messages: msgs } : c)),
-					}));
+					patchCardInStore(cardId, (c) => {
+						const msgs = [...c.messages];
+						const last = msgs[msgs.length - 1];
+						if (last?.role === "assistant") msgs[msgs.length - 1] = fn(last);
+						else msgs.push(fn({ role: "assistant", text: "" }));
+						return { ...c, messages: msgs };
+					});
 				};
 				const patchLastAssistant = (fn: (m: ChatMessage) => ChatMessage, immediate = false) => {
 					const prev = st!.pendingPatch;
@@ -960,41 +1202,38 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					// tool by callId. Tool events can arrive AFTER a new output segment has
 					// opened — updating only the last message would leave the real tool
 					// stuck on "running" forever (the visible bug).
-					useCanvasStore.setState((s) => ({
-						cards: s.cards.map((c) => {
-							if (c.id !== cardId) return c;
-							let found = false;
-							const messages = c.messages.map((m) => {
-								if (m.role !== "assistant" || found) return m;
-								if (!m.tools?.some((t) => t.callId === run.callId)) return m;
-								found = true;
-								const tools = [...m.tools];
-								const i = tools.findIndex((t) => t.callId === run.callId);
-								if (i >= 0) tools[i] = { ...tools[i], ...run } as ToolRun;
-								return { ...m, tools };
+					patchCardInStore(cardId, (c) => {
+						let found = false;
+						const messages = c.messages.map((m) => {
+							if (m.role !== "assistant" || found) return m;
+							if (!m.tools?.some((t) => t.callId === run.callId)) return m;
+							found = true;
+							const tools = [...m.tools];
+							const i = tools.findIndex((t) => t.callId === run.callId);
+							if (i >= 0) tools[i] = { ...tools[i], ...run } as ToolRun;
+							return { ...m, tools };
+						});
+						if (found) return { ...c, messages };
+						// First sighting — attach to the last assistant message (or open one).
+						const msgs = [...c.messages];
+						const last = msgs[msgs.length - 1];
+						if (last?.role === "assistant") {
+							msgs[msgs.length - 1] = {
+								...last,
+								tools: [
+									...(last.tools ?? []),
+									{ name: "tool", status: "running", output: "", ...run } as ToolRun,
+								],
+							};
+						} else {
+							msgs.push({
+								role: "assistant",
+								text: "",
+								tools: [{ name: "tool", status: "running", output: "", ...run } as ToolRun],
 							});
-							if (found) return { ...c, messages };
-							// First sighting — attach to the last assistant message (or open one).
-							const msgs = [...c.messages];
-							const last = msgs[msgs.length - 1];
-							if (last?.role === "assistant") {
-								msgs[msgs.length - 1] = {
-									...last,
-									tools: [
-										...(last.tools ?? []),
-										{ name: "tool", status: "running", output: "", ...run } as ToolRun,
-									],
-								};
-							} else {
-								msgs.push({
-									role: "assistant",
-									text: "",
-									tools: [{ name: "tool", status: "running", output: "", ...run } as ToolRun],
-								});
-							}
-							return { ...c, messages: msgs };
-						}),
-					}));
+						}
+						return { ...c, messages: msgs };
+					});
 				};
 
 				const appendToLastAssistant = (patch: { text?: string; thinking?: string }) => {
@@ -1006,12 +1245,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					// Pending text belongs to the PREVIOUS segment — land it first.
 					cancelFlush();
 					applyPending();
-					useCanvasStore.setState((s) => ({
-						cards: s.cards.map((c) =>
-							c.id === cardId
-								? { ...c, messages: [...c.messages, { role: "assistant" as const, text: "", tools: [] }] }
-								: c,
-						),
+					patchCardInStore(cardId, (c) => ({
+						...c,
+						messages: [...c.messages, { role: "assistant" as const, text: "", tools: [] }],
 					}));
 				};
 
@@ -1072,7 +1308,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						st!.thinkingEventId = undefined;
 					}
 					// Close the prompt event with total duration.
-					const evs = useCanvasStore.getState().cards.find((c) => c.id === cardId)?.events ?? [];
+					const evs = findCard(cardId)?.events ?? [];
 					const pe = [...evs].reverse().find((e) => e.id === promptEventId);
 					if (pe) {
 						patchEvent(cardId, pe.id, {
@@ -1102,7 +1338,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 							detail: "",
 						});
 						st!.thinkingStartTs = Date.now();
-						const dbg = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+						const dbg = findCard(cardId);
 						pushLog(
 							cardId,
 							`[state] thinking-start lastRole=${dbg?.messages[dbg.messages.length - 1]?.role} pending=${st!.pendingPatch ? "yes" : "no"} segSealed=${st!.segSealed}`,
@@ -1146,7 +1382,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						applyPending();
 						// Queue is server-truth ({type:"queue"} events) — do not
 						// clear or pop here; consumption is detected server-side.
-						const dbg = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+						const dbg = findCard(cardId);
 						pushLog(
 							cardId,
 							`[state] idle roles=${JSON.stringify(dbg?.messages.map((m) => m.role))} pending=${st!.pendingPatch ? "yes" : "no"}`,
@@ -1155,7 +1391,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						return;
 					}
 					if (data.status === "streaming") {
-						const dbg = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+						const dbg = findCard(cardId);
 						pushLog(
 							cardId,
 							`[state] streaming roles=${JSON.stringify(dbg?.messages.map((m) => m.role))} segSealed=${st!.segSealed}`,
@@ -1174,7 +1410,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					// A queued message just reached the model (drain started it).
 					// Direct sends are appended optimistically — skip the echo.
 					const um = data as { text: string };
-					const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+					const cur = findCard(cardId);
 					if (!cur) return;
 					const last = cur.messages[cur.messages.length - 1];
 					pushLog(
@@ -1198,7 +1434,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					pushLog(cardId, `✗ agent error: ${msg ?? "unknown"}`);
 					if (msg) pushEvent(cardId, { kind: "system", name: "error", detail: msg.slice(0, 300) });
 					get().setCardError(cardId, msg ?? "agent error");
-					const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+					const cur = findCard(cardId);
 					const queuedBack = cur?.queue ?? [];
 					useCanvasStore.getState().updateCard(cardId, { status: "error", queue: [] });
 					if (queuedBack.length) {
@@ -1219,7 +1455,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				// The run's outcome is now unknowable — release the Stop button
 				// instead of leaving the card stuck on streaming forever. Queued
 				// text never reached the transcript — hand it back (server wins).
-				const cur = useCanvasStore.getState().cards.find((c) => c.id === cardId);
+				const cur = findCard(cardId);
 				const queuedBack = cur?.queue ?? [];
 				useCanvasStore.getState().updateCard(cardId, { status: "idle", queue: [] });
 				if (queuedBack.length) {
@@ -1271,7 +1507,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			return true;
 		}
 		// Accepted immediately — NOW it lands in the transcript.
-		const cur = get().cards.find((c) => c.id === cardId);
+		const cur = findCard(cardId);
 		get().updateCard(cardId, {
 			status: "streaming",
 			title: isFirstMessage ? text.slice(0, 40) : card.title,

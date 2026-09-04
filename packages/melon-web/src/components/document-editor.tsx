@@ -97,7 +97,13 @@ function EditorInner({
     }, [loading]);
 
     return (
-        <div ref={boxRef} className="nodrag h-full" onMouseDown={focusEditor}>
+        <div
+            ref={boxRef}
+            className="nodrag h-full"
+            onMouseDown={focusEditor}
+            // Keep canvas/React Flow from seeing editor keystrokes (undo, delete).
+            onKeyDown={(e) => e.stopPropagation()}
+        >
             <Milkdown />
         </div>
     );
@@ -114,8 +120,10 @@ export function DocumentEditor({
     const theme = useActiveTheme();
     return (
         <div
-            className="nowheel h-full overflow-y-auto px-3 py-2"
+            className="nowheel h-full overflow-y-auto bg-background px-3 py-2 text-foreground"
+            // Keep viz tokens as a fallback for sandboxed consumers; CSS vars drive chrome.
             style={{ background: theme.tokens.vizBackground, color: theme.tokens.vizForeground }}
+            data-appearance={theme.appearance}
         >
             <MilkdownProvider>
                 <EditorInner content={content} onChange={onChange} />

@@ -22,6 +22,7 @@ import { VizFullscreenLayer } from '@/components/viz-fullscreen-layer';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useActiveTheme } from '@/theme/theme-store';
 import { SettingsPage } from '@/settings/settings-page';
+import { isTypingTarget } from '@/lib/utils';
 import { DEFAULT_CARD_SIZE } from '@/types/session-card';
 
 type AppNode = ChatCardNodeType | DocumentCardNodeType;
@@ -77,16 +78,28 @@ export function Canvas() {
 		rfSetViewport(storedViewport);
 	}, [nodes.length, canvasId, storedViewport, rfSetViewport]);
 
-	// Cmd/Ctrl+Z restores the last deleted/added card (ignored while typing).
+	// Track focus in editors/inputs so canvas delete/undo never steal from them.
+	const [typingFocus, setTypingFocus] = useState(() => isTypingTarget(document.activeElement));
+	useEffect(() => {
+		const sync = () => setTypingFocus(isTypingTarget(document.activeElement));
+		window.addEventListener('focusin', sync);
+		window.addEventListener('focusout', sync);
+		sync();
+		return () => {
+			window.removeEventListener('focusin', sync);
+			window.removeEventListener('focusout', sync);
+		};
+	}, []);
+
+	// Cmd/Ctrl+Z restores the last deleted/added card — never while editing text
+	// (Milkdown/ProseMirror is contenteditable, not INPUT/TEXTAREA).
 	useEffect(() => {
 		const onKey = (e: KeyboardEvent) => {
 			if (useCanvasStore.getState().activeView !== 'canvas') return;
-			if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
-				const tag = (e.target as HTMLElement)?.tagName;
-				if (tag === 'INPUT' || tag === 'TEXTAREA') return;
-				e.preventDefault();
-				useCanvasStore.getState().undo();
-			}
+			if (!(e.metaKey || e.ctrlKey) || e.key.toLowerCase() !== 'z') return;
+			if (isTypingTarget(e.target) || isTypingTarget(document.activeElement)) return;
+			e.preventDefault();
+			useCanvasStore.getState().undo();
 		};
 		window.addEventListener('keydown', onKey);
 		return () => window.removeEventListener('keydown', onKey);
@@ -250,7 +263,8 @@ export function Canvas() {
                 snapGrid={[20, 20]}
                 selectionMode={SelectionMode.Full}
                 multiSelectionKeyCode={['Shift', 'Meta', 'Control']}
-                deleteKeyCode={['Backspace', 'Delete']}
+                // Null while typing so Backspace/Delete edit text, not delete cards.
+                deleteKeyCode={typingFocus ? null : ['Backspace', 'Delete']}
                 onPaneContextMenu={(e) => {
                     e.preventDefault();
                     setMenu({ x: e.clientX, y: e.clientY });
@@ -261,7 +275,14 @@ export function Canvas() {
                 colorMode={theme.appearance}
                 proOptions={{ hideAttribution: true }}
             >
-                <Background variant={BackgroundVariant.Dots} gap={16} size={1} color={theme.tokens.canvasDot} />
+                {cards.length > 0 && (
+                    <Background
+                        variant={BackgroundVariant.Dots}
+                        gap={16}
+                        size={1}
+                        color={theme.tokens.canvasDot}
+                    />
+                )}
             </ReactFlow>
 
             {cards.length === 0 && (
@@ -273,7 +294,7 @@ export function Canvas() {
             )}
 
             {/* <TopBar /> DISABLED — re-enable later */}
-            <Toolbar />
+            {cards.length > 0 && <Toolbar />}
 
             {/* Right-click context menu */}
             {menu && (

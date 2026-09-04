@@ -63,7 +63,7 @@ export function PromptComposer({
         <div
             className={cn(
                 'rounded-xl border border-input bg-background shadow-sm focus-within:border-ring',
-                hero && 'shadow-lg',
+                hero && 'relative border-transparent shadow-none focus-within:border-transparent',
                 className,
             )}
         >

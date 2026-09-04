@@ -40,10 +40,11 @@
 .md-body h1 { font-size: 1.35em; border-bottom: 1px solid hsl(var(--border)); padding-bottom: 0.25em; }
 .md-body h2 { font-size: 1.2em; }
 .md-body h3 { font-size: 1.05em; }
-.md-body ul, .md-body ol { margin: 0.5em 0; padding-left: 1.5em; }
+.md-body ul, .md-body ol { margin: 0.5em 0; padding-left: 1.5em; color: inherit; }
 .md-body ul { list-style: disc; }
 .md-body ol { list-style: decimal; }
-.md-body li { margin: 0.2em 0; }
+.md-body li { margin: 0.2em 0; color: inherit; }
+.md-body li::marker { color: hsl(var(--card-foreground)); }
 .md-body li > p { margin: 0.15em 0; }
 .md-body code {
     background: hsl(var(--secondary));
@@ -88,55 +89,183 @@
     stroke-width: 2.5;
 }
 
-/* ── Milkdown / ProseMirror document editor (dark, minimal) ── */
+/* Native form controls (task-list checkboxes) follow appearance. */
+[data-appearance="dark"] {
+    color-scheme: dark;
+}
+[data-appearance="light"] {
+    color-scheme: light;
+}
+
+/* ── Empty home: quiet theme wash (no canvas dots) ── */
+.melon-home-wash {
+    background:
+        radial-gradient(
+            ellipse 75% 50% at 50% 38%,
+            hsl(var(--primary) / 0.09),
+            transparent 70%
+        ),
+        radial-gradient(
+            ellipse 55% 40% at 78% 78%,
+            hsl(var(--accent) / 0.05),
+            transparent 65%
+        ),
+        linear-gradient(
+            168deg,
+            hsl(var(--background)) 0%,
+            hsl(var(--surface)) 48%,
+            hsl(var(--background)) 100%
+        );
+}
+
+/* Thin radium edge on the empty-home composer — 1px sweep, low opacity. */
+@property --hero-glow-angle {
+    syntax: "<angle>";
+    inherits: false;
+    initial-value: 0deg;
+}
+
+.hero-composer-glow {
+    isolation: isolate;
+    box-shadow:
+        0 0 0 1px hsl(var(--border) / 0.55),
+        0 8px 28px -18px hsl(var(--foreground) / 0.28);
+}
+
+.hero-composer-glow::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    padding: 1px;
+    background: conic-gradient(
+        from var(--hero-glow-angle),
+        transparent 0deg,
+        transparent 250deg,
+        hsl(var(--primary) / 0.55) 290deg,
+        hsl(var(--primary) / 0.9) 310deg,
+        hsl(var(--primary) / 0.55) 330deg,
+        transparent 360deg
+    );
+    -webkit-mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+    mask:
+        linear-gradient(#fff 0 0) content-box,
+        linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    animation: hero-glow-spin 5.5s linear infinite;
+    opacity: 0.85;
+    pointer-events: none;
+}
+
+.hero-composer-glow:focus-within::before {
+    opacity: 1;
+}
+
+@keyframes hero-glow-spin {
+    to {
+        --hero-glow-angle: 360deg;
+    }
+}
+
+/* ── Milkdown / ProseMirror document editor (theme-aware) ──
+   Hardcoded dark hex made bullets/numbers/checkboxes/borders black-on-black
+   in Night themes; use the same CSS vars as the rest of Melon. */
 .milkdown .ProseMirror {
     outline: none;
     font-size: 13px;
     line-height: 1.7;
-    color: inherit;
+    color: hsl(var(--foreground));
+    caret-color: hsl(var(--foreground));
     min-height: 100%;
 }
 .milkdown .ProseMirror h1 { font-size: 1.6em; font-weight: 700; margin: 0.6em 0 0.3em; }
 .milkdown .ProseMirror h2 { font-size: 1.35em; font-weight: 700; margin: 0.6em 0 0.3em; }
 .milkdown .ProseMirror h3 { font-size: 1.15em; font-weight: 600; margin: 0.5em 0 0.25em; }
 .milkdown .ProseMirror p { margin: 0.35em 0; }
-.milkdown .ProseMirror a { color: #58a6ff; text-decoration: underline; }
+.milkdown .ProseMirror a { color: hsl(var(--accent)); text-decoration: underline; }
 .milkdown .ProseMirror strong { font-weight: 700; }
 .milkdown .ProseMirror code {
-    background: rgba(110, 118, 129, 0.25);
+    background: hsl(var(--secondary));
+    color: hsl(var(--foreground));
     border-radius: 4px;
     padding: 1px 4px;
     font-size: 0.9em;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 .milkdown .ProseMirror pre {
-    background: #0d1117;
-    border: 1px solid #30363d;
+    background: hsl(var(--secondary));
+    border: 1px solid hsl(var(--border));
+    color: hsl(var(--foreground));
     border-radius: 6px;
     padding: 8px 10px;
     overflow-x: auto;
     margin: 0.5em 0;
 }
-.milkdown .ProseMirror pre code { background: none; padding: 0; }
+.milkdown .ProseMirror pre code { background: none; padding: 0; color: inherit; }
 .milkdown .ProseMirror blockquote {
-    border-left: 3px solid #58a6ff;
+    border-left: 3px solid hsl(var(--primary));
     padding-left: 10px;
-    color: #8b949e;
+    color: hsl(var(--muted-foreground));
     margin: 0.4em 0;
 }
-.milkdown .ProseMirror ul, .milkdown .ProseMirror ol { margin: 0.3em 0; padding-left: 1.4em; }
-.milkdown .ProseMirror li { margin: 0.15em 0; }
-.milkdown .ProseMirror hr { border: none; border-top: 1px solid #30363d; margin: 0.7em 0; }
+.milkdown .ProseMirror ul,
+.milkdown .ProseMirror ol {
+    margin: 0.3em 0;
+    padding-left: 1.4em;
+    color: inherit;
+}
+.milkdown .ProseMirror ul { list-style: disc; }
+.milkdown .ProseMirror ol { list-style: decimal; }
+.milkdown .ProseMirror li { margin: 0.15em 0; color: inherit; }
+/* ::marker does not always inherit `color` — force theme foreground. */
+.milkdown .ProseMirror li::marker {
+    color: hsl(var(--foreground));
+}
+.milkdown .ProseMirror .task-list-item,
+.milkdown .ProseMirror li[data-item-type="task"] {
+    list-style: none;
+}
+.milkdown .ProseMirror .task-list-item::marker,
+.milkdown .ProseMirror li[data-item-type="task"]::marker {
+    content: none;
+}
+.milkdown .ProseMirror input[type="checkbox"] {
+    accent-color: hsl(var(--primary));
+    color-scheme: inherit;
+    width: 0.95em;
+    height: 0.95em;
+    margin: 0 0.4em 0 0;
+    vertical-align: middle;
+    cursor: pointer;
+}
+.milkdown .ProseMirror hr {
+    border: none;
+    border-top: 1px solid hsl(var(--border));
+    margin: 0.7em 0;
+}
 .milkdown .ProseMirror table { border-collapse: collapse; margin: 0.5em 0; width: 100%; }
-.milkdown .ProseMirror th, .milkdown .ProseMirror td {
-    border: 1px solid #30363d;
+.milkdown .ProseMirror th,
+.milkdown .ProseMirror td {
+    border: 1px solid hsl(var(--border));
     padding: 4px 8px;
     font-size: 0.95em;
+    color: inherit;
 }
-.milkdown .ProseMirror th { background: rgba(110, 118, 129, 0.2); font-weight: 600; }
+.milkdown .ProseMirror th {
+    background: hsl(var(--secondary));
+    font-weight: 600;
+}
 .milkdown .ProseMirror img { max-width: 100%; border-radius: 6px; }
-.milkdown .ProseMirror .ProseMirror-selectednode { outline: 2px solid #58a6ff; }
-.milkdown .ProseMirror ::selection { background: rgba(88, 166, 255, 0.35); }
+.milkdown .ProseMirror .ProseMirror-selectednode {
+    outline: 2px solid hsl(var(--ring));
+}
+.milkdown .ProseMirror ::selection {
+    background: hsl(var(--primary) / 0.35);
+}
 
 /* Mind-map edge endpoint dots: BOTH ends always visible for adjusting */
 .melon-endpoint {
