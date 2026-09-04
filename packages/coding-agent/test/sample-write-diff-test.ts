@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "fs";
+import { mkdirSync, readFileSync } from "fs";
 import { join, tmpdir } from "path";
 import { beforeEach, describe, expect, it } from "vitest";
 import { createEditTool, createWriteTool } from "../src/core/tools/write.ts";

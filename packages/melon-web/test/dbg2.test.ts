@@ -116,7 +116,7 @@ it("starts a fresh segment for a follow-up run on the same card", async () => {
 	const cardId = useCanvasStore.getState().cards[0].id;
 
 	await useCanvasStore.getState().sendMessage(cardId, "first");
-	expect("after-first:" + JSON.stringify(useCanvasStore.getState().cards[0].queue)).toBe("FORCE_FAIL");
+	expect(`after-first:${JSON.stringify(useCanvasStore.getState().cards[0].queue)}`).toBe("FORCE_FAIL");
 	const es = FakeEventSource.latest;
 	es?.emit({ type: "delta", text: "run-one answer" });
 	es?.emit({ type: "status", status: "idle" });

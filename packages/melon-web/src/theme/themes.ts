@@ -331,7 +331,7 @@ const NOCTIS_LUX: Theme = {
 /** Registry order = order shown in Settings and cycled by the toolbar toggle. */
 export const THEMES: Theme[] = [DRACULA, GITHUB_DARK, AYU_DARK, MOONFLY, NOCTIS_LUX, LIGHT, DIMMED];
 
-export const DEFAULT_THEME_ID = DRACULA.id;
+export const DEFAULT_THEME_ID = MOONFLY.id;
 
 export function getTheme(id: string): Theme {
 	return THEMES.find((t) => t.id === id) ?? THEMES[0];
