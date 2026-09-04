@@ -1378,11 +1378,13 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		touchFolder(dir);
 		const ws = body?.canvas ?? body?.workspace; // accept legacy key
 		if (!ws?.id) return reply.code(400).send({ error: "canvas.id required" });
-		// DATA GUARD: refuse to overwrite a populated canvas with an empty one.
+		// DATA GUARD: refuse accidental empty overwrites of a populated canvas.
+		// Explicit allowEmpty (user deleted the last card) is permitted.
 		const existingFile = join(canvasesDir(dir), `${ws.id}.json`);
 		try {
 			const existing = JSON.parse(readFileSync(existingFile, "utf8")) as Record<string, unknown>;
 			if (
+				body?.allowEmpty !== true &&
 				(!Array.isArray(ws.cards) || ws.cards.length === 0) &&
 				Array.isArray(existing.cards) &&
 				existing.cards.length > 0

@@ -501,7 +501,7 @@ interface CanvasState {
 			viewport?: { x: number; y: number; zoom: number };
 		},
 	) => Promise<boolean>;
-	saveCanvas: () => Promise<void>;
+	saveCanvas: (opts?: { allowEmpty?: boolean }) => Promise<void>;
 	scrollAction: ScrollAction;
 	setScrollAction: (a: ScrollAction) => void;
 	addCard: (
@@ -572,6 +572,11 @@ let startingConversation = false;
 let healingReconnect = false;
 /** Serialize canvas switches — overlapping switches corrupt the workspace cache. */
 let switchingCanvas = false;
+/**
+ * Canvas ids the user emptied by deleting cards. Empty saves for these are
+ * intentional; the server 409 empty-overwrite guard must not resurrect cards.
+ */
+const intentionalEmptyCanvases = new Set<string>();
 
 /** Close every live EventSource and clear attach state (server process is gone). */
 function tearDownAllStreams(logLine: string) {
@@ -812,7 +817,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		if (cached) workspaces.set(canvasId, { ...cached, name: trimmed, touchedAt: Date.now() });
 	},
 
-	async saveCanvas() {
+	async saveCanvas(opts) {
 		const {
 			folder,
 			canvasId,
@@ -827,6 +832,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			worktreeMode,
 		} = get();
 		if (!folder || !canvasId || !hydrated) return;
+		if (cards.length > 0) intentionalEmptyCanvases.delete(canvasId);
+		const allowEmpty = opts?.allowEmpty === true || (cards.length === 0 && intentionalEmptyCanvases.has(canvasId));
 		const cold = settleTransientStatuses(cards);
 		const savingId = canvasId;
 		try {
@@ -841,6 +848,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
 				cwd: folder,
+				allowEmpty: allowEmpty || undefined,
 				canvas: {
 					id: canvasId,
 					name: canvasName || "Untitled",
@@ -860,7 +868,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			return;
 		}
 		if (res.status === 409) {
-			// Server kept populated disk; drop empty in-memory cache and heal if viewing it.
+			// Accidental empty save — heal. Intentional last-card delete must not resurrect.
+			if (allowEmpty || intentionalEmptyCanvases.has(savingId)) return;
 			workspaces.delete(savingId);
 			if (get().canvasId === savingId && get().cards.length === 0) {
 				set({
@@ -960,8 +969,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
 		// Already open — bump Recent. If we're stuck on an empty in-memory view
 		// while disk still has cards (stale [] cache / refused empty save), heal.
+		// Skip when the user just deleted the last card — that empty state is real.
 		if (get().canvasId === id) {
-			if (get().cards.length === 0) {
+			if (get().cards.length === 0 && !intentionalEmptyCanvases.has(id)) {
 				switchingCanvas = true;
 				set({ canvasOpening: true });
 				try {
@@ -1444,6 +1454,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			const cards = [...s.cards, card];
 			const canvasId = s.canvasId;
 			if (canvasId) {
+				intentionalEmptyCanvases.delete(canvasId);
 				cardCanvas.set(card.id, canvasId);
 				setWorkspaceCards(canvasId, cards, {
 					viewport: s.viewport,
@@ -1760,6 +1771,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				canvasActivity: canvasId ? { ...s.canvasActivity, [canvasId]: activityOf(cards) } : s.canvasActivity,
 			};
 		});
+		const { canvasId, cards } = get();
+		if (canvasId && cards.length === 0) {
+			// Persist empty so autosave/409 heal cannot bring the last card back.
+			intentionalEmptyCanvases.add(canvasId);
+			void get().saveCanvas({ allowEmpty: true });
+		} else if (canvasId) {
+			intentionalEmptyCanvases.delete(canvasId);
+		}
 	},
 
 	async resumeSession(sessionFile) {

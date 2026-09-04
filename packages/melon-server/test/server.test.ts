@@ -372,6 +372,77 @@ describe("melon-server routes", () => {
 			rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("PUT /canvases/:id allowEmpty clears a populated canvas", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "melon-canvas-empty-"));
+		try {
+			const app = await buildApp();
+			await app.inject({ method: "POST", url: "/folders", payload: { cwd: dir } });
+
+			const seed = await app.inject({
+				method: "PUT",
+				url: "/canvases/cv_clear",
+				headers: { "content-type": "application/json" },
+				payload: {
+					cwd: dir,
+					canvas: {
+						id: "cv_clear",
+						name: "Clear me",
+						cwd: dir,
+						viewport: { x: 0, y: 0, zoom: 1 },
+						cards: [{ id: "card_1", kind: "chat", position: { x: 0, y: 0 }, messages: [] }],
+					},
+				},
+			});
+			expect(seed.statusCode).toBe(200);
+
+			const blocked = await app.inject({
+				method: "PUT",
+				url: "/canvases/cv_clear",
+				headers: { "content-type": "application/json" },
+				payload: {
+					cwd: dir,
+					canvas: {
+						id: "cv_clear",
+						name: "Clear me",
+						cwd: dir,
+						viewport: { x: 0, y: 0, zoom: 1 },
+						cards: [],
+					},
+				},
+			});
+			expect(blocked.statusCode).toBe(409);
+
+			const cleared = await app.inject({
+				method: "PUT",
+				url: "/canvases/cv_clear",
+				headers: { "content-type": "application/json" },
+				payload: {
+					cwd: dir,
+					allowEmpty: true,
+					canvas: {
+						id: "cv_clear",
+						name: "Clear me",
+						cwd: dir,
+						viewport: { x: 0, y: 0, zoom: 1 },
+						cards: [],
+					},
+				},
+			});
+			expect(cleared.statusCode).toBe(200);
+
+			const got = await app.inject({
+				method: "GET",
+				url: `/canvases/cv_clear?cwd=${encodeURIComponent(dir)}`,
+			});
+			expect(got.statusCode).toBe(200);
+			expect(got.json().cards).toEqual([]);
+
+			await app.close();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe.skipIf(!process.env.MELON_E2E)("integration (MELON_E2E=1)", () => {
