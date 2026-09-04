@@ -19,7 +19,8 @@ import { Toolbar } from './toolbar';
 import { Sidebar } from './sidebar';
 import { VizFullscreenLayer } from '@/components/viz-fullscreen-layer';
 // import { TopBar } from './topbar';  // DISABLED — re-enable later
-import { useCanvasStore } from '@/store/canvas-store';
+import { useCanvasStore, currentSpawnSize } from '@/store/canvas-store';
+import { focusViewport, isFullyVisible, SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH, type WorldRect } from '@/lib/spawn';
 import { useActiveTheme } from '@/theme/theme-store';
 import { SettingsPage } from '@/settings/settings-page';
 import { isTypingTarget } from '@/lib/utils';
@@ -171,6 +172,35 @@ export function Canvas() {
         });
     }, [cards]);
 
+    // Reveal a newly added card when it lands (partially) outside the view.
+    // Only single-card adds trigger this — canvas restores hydrate many at once
+    // and must not fight the stored viewport.
+    const knownCardIdsRef = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        const prev = knownCardIdsRef.current;
+        const added = cards.filter((c) => !prev.has(c.id));
+        knownCardIdsRef.current = new Set(cards.map((c) => c.id));
+        if (added.length !== 1) return;
+        const state = useCanvasStore.getState();
+        if (state.canvasOpening || activeView !== 'canvas') return;
+        const card = added[0];
+        const rect: WorldRect = {
+            left: card.position.x,
+            top: card.position.y,
+            right: card.position.x + (card.size?.width ?? DEFAULT_CARD_SIZE.width),
+            bottom: card.position.y + (card.size?.height ?? DEFAULT_CARD_SIZE.height),
+        };
+        const vp = state.viewport ?? { x: 0, y: 0, zoom: 1 };
+        const screen = {
+            left: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH,
+            top: 0,
+            width: window.innerWidth,
+            height: window.innerHeight,
+        };
+        if (isFullyVisible(rect, vp, screen)) return;
+        void rfSetViewport(focusViewport(rect, vp, screen), { duration: 300 });
+    }, [cards, activeView, sidebarCollapsed, rfSetViewport]);
+
     // Fork lineage → edges. Single source of truth: card.parentId.
     const edges = useMemo<Edge[]>(
         () =>
@@ -239,14 +269,15 @@ export function Canvas() {
     }, [menu, addCard, screenToFlowPosition]);
 
     const bounds = wrapperRef.current?.getBoundingClientRect();
-    const sidebarWidth = sidebarCollapsed ? 48 : 260;
+    const sidebarWidth = sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH;
+    const spawn = currentSpawnSize();
     const heroCenter = screenToFlowPosition({
         x: sidebarWidth + ((bounds?.width ?? window.innerWidth) - sidebarWidth) / 2,
         y: (bounds?.height ?? window.innerHeight) / 2,
     });
     const heroCardPosition = {
-        x: heroCenter.x - DEFAULT_CARD_SIZE.width / 2,
-        y: heroCenter.y - DEFAULT_CARD_SIZE.height / 2,
+        x: heroCenter.x - spawn.width / 2,
+        y: heroCenter.y - spawn.height / 2,
     };
 
     return (

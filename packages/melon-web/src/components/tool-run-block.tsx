@@ -561,7 +561,8 @@ function OutputLines({
 		return <div className="px-2.5 py-1.5 text-[10px] text-muted-foreground">(no output)</div>;
 	}
 
-	if (asDiff) {
+	// Diff chrome (Unified / Split / fullscreen) is for edit/write/etc — not bash.
+	if (asDiff && kind !== "bash") {
 		return <GithubDiffView output={output} title={filePath} />;
 	}
 

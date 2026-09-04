@@ -56,23 +56,42 @@ const EXT_LANG: Record<string, string> = {
 	yaml: "yaml",
 	yml: "yaml",
 	toml: "bash",
+	typescript: "typescript",
+	javascript: "javascript",
+	python: "python",
+	rust: "rust",
+	csharp: "csharp",
+	shell: "bash",
+	zshrc: "bash",
 };
+
+/** Map fence language / extension aliases to a Prism grammar id. */
+export function resolvePrismLanguage(language: string | undefined): string | undefined {
+	if (!language) return undefined;
+	const key = language.toLowerCase().trim();
+	if (!key) return undefined;
+	const mapped = EXT_LANG[key] ?? key;
+	if (Prism.languages[mapped]) return mapped;
+	return undefined;
+}
 
 export function languageFromPath(filePath: string | undefined): string | undefined {
 	if (!filePath) return undefined;
 	const base = filePath.split(/[\\/]/).pop() ?? filePath;
 	const ext = base.includes(".") ? base.split(".").pop()?.toLowerCase() : undefined;
 	if (!ext) return undefined;
-	return EXT_LANG[ext];
+	return resolvePrismLanguage(ext) ?? EXT_LANG[ext];
 }
 
 /** Returns HTML (Prism tokens) or null when highlighting is unavailable. */
 export function highlightCode(code: string, language: string | undefined): string | null {
-	if (!code || !language) return null;
-	const grammar = Prism.languages[language];
+	if (!code) return null;
+	const resolved = resolvePrismLanguage(language);
+	if (!resolved) return null;
+	const grammar = Prism.languages[resolved];
 	if (!grammar) return null;
 	try {
-		return Prism.highlight(code, grammar, language);
+		return Prism.highlight(code, grammar, resolved);
 	} catch {
 		return null;
 	}

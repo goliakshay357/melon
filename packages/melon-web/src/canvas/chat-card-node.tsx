@@ -8,7 +8,7 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { Bug, ChevronDown, Copy, Minimize2, Pencil, Plus, X } from 'lucide-react';
+import { Bug, ChevronDown, Copy, Minimize2, MoreHorizontal, Pencil, Plus, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { PromptComposer } from '@/components/prompt-composer';
@@ -194,15 +194,15 @@ function ThinkingBlock({
     );
 }
 
-// ── ✨ Activity shimmer (card heartbeat while AI runs) ───────────────────
+// ── Activity status (composer — not a sticky chat strip) ─────────────────
 type ActivityPhase = 'waiting' | 'thinking' | 'tools' | 'responding' | 'working';
 
-const PHASE_PHRASES: Record<ActivityPhase, string[]> = {
-    waiting: ['Deep diving…', 'Reading context…', 'Connecting the dots…'],
-    thinking: ['Reasoning…', 'Thinking it through…', 'Working through it…'],
-    tools: ['Running tools…', 'Getting things done…', 'Working…'],
-    responding: ['Crafting response…', 'Writing…'],
-    working: ['Still working…', 'Deep diving…', 'Almost there…'],
+const PHASE_LABEL: Record<ActivityPhase, string> = {
+    waiting: 'Working',
+    thinking: 'Thinking',
+    tools: 'Running tools',
+    responding: 'Writing',
+    working: 'Working',
 };
 
 function deriveActivityPhase(
@@ -215,23 +215,6 @@ function deriveActivityPhase(
     if (last.thinking && !last.text.trim() && tools.length === 0) return 'thinking';
     if (last.text.trim()) return 'responding';
     return 'working';
-}
-
-function ActivityLine({ phase }: { phase: ActivityPhase }) {
-    const phrases = PHASE_PHRASES[phase];
-    const [idx, setIdx] = useState(0);
-    // Reset phrase rotation when the run phase changes.
-    useEffect(() => {
-        setIdx(0);
-        const t = setInterval(() => setIdx((i) => (i + 1) % phrases.length), 2200);
-        return () => clearInterval(t);
-    }, [phase, phrases.length]);
-    return (
-        <div className="sticky bottom-0 z-[1] -mx-1 flex items-center gap-2 rounded-md bg-card/90 px-2 py-2 backdrop-blur-sm">
-            <Spinner />
-            <span className="shimmer-text text-xs font-medium">{phrases[idx % phrases.length]}</span>
-        </div>
-    );
 }
 
 // ── Trajectory waterfall (DSH-style) ─────────────────────────────────────
@@ -479,6 +462,81 @@ function TrajectoryView({
     );
 }
 
+function CardMoreMenu({
+    debug,
+    onToggleDebug,
+    contextLabel,
+}: {
+    debug: boolean;
+    onToggleDebug: () => void;
+    contextLabel: string | null;
+}) {
+    const [open, setOpen] = useState(false);
+    const rootRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+        if (!open) return;
+        const onDoc = (e: MouseEvent) => {
+            if (!rootRef.current?.contains(e.target as globalThis.Node)) setOpen(false);
+        };
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key === 'Escape') {
+                e.stopPropagation();
+                setOpen(false);
+            }
+        };
+        document.addEventListener('mousedown', onDoc);
+        window.addEventListener('keydown', onKey, true);
+        return () => {
+            document.removeEventListener('mousedown', onDoc);
+            window.removeEventListener('keydown', onKey, true);
+        };
+    }, [open]);
+
+    return (
+        <div ref={rootRef} className="relative">
+            <button
+                type="button"
+                className={cn(
+                    'nodrag rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground',
+                    open && 'bg-secondary text-foreground',
+                )}
+                aria-label="More actions"
+                aria-expanded={open}
+                onClick={(e) => {
+                    e.stopPropagation();
+                    setOpen((v) => !v);
+                }}
+            >
+                <MoreHorizontal className="size-4" />
+            </button>
+            {open && (
+                <div
+                    className="nodrag absolute right-0 top-full z-50 mt-1 min-w-[11.5rem] overflow-hidden rounded-lg border border-border bg-card py-1 shadow-xl"
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    {contextLabel && (
+                        <div className="border-b border-border/70 px-3 py-2 text-[11px] text-muted-foreground">
+                            Context · {contextLabel}
+                        </div>
+                    )}
+                    <button
+                        type="button"
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-card-foreground hover:bg-secondary"
+                        onClick={() => {
+                            onToggleDebug();
+                            setOpen(false);
+                        }}
+                    >
+                        <Bug className={cn('size-3.5', debug ? 'text-amber-500' : 'text-muted-foreground')} />
+                        {debug ? 'Hide debug' : 'Show debug'}
+                    </button>
+                </div>
+            )}
+        </div>
+    );
+}
+
 // ── Card node ────────────────────────────────────────────────────────────
 function ChatCardNodeInner({
     id,
@@ -489,6 +547,7 @@ function ChatCardNodeInner({
     const forkCard = useCanvasStore((s) => s.forkCard);
     const deleteCards = useCanvasStore((s) => s.deleteCards);
     const sendMessage = useCanvasStore((s) => s.sendMessage);
+    const serverOffline = useCanvasStore((s) => s.serverOffline);
     const { setCenter, getZoom } = useReactFlow();
     const [draft, setDraft] = useState('');
     const [maximized, setMaximized] = useState(false);
@@ -573,11 +632,16 @@ function ChatCardNodeInner({
 
     useEffect(() => {
         if (!maximized) return;
+        const prevOverflow = document.body.style.overflow;
+        document.body.style.overflow = 'hidden';
         const onKey = (e: KeyboardEvent) => {
             if (e.key === 'Escape') setMaximized(false);
         };
         window.addEventListener('keydown', onKey);
-        return () => window.removeEventListener('keydown', onKey);
+        return () => {
+            document.body.style.overflow = prevOverflow;
+            window.removeEventListener('keydown', onKey);
+        };
     }, [maximized]);
 
     useEffect(() => {
@@ -608,11 +672,32 @@ function ChatCardNodeInner({
         if (!ok) setDraft(text); // failed — give the text back for retry
     };
 
+    const forkThis = () => {
+        void (async () => {
+            const newId = await forkCard(id);
+            const child = useCanvasStore.getState().cards.find((c) => c.id === newId);
+            if (!child) return;
+            const w = child.size?.width ?? DEFAULT_CARD_SIZE.width;
+            const h = child.size?.height ?? DEFAULT_CARD_SIZE.height;
+            setCenter(child.position.x + w / 2, child.position.y + h / 2, {
+                zoom: getZoom(),
+                duration: 320,
+            });
+        })();
+    };
+
+    const contextPct =
+        card.contextUsage?.percent != null ? Math.round(card.contextUsage.percent) : null;
+    const contextLabel =
+        contextPct != null && card.contextUsage
+            ? `${contextPct}% · ${(card.contextUsage.tokens ?? 0).toLocaleString()} / ${card.contextUsage.contextWindow.toLocaleString()} tokens`
+            : null;
+
     const header = (isMax: boolean) => (
         <div
             className={cn(
-                'flex shrink-0 items-center gap-2 border-b border-border px-3 py-2',
-                isMax ? '' : 'rounded-t-xl',
+                'flex shrink-0 items-center gap-2 border-b border-border',
+                isMax ? 'px-5 py-2.5' : 'rounded-t-xl px-3 py-2',
             )}
         >
             <span className={cn('size-2 shrink-0 rounded-full', statusDot[card.status])} />
@@ -641,7 +726,7 @@ function ChatCardNodeInner({
                 />
             ) : (
                 <span
-                    className="min-w-0 flex-1 cursor-text truncate text-sm font-medium text-card-foreground"
+                    className="min-w-0 flex-1 cursor-text truncate text-sm font-medium tracking-tight text-card-foreground"
                     title="Double-click to rename"
                     onDoubleClick={(e) => {
                         e.stopPropagation();
@@ -651,112 +736,141 @@ function ChatCardNodeInner({
                     {card.title}
                 </span>
             )}
-            {card.contextUsage?.percent != null && (
-                <div
-                    className="flex shrink-0 items-center gap-1"
-                    title={`Context window: ${Math.round(card.contextUsage.percent)}% — ${(card.contextUsage.tokens ?? 0).toLocaleString()} of ${card.contextUsage.contextWindow.toLocaleString()} tokens`}
-                >
-                    <div className="h-1 w-12 overflow-hidden rounded-full bg-secondary">
-                        <div
-                            className="h-full rounded-full transition-all"
-                            style={{
-                                width: `${Math.min(card.contextUsage.percent, 100)}%`,
-                                background:
-                                    card.contextUsage.percent < 70
-                                        ? '#50fa7b'
-                                        : card.contextUsage.percent < 90
-                                          ? '#ffb86c'
-                                          : '#ff5555',
-                            }}
-                        />
-                    </div>
-                    <span className="text-[9px] tabular-nums text-muted-foreground">
-                        {Math.round(card.contextUsage.percent)}%
-                    </span>
-                </div>
-            )}
-            {/* TRAJECTORY DISABLED — re-enable later by changing {false && ...} to {true && ...} */}
-            {false && (
-                <button
-                    className={cn(
-                        'nodrag rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
-                        view === 'trajectory'
-                            ? 'bg-accent/15 text-accent ring-1 ring-inset ring-accent/40'
-                            : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+
+            {isMax ? (
+                <>
+                    {/* Context only when it starts to matter — avoid chrome noise. */}
+                    {contextPct != null && contextPct >= 70 && (
+                        <span
+                            className={cn(
+                                'hidden shrink-0 text-[11px] tabular-nums sm:inline',
+                                contextPct >= 90 ? 'text-[#ff5555]' : 'text-muted-foreground',
+                            )}
+                            title={contextLabel ?? undefined}
+                        >
+                            {contextPct}%
+                        </span>
                     )}
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        setView(view === 'trajectory' ? 'chat' : 'trajectory');
-                    }}
-                    title="Trajectory debugger"
-                >
-                    🧭
-                </button>
-            )}
-            <button
-                className={cn(
-                    'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
-                    card.debug === true
-                        ? 'bg-amber-500/15 text-amber-500 ring-1 ring-inset ring-amber-500/40'
-                        : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-                )}
-                onClick={(e) => {
-                    e.stopPropagation();
-                    useCanvasStore.getState().updateCard(id, { debug: !card.debug });
-                }}
-                title={card.debug === true ? 'Debug console ON' : 'Debug console OFF'}
-            >
-                <Bug className="size-3.5" />
-                DBG
-            </button>
-            <button
-                className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
-                onClick={(e) => {
-                    e.stopPropagation();
-                    void (async () => {
-                        const newId = await forkCard(id);
-                        const child = useCanvasStore.getState().cards.find((c) => c.id === newId);
-                        if (!child) return;
-                        const w = child.size?.width ?? DEFAULT_CARD_SIZE.width;
-                        const h = child.size?.height ?? DEFAULT_CARD_SIZE.height;
-                        setCenter(child.position.x + w / 2, child.position.y + h / 2, {
-                            zoom: getZoom(),
-                            duration: 320,
-                        });
-                    })();
-                }}
-                title="Fork this conversation"
-            >
-                <Plus className="size-4" />
-            </button>
-            <button
-                className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
-                onClick={(e) => {
-                    e.stopPropagation();
-                    setMaximized(!isMax);
-                }}
-                title={isMax ? 'Minimize' : 'Full screen'}
-            >
-                {isMax ? <Minimize2 className="size-4" /> : <MaximizeIcon />}
-            </button>
-            {!isMax && (
-                <button
-                    className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-red-500"
-                    onClick={async (e) => {
-                        e.stopPropagation();
-                        const ok = await import('@/components/dialogs').then((m) =>
-                            m.confirmAction({
-                                title: 'Delete this card?',
-                                description: 'You can restore it with Cmd/Ctrl+Z.',
-                                confirmLabel: 'Delete',
-                            }),
-                        );
-                        if (ok) deleteCards([id]);
-                    }}
-                    title="Delete card"
-                >
-                    <X className="size-4" />
-                </button>
+                    <CardMoreMenu
+                        debug={card.debug === true}
+                        contextLabel={contextLabel}
+                        onToggleDebug={() =>
+                            useCanvasStore.getState().updateCard(id, { debug: !card.debug })
+                        }
+                    />
+                    <button
+                        type="button"
+                        className="nodrag flex items-center gap-1.5 rounded-md border border-border/80 px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            setMaximized(false);
+                        }}
+                        title="Back to canvas (Esc)"
+                    >
+                        <Minimize2 className="size-3.5" />
+                        Canvas
+                    </button>
+                </>
+            ) : (
+                <>
+                    {card.contextUsage?.percent != null && (
+                        <div
+                            className="flex shrink-0 items-center gap-1"
+                            title={`Context window: ${Math.round(card.contextUsage.percent)}% — ${(card.contextUsage.tokens ?? 0).toLocaleString()} of ${card.contextUsage.contextWindow.toLocaleString()} tokens`}
+                        >
+                            <div className="h-1 w-12 overflow-hidden rounded-full bg-secondary">
+                                <div
+                                    className="h-full rounded-full transition-all"
+                                    style={{
+                                        width: `${Math.min(card.contextUsage.percent, 100)}%`,
+                                        background:
+                                            card.contextUsage.percent < 70
+                                                ? '#50fa7b'
+                                                : card.contextUsage.percent < 90
+                                                  ? '#ffb86c'
+                                                  : '#ff5555',
+                                    }}
+                                />
+                            </div>
+                            <span className="text-[9px] tabular-nums text-muted-foreground">
+                                {Math.round(card.contextUsage.percent)}%
+                            </span>
+                        </div>
+                    )}
+                    {/* TRAJECTORY DISABLED — re-enable later by changing {false && ...} to {true && ...} */}
+                    {false && (
+                        <button
+                            className={cn(
+                                'nodrag rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
+                                view === 'trajectory'
+                                    ? 'bg-accent/15 text-accent ring-1 ring-inset ring-accent/40'
+                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                            )}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                setView(view === 'trajectory' ? 'chat' : 'trajectory');
+                            }}
+                            title="Trajectory debugger"
+                        >
+                            🧭
+                        </button>
+                    )}
+                    <button
+                        className={cn(
+                            'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
+                            card.debug === true
+                                ? 'bg-amber-500/15 text-amber-500 ring-1 ring-inset ring-amber-500/40'
+                                : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                        )}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            useCanvasStore.getState().updateCard(id, { debug: !card.debug });
+                        }}
+                        title={card.debug === true ? 'Debug console ON' : 'Debug console OFF'}
+                    >
+                        <Bug className="size-3.5" />
+                        DBG
+                    </button>
+                    <button
+                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                        disabled={serverOffline}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            if (serverOffline) return;
+                            forkThis();
+                        }}
+                        title={serverOffline ? 'Reconnecting to server…' : 'Fork this conversation'}
+                    >
+                        <Plus className="size-4" />
+                    </button>
+                    <button
+                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            setMaximized(true);
+                        }}
+                        title="Full screen"
+                    >
+                        <MaximizeIcon />
+                    </button>
+                    <button
+                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-red-500"
+                        onClick={async (e) => {
+                            e.stopPropagation();
+                            const ok = await import('@/components/dialogs').then((m) =>
+                                m.confirmAction({
+                                    title: 'Delete this card?',
+                                    description: 'You can restore it with Cmd/Ctrl+Z.',
+                                    confirmLabel: 'Delete',
+                                }),
+                            );
+                            if (ok) deleteCards([id]);
+                        }}
+                        title="Delete card"
+                    >
+                        <X className="size-4" />
+                    </button>
+                </>
             )}
         </div>
     );
@@ -766,18 +880,19 @@ function ChatCardNodeInner({
     // component here caused React to remount every message on each render,
     // reloading viz iframes and making the chat bounce).
 
-    const messagesBody = (scrollTo: React.RefObject<HTMLDivElement>) => {
-        // Heartbeat for the whole run — same lifetime as the header status dot.
-        const showActivityLine = card.status === 'streaming';
-        const activityPhase = showActivityLine ? deriveActivityPhase(card) : 'waiting';
+    const messagesBody = (scrollTo: React.RefObject<HTMLDivElement>, opts?: { roomy?: boolean }) => {
+        const streaming = card.status === 'streaming';
         return (
         <div className="relative min-h-0 min-w-0 flex-1">
             <div
                 ref={scrollTo}
                 onScroll={(e) => handleMessagesScroll(e.currentTarget)}
-                className="nodrag nowheel h-full cursor-default select-text space-y-4 overflow-y-auto px-4 py-3"
+                className={cn(
+                    'nodrag nowheel h-full cursor-default select-text space-y-4 overflow-y-auto',
+                    opts?.roomy ? 'px-1 py-5 sm:px-2' : 'px-4 py-3',
+                )}
             >
-                {card.messages.length === 0 && !showActivityLine && (
+                {card.messages.length === 0 && !streaming && (
                     <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
                         Ask something to start this thread.
                     </p>
@@ -788,11 +903,10 @@ function ChatCardNodeInner({
                         m={m}
                         index={i}
                         cardId={id}
-                        streaming={card.status === 'streaming'}
+                        streaming={streaming}
                         totalMessages={card.messages.length}
                     />
                 ))}
-                {showActivityLine && <ActivityLine phase={activityPhase} />}
             </div>
             {showDown && (
                 <button
@@ -810,8 +924,11 @@ function ChatCardNodeInner({
         );
     };
 
+    const activityLabel =
+        card.status === 'streaming' ? PHASE_LABEL[deriveActivityPhase(card)] : null;
+
     const footerInput = (
-        <div className={cn('shrink-0 border-t border-border p-2', maximized && 'px-4')}>
+        <div className={cn('shrink-0 border-t border-border', maximized ? 'px-0 py-3' : 'p-2')}>
             {card.pendingExtensionUi && (
                 <QuestionPanel
                     pending={card.pendingExtensionUi}
@@ -874,6 +991,13 @@ function ChatCardNodeInner({
                 }
                 sending={card.status === 'streaming'}
                 onStop={abortStream}
+                statusLabel={activityLabel}
+                disabled={serverOffline}
+                placeholder={
+                    serverOffline
+                        ? 'Reconnecting to server…'
+                        : 'Ask anything…  (Enter to send, Shift+Enter for newline)'
+                }
             />
         </div>
     );
@@ -936,52 +1060,41 @@ function ChatCardNodeInner({
             {maximized &&
                 createPortal(
                     <div
-                        className="fixed inset-0 z-[999] flex items-center justify-center bg-black/70 p-6"
-                        onClick={() => setMaximized(false)}
+                        className="fixed inset-0 z-[999] flex flex-col bg-card"
+                        role="dialog"
+                        aria-modal="true"
+                        aria-label={card.title || 'Chat'}
                     >
-                        <div
-                            className="flex h-full max-h-[92vh] w-full max-w-[95vw] flex-col rounded-xl border border-border bg-card shadow-2xl"
-                            onClick={(e) => e.stopPropagation()}
-                        >
-                            {header(true)}
-                            {card.error && (
-                                <div className="nodrag flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-3 py-2">
-                                    <span className="shrink-0 text-xs">⚠️</span>
-                                    <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-red-300">
-                                        {card.error}
-                                    </span>
-                                    <button
-                                        className="nodrag shrink-0 rounded p-0.5 text-red-400 transition-colors hover:bg-red-500/20 hover:text-red-200"
-                                        onClick={(e) => {
-                                            e.stopPropagation();
-                                            useCanvasStore.getState().clearCardError(id);
-                                        }}
-                                        title="Dismiss error"
-                                    >
-                                        <X className="size-3.5" />
-                                    </button>
-                                </div>
-                            )}
-                            <div className="mx-auto flex min-h-0 w-full max-w-4xl flex-1 flex-col">
-                                {view === 'trajectory' ? (
-                                    <TrajectoryView card={card} />
-                                ) : (
-                                    <>
-                                        {messagesBody(maxScrollRef)}
-                                        {card.debug === true && <DebugConsole logs={card.logs ?? []} />}
-                                        {footerInput}
-                                    </>
-                                )}
-                            </div>
-                            <div className="flex shrink-0 justify-end border-t border-border p-1.5">
+                        {header(true)}
+                        {card.error && (
+                            <div className="nodrag flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-5 py-2">
+                                <span className="shrink-0 text-xs">⚠️</span>
+                                <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-red-300">
+                                    {card.error}
+                                </span>
                                 <button
-                                    className="nodrag flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-secondary hover:text-foreground"
-                                    onClick={() => setMaximized(false)}
-                                    title="Minimize (back to canvas)"
+                                    className="nodrag shrink-0 rounded p-0.5 text-red-400 transition-colors hover:bg-red-500/20 hover:text-red-200"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        useCanvasStore.getState().clearCardError(id);
+                                    }}
+                                    title="Dismiss error"
                                 >
-                                    <Minimize2 className="size-3.5" /> minimize
+                                    <X className="size-3.5" />
                                 </button>
                             </div>
+                        )}
+                        {/* Wider reading column (~72rem) — gutters shrink without billboard-width lines. */}
+                        <div className="mx-auto flex min-h-0 w-full max-w-[72rem] flex-1 flex-col px-5 sm:px-8 lg:px-10">
+                            {view === 'trajectory' ? (
+                                <TrajectoryView card={card} />
+                            ) : (
+                                <>
+                                    {messagesBody(maxScrollRef, { roomy: true })}
+                                    {card.debug === true && <DebugConsole logs={card.logs ?? []} />}
+                                    {footerInput}
+                                </>
+                            )}
                         </div>
                     </div>,
                     document.body,

@@ -1,22 +1,22 @@
-import { Suspense, type HTMLAttributes } from "react";
-import {
-	CodeBlock,
-	CodeBlockCopyButton,
-	CodeBlockDownloadButton,
-	useIsCodeFenceIncomplete,
-	type ExtraProps,
-} from "streamdown";
+import { Suspense, useEffect, useState, type HTMLAttributes } from "react";
+import { Check, Copy, Download } from "lucide-react";
+import { useIsCodeFenceIncomplete, type ExtraProps } from "streamdown";
 import { cn } from "@/lib/utils";
+import { highlightCode } from "@/lib/prism-highlight";
+import { MelonArtifact, MelonArtifactButton, downloadTextFile } from "./melon-artifact";
 import { IframeViz } from "./iframe-viz";
-import { codeTextFromChildren, languageFromClassName } from "./melon-code-fence-utils";
+import {
+	codeTextFromChildren,
+	escapeHtml,
+	extensionForLanguage,
+	languageFromClassName,
+} from "./melon-code-fence-utils";
 
 /**
  * Melon-owned fenced-code chrome.
  *
- * Streamdown's default toolbar uses sticky + -mt-10. That layout diverges in Melon:
- * React Flow card transforms vs the maximized-card portal scroll root. We never use
- * that sticky overlay — Melon draws language + Copy/Download as a real flex header,
- * then nests Streamdown's highlighter body underneath (its own header is hidden).
+ * Streamdown parses the fence; Melon owns the frame + Prism highlighting.
+ * No nested Streamdown highlighter card (avoids sticky toolbar + CSS wars).
  */
 
 export { codeTextFromChildren, languageFromClassName } from "./melon-code-fence-utils";
@@ -42,6 +42,41 @@ function VizFileFence({ code, isIncomplete }: { code: string; isIncomplete: bool
 		.map((s) => s.trim());
 	if (!path) return <VizPlaceholder label="Missing viz file path" />;
 	return <IframeViz path={path} cwd={cwd || undefined} />;
+}
+
+function CodeActions({ code, language }: { code: string; language: string }) {
+	const [copied, setCopied] = useState(false);
+
+	useEffect(() => {
+		if (!copied) return;
+		const id = window.setTimeout(() => setCopied(false), 1400);
+		return () => window.clearTimeout(id);
+	}, [copied]);
+
+	return (
+		<>
+			<MelonArtifactButton
+				title={copied ? "Copied" : "Copy code"}
+				onClick={() => {
+					void navigator.clipboard.writeText(code).then(() => setCopied(true));
+				}}
+			>
+				{copied ? <Check className="size-3.5" aria-hidden /> : <Copy className="size-3.5" aria-hidden />}
+			</MelonArtifactButton>
+			<MelonArtifactButton
+				title="Download"
+				onClick={() => {
+					downloadTextFile(
+						`code.${extensionForLanguage(language)}`,
+						code,
+						"text/plain;charset=utf-8",
+					);
+				}}
+			>
+				<Download className="size-3.5" aria-hidden />
+			</MelonArtifactButton>
+		</>
+	);
 }
 
 export function MelonCode({
@@ -84,23 +119,17 @@ export function MelonCode({
 	}
 
 	const label = language || "text";
+	const highlighted = highlightCode(code, label);
+	const html = highlighted ?? escapeHtml(code);
 
 	return (
-		<div className="melon-code-fence" data-melon="code-fence">
-			<div className="melon-code-fence-toolbar">
-				<span className="melon-code-fence-lang">{label}</span>
-				<div className="melon-code-fence-actions">
-					<CodeBlockCopyButton code={code} />
-					<CodeBlockDownloadButton code={code} language={label} />
-				</div>
-			</div>
-			{/* No action children → Streamdown skips its sticky overlay entirely. */}
-			<CodeBlock
-				code={code}
-				language={label}
-				isIncomplete={isIncomplete}
-				className="melon-code-fence-body"
-			/>
-		</div>
+		<MelonArtifact kind="code" label={label} actions={<CodeActions code={code} language={label} />}>
+			<pre className="melon-code-body tool-prism nowheel">
+				<code
+					className={language ? `language-${language}` : undefined}
+					dangerouslySetInnerHTML={{ __html: html || " " }}
+				/>
+			</pre>
+		</MelonArtifact>
 	);
 }

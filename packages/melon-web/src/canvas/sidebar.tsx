@@ -1,16 +1,19 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
+    Check,
     ChevronRight,
     FileText,
     FolderOpen,
     FolderPlus,
     Layers,
     MessageSquare,
+    Palette,
     PanelLeftClose,
     PanelLeftOpen,
     Plus,
     Search,
     Settings,
+    Sparkles,
     X,
 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
@@ -18,7 +21,6 @@ import { askText, confirmAction } from '@/components/dialogs';
 import { cn } from '@/lib/utils';
 import { fuzzyMatchIndices, fuzzyScore } from '@/lib/fuzzy';
 import { pickFolder } from '@/lib/pick-folder';
-import { Sparkles, Palette } from 'lucide-react';
 
 type CanvasListItem = {
     id: string;
@@ -114,6 +116,8 @@ export function Sidebar() {
     const searchInputRef = useRef<HTMLInputElement>(null);
 
     const folder = useCanvasStore((s) => s.folder);
+    const worktreePath = useCanvasStore((s) => s.worktreePath);
+    const worktreeMode = useCanvasStore((s) => s.worktreeMode);
     const canvasId = useCanvasStore((s) => s.canvasId);
     const canvasActivity = useCanvasStore((s) => s.canvasActivity);
     const createCanvas = useCanvasStore((s) => s.createCanvas);
@@ -123,6 +127,8 @@ export function Sidebar() {
     const forgetCanvas = useCanvasStore((s) => s.forgetCanvas);
     const canvasTreeRev = useCanvasStore((s) => s.canvasTreeRev);
     const [appVersion, setAppVersion] = useState<string | null>(null);
+    const [cwdCopied, setCwdCopied] = useState(false);
+    const cwdCopiedTimerRef = useRef<number | null>(null);
 
     // Same identity as Melon-<version>-<arch>.dmg — always visible in the navbar.
     useEffect(() => {
@@ -139,6 +145,12 @@ export function Sidebar() {
             });
         return () => {
             alive = false;
+        };
+    }, []);
+
+    useEffect(() => {
+        return () => {
+            if (cwdCopiedTimerRef.current != null) window.clearTimeout(cwdCopiedTimerRef.current);
         };
     }, []);
 
@@ -420,6 +432,26 @@ export function Sidebar() {
     const searching = searchQuery.trim().length > 0;
     const searchPending = searching && (searchStatus === 'loading' || searchQuery.trim() !== debouncedQuery);
 
+    const agentPath =
+        worktreeMode === 'isolated' && worktreePath && worktreePath !== folder ? worktreePath : folder;
+    const agentPathParts = agentPath?.split('/').filter(Boolean) ?? [];
+    const agentPathShort =
+        agentPathParts.length >= 2
+            ? `…/${agentPathParts.slice(-2).join('/')}`
+            : (agentPathParts[0] ?? agentPath);
+    const copyAgentCwd = () => {
+        const cwd = useCanvasStore.getState().agentCwd();
+        if (!cwd) return;
+        void navigator.clipboard.writeText(cwd).then(() => {
+            setCwdCopied(true);
+            if (cwdCopiedTimerRef.current != null) window.clearTimeout(cwdCopiedTimerRef.current);
+            cwdCopiedTimerRef.current = window.setTimeout(() => {
+                setCwdCopied(false);
+                cwdCopiedTimerRef.current = null;
+            }, 1200);
+        });
+    };
+
     return (
         <div
             className={cn(
@@ -488,7 +520,6 @@ export function Sidebar() {
                 <>
                     {/* Brand header */}
                     <div className="flex shrink-0 items-center gap-2 px-3 pb-2 pt-4">
-                        <span className="text-base">🍉</span>
                         <span className="flex-1 text-sm font-semibold tracking-tight text-card-foreground">
                             Melon
                         </span>
@@ -953,7 +984,7 @@ export function Sidebar() {
                         </div>
                     )}
 
-                    {/* Footer: build version + workspace breadcrumb + settings */}
+                    {/* Footer: version + agent cwd (click to copy) + settings */}
                     <div className="flex shrink-0 flex-col gap-1 border-t border-border px-3 py-2">
                         <p
                             className="truncate text-[11px] font-medium text-foreground"
@@ -963,9 +994,22 @@ export function Sidebar() {
                             {appVersion ? `Melon ${appVersion}` : 'Melon'}
                         </p>
                         <div className="flex items-center justify-between gap-2">
-                            <span className="min-w-0 truncate text-[10px] text-muted-foreground">
-                                {folder && `📁 …${folder.split('/').slice(-2).join('/')}`}
-                            </span>
+                            {agentPath ? (
+                                <button
+                                    type="button"
+                                    className="flex min-w-0 flex-1 items-center gap-1 rounded-sm text-left text-[10px] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                    title={agentPath}
+                                    aria-label="Copy working directory"
+                                    onClick={copyAgentCwd}
+                                >
+                                    <span className="min-w-0 truncate font-mono">{agentPathShort}</span>
+                                    {cwdCopied ? (
+                                        <Check className="size-3 shrink-0 text-foreground" aria-hidden />
+                                    ) : null}
+                                </button>
+                            ) : (
+                                <span className="min-w-0 flex-1" />
+                            )}
                             <button
                                 className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
                                 title={activeView === 'canvas' ? 'Settings' : 'Back to chat'}

@@ -131,10 +131,7 @@ describe("melon-server routes", () => {
 			] as const) {
 				const cvDir = join(dir, ".melon", "canvases");
 				mkdirSync(cvDir, { recursive: true });
-				writeFileSync(
-					join(cvDir, `${id}.json`),
-					JSON.stringify({ id, name, modified, cards: [] }),
-				);
+				writeFileSync(join(cvDir, `${id}.json`), JSON.stringify({ id, name, modified, cards: [] }));
 			}
 
 			const app = await buildApp();
@@ -179,9 +176,9 @@ describe("melon-server routes", () => {
 			expect(fuzzyScoped.every((r) => typeof r.score === "number")).toBe(true);
 			// Nearest: exact-ish "alpha" should rank ahead of looser hits when kind ties.
 			const alphaQ = await app.inject({ method: "GET", url: "/canvases/search?q=alpha" });
-			const alphaScoped = (
-				alphaQ.json().results as Array<{ id: string; cwd: string; score: number }>
-			).filter((r) => r.cwd === a || r.cwd === b);
+			const alphaScoped = (alphaQ.json().results as Array<{ id: string; cwd: string; score: number }>).filter(
+				(r) => r.cwd === a || r.cwd === b,
+			);
 			expect(alphaScoped[0]?.id).toBe("cv_alpha2"); // "alpha draft" starts with alpha
 
 			await app.close();
@@ -290,9 +287,9 @@ describe("melon-server routes", () => {
 				}),
 			);
 			const both = await app.inject({ method: "GET", url: "/canvases/search?q=worktree" });
-			const bothHit = (
-				both.json() as { results: Array<{ id: string; cwd: string; match: string }> }
-			).results.find((r) => r.id === "cv_both" && r.cwd === dir);
+			const bothHit = (both.json() as { results: Array<{ id: string; cwd: string; match: string }> }).results.find(
+				(r) => r.id === "cv_both" && r.cwd === dir,
+			);
 			expect(bothHit?.match).toBe("title");
 			await app.close();
 		} finally {
@@ -327,10 +324,48 @@ describe("melon-server routes", () => {
 			expect(String(touch.json().modified) > "2020-01-01").toBe(true);
 
 			const recent = await app.inject({ method: "GET", url: "/canvases/recent" });
-			const hit = (
-				recent.json().recent as Array<{ id: string; cwd: string; modified: string }>
-			).find((r) => r.id === "cv_touch" && r.cwd === dir);
+			const hit = (recent.json().recent as Array<{ id: string; cwd: string; modified: string }>).find(
+				(r) => r.id === "cv_touch" && r.cwd === dir,
+			);
 			expect(hit?.modified).toBe(touch.json().modified);
+
+			await app.close();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("PUT /canvases/:id accepts bodies up to the 10 MiB limit", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "melon-canvas-big-"));
+		try {
+			const app = await buildApp();
+			await app.inject({ method: "POST", url: "/folders", payload: { cwd: dir } });
+
+			const pad = "x".repeat(1.5 * 1024 * 1024);
+			const res = await app.inject({
+				method: "PUT",
+				url: "/canvases/cv_big",
+				headers: { "content-type": "application/json" },
+				payload: {
+					cwd: dir,
+					canvas: {
+						id: "cv_big",
+						name: "Big",
+						cwd: dir,
+						viewport: { x: 0, y: 0, zoom: 1 },
+						cards: [
+							{
+								id: "card_big",
+								kind: "chat",
+								position: { x: 0, y: 0 },
+								messages: [{ role: "assistant", text: pad }],
+							},
+						],
+					},
+				},
+			});
+			expect(res.statusCode).toBe(200);
+			expect(res.json().ok).toBe(true);
 
 			await app.close();
 		} finally {
