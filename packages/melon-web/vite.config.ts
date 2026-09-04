@@ -1,8 +1,14 @@
-import { defineConfig } from 'vite';
+import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 
 export default defineConfig({
+    test: {
+        include: ['test/**/*.test.ts'],
+        // Runs under `node --test`, not vitest — vitest finds no suite in it.
+        exclude: ['test/melon-code-fence.test.ts'],
+        setupFiles: ['./test/setup-globals.ts'],
+    },
     server: {
         proxy: {
             "/sessions": "http://127.0.0.1:8788",

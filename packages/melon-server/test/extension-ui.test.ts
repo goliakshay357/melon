@@ -28,6 +28,17 @@ describe("CardExtensionUiBridge", () => {
 		expect(bridge.getPendingEvent()).toBeUndefined();
 	});
 
+	it("getUIContext returns the same instance and shares pending state", async () => {
+		const bridge = new CardExtensionUiBridge("card_memo", () => {});
+		const a = bridge.getUIContext();
+		const b = bridge.getUIContext();
+		expect(a).toBe(b);
+		const pending = a.select("Q", ["x"]);
+		const id = bridge.getPendingEvent()!.id;
+		expect(bridge.respond({ id, value: "x" })).toBe(true);
+		await expect(pending).resolves.toBe("x");
+	});
+
 	it("respond returns false for unknown id without settling others", async () => {
 		const bridge = new CardExtensionUiBridge("card_miss", () => {});
 		const ui = bridge.createUIContext();

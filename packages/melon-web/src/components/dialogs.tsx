@@ -6,7 +6,7 @@ import { useEffect, useState } from 'react';
  * Usage anywhere:
  *   const name = await askText({ title: 'Name your canvas', initial: 'Canvas 1' });
  *   const ok = await confirmAction({ title: 'Delete canvas?' });
- *   const mode = await askChoice({ title: 'Isolation', options: [...] });
+ *   const mode = await askChoice({ title: 'How should this canvas work?', options: [...] });
  * Requires <DialogHost /> mounted once.
  */
 
@@ -40,7 +40,13 @@ export function askText(opts: {
     initial?: string;
     placeholder?: string;
 }): Promise<string | null> {
-    return new Promise((resolve) => push?.({ kind: 'text', ...opts, resolve }));
+    return new Promise((resolve) => {
+        if (!push) {
+            resolve(null);
+            return;
+        }
+        push({ kind: 'text', ...opts, resolve });
+    });
 }
 
 export function confirmAction(opts: {
@@ -48,7 +54,13 @@ export function confirmAction(opts: {
     description?: string;
     confirmLabel?: string;
 }): Promise<boolean> {
-    return new Promise((resolve) => push?.({ kind: 'confirm', ...opts, resolve }));
+    return new Promise((resolve) => {
+        if (!push) {
+            resolve(false);
+            return;
+        }
+        push({ kind: 'confirm', ...opts, resolve });
+    });
 }
 
 export function askChoice(opts: {
@@ -56,7 +68,41 @@ export function askChoice(opts: {
     description?: string;
     options: Array<{ label: string; value: string; description?: string }>;
 }): Promise<string | null> {
-    return new Promise((resolve) => push?.({ kind: 'choice', ...opts, resolve }));
+    return new Promise((resolve) => {
+        if (!push) {
+            resolve(null);
+            return;
+        }
+        push({ kind: 'choice', ...opts, resolve });
+    });
+}
+
+/** True = private copy, false = edit original, null = cancelled. */
+export async function chooseCanvasIsolation(): Promise<boolean | null> {
+    const choice = await askChoice({
+        title: 'How should this canvas work?',
+        description:
+            'Every chat on this canvas shares the same copy of the project. You can send that copy for review later.',
+        options: [
+            {
+                value: 'isolated',
+                label: 'Private copy (recommended)',
+                description: 'AI edits stay in this canvas. The original project is unchanged until you send your work.',
+            },
+            {
+                value: 'local',
+                label: 'Edit the original folder',
+                description: 'AI changes the files in this project directly.',
+            },
+        ],
+    });
+    if (!choice) return null;
+    try {
+        localStorage.setItem('melon:isolationMode', choice);
+    } catch {
+        /* ignore */
+    }
+    return choice !== 'local';
 }
 
 export function DialogHost() {

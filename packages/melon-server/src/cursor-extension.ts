@@ -3,54 +3,161 @@
 //
 // The GUI's shared ModelRuntime never runs the session resource loader, so
 // extension-registered providers would be invisible to the provider/model
-// pickers. This module resolves the bundled extension and loads it into such
-// runtimes. Session runtimes get the same extension through the resource
-// loader's additionalExtensionPaths instead (see createRuntimeFor in index.ts).
+// pickers. This module resolves the bundled extension and registers the Cursor
+// provider into such runtimes WITHOUT loading the full extension factory.
+//
+// Full extension load (discoverAndLoadExtensions) still runs
+// registerCursorPiToolBridge(). Melon applies a multicard patch so that no
+// longer disposeAll()s sibling session bridges (see
+// desktop/patches/pi-cursor-sdk-multicard). GUI catalog load still avoids the
+// full factory so we never register a throwaway bridge from ModelRuntime.
+// Session runtimes load the extension via additionalExtensionPaths instead
+// (see createRuntimeFor in index.ts).
 //
 // Fail-open: if the package is absent (dev without desktop deps) or load
 // fails, builtin providers are unaffected.
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname } from "node:path";
-import {
-	discoverAndLoadExtensions,
-	getAgentDir,
-	type LoadExtensionsResult,
-	type ModelRuntime,
-} from "@earendil-works/pi-coding-agent";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
-const require = createRequire(import.meta.url);
+const moduleDir = dirname(fileURLToPath(import.meta.url));
+
+function cursorSdkResolvers(): NodeJS.Require[] {
+	const paths = [
+		import.meta.url,
+		// desktop/server/cursor-extension.js → desktop/package.json
+		join(moduleDir, "../package.json"),
+		// packages/melon-server/{src,dist} → repo desktop/package.json
+		join(moduleDir, "../../../desktop/package.json"),
+	];
+	const out: NodeJS.Require[] = [];
+	for (const p of paths) {
+		try {
+			out.push(createRequire(p));
+		} catch {
+			/* skip invalid */
+		}
+	}
+	return out;
+}
 
 export const CURSOR_PROVIDER_ID = "cursor";
+let cachedCursorSessionIsolationAvailable: boolean | undefined;
 
 /** Bundled pi-cursor-sdk package dir, or null when not installed. */
 export function cursorExtensionPath(): string | null {
+	for (const req of cursorSdkResolvers()) {
+		try {
+			return dirname(req.resolve("pi-cursor-sdk/package.json"));
+		} catch {
+			/* try next resolver */
+		}
+	}
+	return null;
+}
+
+/**
+ * The Cursor provider is safe in Melon's multi-card process only when every
+ * stateful SDK module carries the session-isolation patch. Do not degrade to
+ * upstream's process-global behavior: that can route one card's tools and
+ * questions into another card.
+ */
+export function cursorSessionIsolationAvailable(): boolean {
+	if (cachedCursorSessionIsolationAvailable !== undefined) return cachedCursorSessionIsolationAvailable;
+	const extPath = cursorExtensionPath();
+	if (!extPath) {
+		cachedCursorSessionIsolationAvailable = false;
+		return false;
+	}
+	const requiredMarkers = [
+		["dist/cursor-host-session.js", "runInCursorHostSession"],
+		["dist/cursor-pi-tool-bridge.js", "bridgesBySessionScopeKey"],
+		["dist/cursor-session-scope.js", "isCursorHostSessionIsolationEnabled"],
+		["dist/cursor-session-agent-resume.js", "resumeStatesByScopeKey"],
+		["dist/cursor-session-agent-lineage.js", "lineageStatesByScopeKey"],
+		["dist/cursor-session-agent-lifecycle.js", "liveCursorSessionScopeKeys"],
+		["dist/index.js", "cursorHostSessionScopeKey"],
+	] as const;
 	try {
-		return dirname(require.resolve("pi-cursor-sdk/package.json"));
+		cachedCursorSessionIsolationAvailable = requiredMarkers.every(([relativePath, marker]) => {
+			const path = join(extPath, relativePath);
+			return existsSync(path) && readFileSync(path, "utf8").includes(marker);
+		});
+		return cachedCursorSessionIsolationAvailable;
+	} catch {
+		cachedCursorSessionIsolationAvailable = false;
+		return false;
+	}
+}
+
+type CursorProviderPieces = {
+	discoverModels: (opts?: { onFallback?: (issue: { message: string }) => void }) => Promise<unknown[]>;
+	streamCursorLazy: (...args: unknown[]) => unknown;
+	CURSOR_API_KEY_CONFIG_VALUE: string;
+};
+
+function loadCursorProviderPieces(): CursorProviderPieces | null {
+	const extPath = cursorExtensionPath();
+	if (!extPath) return null;
+	try {
+		const sdkRequire = createRequire(join(extPath, "package.json"));
+		const discovery = sdkRequire("./dist/model-discovery.js") as {
+			discoverModels: CursorProviderPieces["discoverModels"];
+		};
+		const lazy = sdkRequire("./dist/cursor-provider-lazy.js") as {
+			streamCursorLazy: CursorProviderPieces["streamCursorLazy"];
+		};
+		const apiKey = sdkRequire("./dist/cursor-api-key.js") as {
+			CURSOR_API_KEY_CONFIG_VALUE: string;
+		};
+		return {
+			discoverModels: discovery.discoverModels,
+			streamCursorLazy: lazy.streamCursorLazy,
+			CURSOR_API_KEY_CONFIG_VALUE: apiKey.CURSOR_API_KEY_CONFIG_VALUE,
+		};
 	} catch {
 		return null;
 	}
 }
 
-/** Register the extension's providers into a ModelRuntime (and refresh). */
+/**
+ * Register the Cursor provider into a ModelRuntime (and refresh).
+ * Intentionally does not run the full pi-cursor-sdk extension factory — the
+ * GUI catalog does not need a live pi tool bridge, and avoiding the factory
+ * keeps ModelRuntime from registering an unused bridge.
+ */
 export async function loadCursorProviderInto(runtime: ModelRuntime): Promise<void> {
-	const extPath = cursorExtensionPath();
-	if (!extPath) return;
-	const agentDir = getAgentDir();
-	// Pass the package DIR — pi's discovery resolves its "pi" manifest. cwd is
-	// the agent dir so no project-local .pi/extensions are scanned; global
-	// extensions load too, keeping the GUI consistent with session runtimes.
-	const result: LoadExtensionsResult = await discoverAndLoadExtensions([extPath], agentDir, agentDir);
-	for (const { name, config, extensionPath } of result.runtime.pendingProviderRegistrations) {
-		try {
-			runtime.registerProvider(name, config);
-		} catch (e) {
-			console.error(
-				`[melon] extension "${extensionPath}" failed to register provider "${name}":`,
-				(e as Error)?.message ?? e,
-			);
-		}
+	// Other providers remain available when the Cursor patch is absent. Cursor
+	// itself stays out of the catalog rather than silently running cross-wired.
+	if (!cursorSessionIsolationAvailable()) return;
+	const pieces = loadCursorProviderPieces();
+	if (!pieces) return;
+
+	let fallbackMessage: string | undefined;
+	const models = await pieces.discoverModels({
+		onFallback: (issue) => {
+			fallbackMessage = issue.message;
+		},
+	});
+	if (fallbackMessage) {
+		console.warn("[melon] cursor model catalog fallback:", fallbackMessage);
 	}
-	result.runtime.pendingProviderRegistrations = [];
+
+	try {
+		runtime.registerProvider(CURSOR_PROVIDER_ID, {
+			name: "Cursor",
+			baseUrl: "https://cursor.com",
+			apiKey: pieces.CURSOR_API_KEY_CONFIG_VALUE,
+			api: "cursor-sdk",
+			models: models as never,
+			streamSimple: pieces.streamCursorLazy as never,
+		});
+	} catch (e) {
+		console.error(`[melon] failed to register provider "${CURSOR_PROVIDER_ID}":`, (e as Error)?.message ?? e);
+		return;
+	}
 	await runtime.refresh({ allowNetwork: false });
 }
 

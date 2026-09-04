@@ -1,14 +1,24 @@
-// Melon hosts many live cards in one Node process. pi-cursor-sdk keeps
-// process-global session scope + local-resume state, so without an explicit
-// rebind before each Cursor turn, card B can resume card A's Cursor agent —
-// especially after Melon canvas fork, which copies `cursor-sdk-agent-resume`
-// custom entries into the child .jsonl.
+// Melon hosts many live cards in one Node process. pi-cursor-sdk was written
+// for one session per process: its session scope, local-resume state and pi
+// tool bridge live in globals that the most recent session_start overwrites.
+//
+// Two things make that safe here:
+//  1. Melon's multicard patch (desktop/patches/pi-cursor-sdk-multicard) keeps
+//     one bridge and one state per session and resolves them from the async
+//     context of the running turn.
+//  2. This module opens that context — activateCursorSessionBinding() before
+//     the turn, runInCursorSession() around it — so a card that starts while
+//     another is streaming cannot take over the streaming card's bridge, tool
+//     answers or resume handle.
+//
+// Rebinding also matters after Melon canvas fork, which copies
+// `cursor-sdk-agent-resume` custom entries into the child .jsonl.
 
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { cursorExtensionPath } from "./cursor-extension.ts";
-
-const require = createRequire(import.meta.url);
+import { join } from "node:path";
+import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { cursorExtensionPath, cursorSessionIsolationAvailable } from "./cursor-extension.ts";
 
 /** pi-cursor-sdk custom entry that pins a local Cursor agent id for resume. */
 export const CURSOR_SDK_AGENT_RESUME_ENTRY_TYPE = "cursor-sdk-agent-resume";
@@ -22,8 +32,57 @@ type SessionRuntime = {
 			getCwd?: () => string;
 			appendCustomEntry: (customType: string, data?: unknown) => string;
 		};
-		bindExtensions: (bindings: { mode: "rpc" }) => Promise<void>;
+		bindExtensions: (bindings: { mode: "rpc"; uiContext?: ExtensionUIContext }) => Promise<void>;
 	};
+};
+
+type CursorHostSession = { sessionFile?: string; sessionId?: string; cwd?: string };
+
+type CursorHostSessionModule = {
+	runInCursorHostSession: <T>(session: CursorHostSession, fn: () => T) => T;
+};
+
+/** undefined = not looked up yet, null = patch missing. */
+let hostSessionModule: CursorHostSessionModule | null | undefined;
+
+function loadCursorHostSessionModule(): CursorHostSessionModule | null {
+	if (hostSessionModule !== undefined) return hostSessionModule;
+	const extPath = cursorExtensionPath();
+	if (!extPath) {
+		hostSessionModule = null;
+		return hostSessionModule;
+	}
+	try {
+		const sdkRequire = createRequire(join(extPath, "package.json"));
+		hostSessionModule = sdkRequire("./dist/cursor-host-session.js") as CursorHostSessionModule;
+	} catch {
+		hostSessionModule = null;
+		console.error(
+			"[melon] pi-cursor-sdk multicard isolation patch is missing — run desktop/scripts/apply-pi-cursor-sdk-multicard-patch.mjs; concurrent Cursor cards will share session state",
+		);
+	}
+	return hostSessionModule;
+}
+
+function cursorIsolationUnavailableError(): Error & { statusCode: number } {
+	return Object.assign(
+		new Error(
+			"Cursor session isolation is unavailable. Reinstall or run the desktop Cursor patch, then restart Melon.",
+		),
+		{ statusCode: 503 },
+	);
+}
+
+function requireCursorHostSessionModule(): CursorHostSessionModule {
+	if (!cursorSessionIsolationAvailable()) throw cursorIsolationUnavailableError();
+	const hostSession = loadCursorHostSessionModule();
+	if (!hostSession) throw cursorIsolationUnavailableError();
+	return hostSession;
+}
+
+export type ActivateCursorSessionBindingOptions = {
+	/** Melon card question panel — must be re-applied on every rebind. */
+	uiContext?: ExtensionUIContext;
 };
 
 function isCursorProvider(runtime: SessionRuntime): boolean {
@@ -86,31 +145,65 @@ export function stripCursorResumeEntriesFromSessionFile(sessionFile: string): nu
 }
 
 /**
- * Point pi-cursor-sdk's process-global scope/resume/appendEntry at this card's
- * session before a Cursor prompt. No-op when Cursor is not the active model or
- * the extension package is missing.
+ * Register this card's session with pi-cursor-sdk before a Cursor prompt.
+ * No-op when Cursor is not the active model or the extension is missing.
+ *
+ * Always re-supplies uiContext when provided: bindExtensions without it leaves
+ * the previous context in place on AgentSession, but Melon can lose the card
+ * panel wiring across resume/reattach paths — passing it every time is safe
+ * because CardExtensionUiBridge.createUIContext() shares the same pending map.
  */
-export async function activateCursorSessionBinding(runtime: SessionRuntime): Promise<void> {
+export async function activateCursorSessionBinding(
+	runtime: SessionRuntime,
+	options: ActivateCursorSessionBindingOptions = {},
+): Promise<void> {
 	if (!cursorExtensionPath() || !isCursorProvider(runtime)) return;
+	requireCursorHostSessionModule();
 
+	// Re-emit session_start on THIS card's extension runner. The patched SDK
+	// keys its bridge, scope and resume state off this event's sessionManager,
+	// so the card is registered under its own session before it prompts.
+	await runtime.session.bindExtensions({
+		mode: "rpc",
+		...(options.uiContext ? { uiContext: options.uiContext } : {}),
+	});
+}
+
+/**
+ * Run a Cursor turn inside this card's session context, so every
+ * `getRegisteredCursorPiToolBridge()` / scope / resume lookup the turn makes
+ * resolves to THIS card even while a sibling card binds or streams.
+ *
+ * Missing isolation is a hard Cursor error. Falling back to the upstream
+ * process globals would allow one card to execute another card's tools.
+ */
+export async function runInCursorSession<T>(runtime: SessionRuntime, run: () => Promise<T>): Promise<T> {
+	if (!isCursorProvider(runtime)) return run();
+	const hostSession = requireCursorHostSessionModule();
 	const sm = runtime.session.sessionManager;
+	return hostSession.runInCursorHostSession(
+		{
+			sessionFile: sm.getSessionFile?.(),
+			sessionId: sm.getSessionId?.(),
+			cwd: sm.getCwd?.(),
+		},
+		run,
+	);
+}
 
-	// Re-emit session_start on THIS card's extension runner so resume state is
-	// restored from this session's branch (not whichever card bound last).
-	await runtime.session.bindExtensions({ mode: "rpc" });
-
-	try {
-		const resumeMod = require("pi-cursor-sdk/dist/cursor-session-agent-resume.js") as {
-			__testUtils?: {
-				set: (partial: { appendEntry?: (customType: string, data?: unknown) => unknown }) => void;
-			};
-		};
-
-		// Resume handles must append into THIS card's jsonl, not the last-created card.
-		resumeMod.__testUtils?.set({
-			appendEntry: (customType: string, data?: unknown) => sm.appendCustomEntry(customType, data),
-		});
-	} catch (e) {
-		console.error("[melon] cursor session bind helpers unavailable:", (e as Error)?.message ?? e);
-	}
+/**
+ * Bind the card and run its prompt in one async session context. This closes
+ * the small window where a sibling could bind between session_start and
+ * prompt(), while leaving every non-Cursor provider's path unchanged.
+ */
+export async function runInBoundCursorSession<T>(
+	runtime: SessionRuntime,
+	options: ActivateCursorSessionBindingOptions,
+	run: () => Promise<T>,
+): Promise<T> {
+	if (!isCursorProvider(runtime)) return run();
+	return runInCursorSession(runtime, async () => {
+		await activateCursorSessionBinding(runtime, options);
+		return run();
+	});
 }

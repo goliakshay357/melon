@@ -1,4 +1,4 @@
-import { memo as ReactMemo, useEffect, useRef, useState } from 'react';
+import { memo as ReactMemo, useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
     Handle,
@@ -549,7 +549,15 @@ function ChatCardNodeInner({
     const sendMessage = useCanvasStore((s) => s.sendMessage);
     const serverOffline = useCanvasStore((s) => s.serverOffline);
     const { setCenter, getZoom } = useReactFlow();
-    const [draft, setDraft] = useState('');
+    // The composer draft lives on the card in the store, not in component state:
+    // ReactFlow unmounts off-screen nodes (onlyRenderVisibleElements), so local
+    // state would be dropped whenever the card scrolls out of view or the canvas
+    // is switched, silently erasing what the user typed.
+    const draft = card?.draft ?? '';
+    const setDraft = useCallback(
+        (next: string | ((prev: string) => string)) => useCanvasStore.getState().setCardDraft(id, next),
+        [id],
+    );
     const [maximized, setMaximized] = useState(false);
     const [view, setView] = useState<'chat' | 'trajectory'>('chat');
     const [editingTitle, setEditingTitle] = useState(false);
@@ -649,7 +657,7 @@ function ChatCardNodeInner({
         // APPEND, never overwrite — the user may be typing already.
         setDraft((prev) => (prev ? `${prev}\n\n${card.pendingDraft}` : card.pendingDraft!));
         useCanvasStore.getState().updateCard(id, { pendingDraft: undefined });
-    }, [card?.pendingDraft, id]);
+    }, [card?.pendingDraft, id, setDraft]);
 
     // The persisted queue is a mirror of pi's in-memory queue, which dies
     // with the server. Resync once per mount so stale chips (app restart,
@@ -669,7 +677,8 @@ function ChatCardNodeInner({
         if (!text) return;
         setDraft('');
         const ok = await sendMessage(id, text);
-        if (!ok) setDraft(text); // failed — give the text back for retry
+        // Failed — hand the text back behind anything typed since, never over it.
+        if (!ok) setDraft((prev) => (prev ? `${prev}\n\n${text}` : text));
     };
 
     const forkThis = () => {

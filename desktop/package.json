@@ -6,7 +6,9 @@
     "main": "main.mjs",
     "scripts": {
         "start": "electron .",
-        "dist:mac": "electron-builder --mac"
+        "dist:mac": "electron-builder --mac",
+        "postinstall": "node ./scripts/apply-pi-cursor-sdk-multicard-patch.mjs",
+        "patch:cursor-bridge": "node ./scripts/apply-pi-cursor-sdk-multicard-patch.mjs"
     },
     "dependencies": {
         "@earendil-works/pi-coding-agent": "0.84.1",

@@ -17,7 +17,7 @@ import {
     X,
 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
-import { askText, confirmAction } from '@/components/dialogs';
+import { askText, confirmAction, chooseCanvasIsolation } from '@/components/dialogs';
 import { cn } from '@/lib/utils';
 import { fuzzyMatchIndices, fuzzyScore } from '@/lib/fuzzy';
 import { pickFolder } from '@/lib/pick-folder';
@@ -388,8 +388,10 @@ export function Sidebar() {
         const suggested = `Canvas ${(entry?.canvases.length ?? 0) + 1}`;
         const name = (await askText({ title: 'Name your new canvas', initial: suggested }))?.trim();
         if (!name) return;
+        const isolated = await chooseCanvasIsolation();
+        if (isolated === null) return;
         if (folder !== cwd) await openFolder(cwd);
-        await createCanvas(name);
+        await createCanvas(name, { useWorktree: isolated });
         loadTree();
     };
 
@@ -397,10 +399,23 @@ export function Sidebar() {
         if (!(await confirmAction({
             title: 'Delete this canvas?',
             description:
-                'The card layout will be removed. If this canvas had an Isolated worktree under .melon/worktrees/, that checkout and its branch will also be deleted. Pi session transcripts remain on disk.',
+                'The layout will be removed. If this was a private copy, that copy is deleted too. Chat history stays on this computer.',
             confirmLabel: 'Delete',
         })))
             return;
+        const del = await fetch(`/canvases/${id}?cwd=${encodeURIComponent(cwd)}`, {
+            method: 'DELETE',
+        });
+        if (del.status === 409) {
+            const ok = await confirmAction({
+                title: 'This canvas still has unsent work',
+                description:
+                    'Deleting throws away the private copy. Send it for review first if you want to keep the work.',
+                confirmLabel: 'Delete anyway',
+            });
+            if (!ok) return;
+            await fetch(`/canvases/${id}?cwd=${encodeURIComponent(cwd)}&force=1`, { method: 'DELETE' });
+        }
         forgetCanvas(id);
         if (canvasId === id && folder === cwd) {
             localStorage.removeItem('melon:lastCanvas');
@@ -414,9 +429,6 @@ export function Sidebar() {
                 worktreeMode: 'local',
             });
         }
-        await fetch(`/canvases/${id}?cwd=${encodeURIComponent(cwd)}`, {
-            method: 'DELETE',
-        });
         // Drop from Recent immediately + bump rev so Workspaces tree refetch matches.
         setRecent((prev) => prev.filter((r) => !(r.id === id && r.cwd === cwd)));
         useCanvasStore.setState((s) => ({ canvasTreeRev: s.canvasTreeRev + 1 }));

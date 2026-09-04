@@ -63,6 +63,8 @@ export class CardExtensionUiBridge {
 	private readonly pending = new Map<string, PendingEntry>();
 	readonly cardId: string;
 	private readonly broadcast: (payload: ExtensionUiEvent) => void;
+	/** Stable context for bindExtensions — same pending map for the card's life. */
+	private uiContext: ExtensionUIContext | undefined;
 
 	constructor(cardId: string, broadcast: (payload: ExtensionUiEvent) => void) {
 		this.cardId = cardId;
@@ -88,6 +90,12 @@ export class CardExtensionUiBridge {
 		for (const entry of entries) {
 			entry.settle({ id: entry.event.id, cancelled: true });
 		}
+	}
+
+	/** Memoized UI context — safe to pass on every Cursor session rebind. */
+	getUIContext(): ExtensionUIContext {
+		if (!this.uiContext) this.uiContext = this.createUIContext();
+		return this.uiContext;
 	}
 
 	createUIContext(): ExtensionUIContext {

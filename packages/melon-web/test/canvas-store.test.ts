@@ -70,6 +70,13 @@ beforeEach(async () => {
 	useCanvasStore.setState({ folder: "/tmp", hydrated: true });
 });
 
+it("resets viewport to 100% zoom when creating a new canvas", async () => {
+	useCanvasStore.getState().setViewport({ x: -400, y: 120, zoom: 0.35 });
+	await useCanvasStore.getState().createCanvas("Fresh");
+	expect(useCanvasStore.getState().viewport).toEqual({ x: 0, y: 0, zoom: 1 });
+	expect(useCanvasStore.getState().cards).toEqual([]);
+});
+
 it("segregates agent outputs into separate messages per turn", async () => {
 	useCanvasStore.getState().addCard({ x: 0, y: 0 });
 	const cardId = useCanvasStore.getState().cards[0].id;
@@ -145,12 +152,14 @@ it("creates the first canvas and card from the empty-state prompt", async () => 
 			model: "test/model",
 			skills: ["archify"],
 			permission: "readonly",
+			viewport: { x: 100, y: 40, zoom: 1 },
 		},
 	);
 
 	expect(sent).toBe(true);
 	expect(useCanvasStore.getState().canvasName).toBe("Canvas 1");
 	expect(useCanvasStore.getState().cards).toHaveLength(1);
+	expect(useCanvasStore.getState().viewport).toEqual({ x: 100, y: 40, zoom: 1 });
 	expect(useCanvasStore.getState().cards[0]).toMatchObject({
 		position: { x: 120, y: 80 },
 		model: "test/model",
@@ -936,4 +945,40 @@ it("strips pendingExtensionUi when saving canvas", async () => {
 	expect(savedCards![0].pendingExtensionUi).toBeUndefined();
 	// In-memory card still has the live dialog.
 	expect(useCanvasStore.getState().cards[0].pendingExtensionUi?.id).toBe("z");
+});
+
+it("points every card at the canvas private copy cwd", async () => {
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (url: string, init?: RequestInit) => {
+			if (typeof url === "string" && url.includes("/worktree") && init?.method === "POST") {
+				return {
+					ok: true,
+					status: 200,
+					json: async () => ({
+						ok: true,
+						mode: "isolated",
+						worktreePath: "/tmp/proj/.melon/worktrees/calm-canyon",
+						branch: "amber-fox-aaaaaa",
+						baseBranch: "main",
+					}),
+				} as Response;
+			}
+			return fetchStub(url, init);
+		}),
+	);
+	useCanvasStore.setState({ folder: "/tmp/proj", hydrated: true });
+	await useCanvasStore.getState().createCanvas("Shared copy");
+	expect(useCanvasStore.getState().worktreeMode).toBe("isolated");
+	expect(useCanvasStore.getState().agentCwd()).toBe("/tmp/proj/.melon/worktrees/calm-canyon");
+	useCanvasStore.getState().addCard({ x: 0, y: 0 });
+	expect(useCanvasStore.getState().agentCwd()).toBe("/tmp/proj/.melon/worktrees/calm-canyon");
+});
+
+it("edits the original folder when the user picks that option", async () => {
+	useCanvasStore.setState({ folder: "/tmp/proj", hydrated: true });
+	await useCanvasStore.getState().createCanvas("In place", { useWorktree: false });
+	expect(useCanvasStore.getState().worktreeMode).toBe("local");
+	expect(useCanvasStore.getState().worktreePath).toBeNull();
+	expect(useCanvasStore.getState().agentCwd()).toBe("/tmp/proj");
 });

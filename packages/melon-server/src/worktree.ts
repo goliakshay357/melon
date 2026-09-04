@@ -11,7 +11,7 @@
 
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
@@ -100,9 +100,29 @@ export function worktreesDir(projectRoot: string): string {
 	return join(projectRoot, ".melon", "worktrees");
 }
 
+function posixish(p: string): string {
+	return p.replace(/\\/g, "/");
+}
+
+function tryRealpath(p: string): string {
+	try {
+		return realpathSync(p);
+	} catch {
+		return p;
+	}
+}
+
+/** True when `dir` is itself a Melon canvas checkout (opening it as a project would nest). */
+export function isInsideMelonWorktrees(dir: string): boolean {
+	return posixish(dir).includes("/.melon/worktrees/");
+}
+
 export function isMelonWorktreePath(projectRoot: string, path: string): boolean {
-	const root = worktreesDir(projectRoot);
-	return path === root || path.startsWith(`${root}/`);
+	const root = tryRealpath(worktreesDir(projectRoot));
+	const target = tryRealpath(path);
+	const rootN = posixish(root);
+	const targetN = posixish(target);
+	return targetN === rootN || targetN.startsWith(`${rootN}/`);
 }
 
 function pick<T extends readonly string[]>(list: T): T[number] {
@@ -126,12 +146,34 @@ export function generateWorktreeFolderName(parentDir: string): string {
 	return `${base}-${Date.now().toString(36)}`;
 }
 
-async function git(cwd: string, args: string[], timeout = 60_000): Promise<string> {
+export async function gitIn(cwd: string, args: string[], timeout = 60_000): Promise<string> {
 	const { stdout } = await execFileAsync("git", ["-C", cwd, ...args], {
 		timeout,
 		maxBuffer: 10 * 1024 * 1024,
 	});
 	return String(stdout).trim();
+}
+
+async function git(cwd: string, args: string[], timeout = 60_000): Promise<string> {
+	return gitIn(cwd, args, timeout);
+}
+
+/** Serialize mutating git ops for one project so canvases don't fight locks. */
+export async function withProjectGitLock<T>(projectRoot: string, fn: () => Promise<T>): Promise<T> {
+	const prev = createQueues.get(projectRoot) ?? Promise.resolve();
+	let release!: () => void;
+	const done = new Promise<void>((r) => {
+		release = r;
+	});
+	const chained = prev.catch(() => {}).then(() => done);
+	createQueues.set(projectRoot, chained);
+	await prev.catch(() => {});
+	try {
+		return await fn();
+	} finally {
+		release();
+		if (createQueues.get(projectRoot) === chained) createQueues.delete(projectRoot);
+	}
 }
 
 export async function isGitRepo(projectRoot: string): Promise<boolean> {
@@ -193,6 +235,39 @@ export interface CreateWorktreeOptions {
 	baseBranch?: string;
 	/** When false, skip worktree and use projectRoot (1code useWorktree=false). */
 	useWorktree?: boolean;
+	/** Reuse this canvas's existing checkout/branch when still valid. */
+	existing?: {
+		worktreePath?: string | null;
+		branch?: string | null;
+		baseBranch?: string | null;
+	};
+}
+
+async function pathIsUsableCheckout(
+	projectRoot: string,
+	worktreePath: string,
+	branch?: string | null,
+): Promise<boolean> {
+	if (!existsSync(worktreePath)) return false;
+	if (!isMelonWorktreePath(projectRoot, worktreePath)) return false;
+	try {
+		const inside = await git(worktreePath, ["rev-parse", "--is-inside-work-tree"]);
+		if (inside !== "true") return false;
+		if (!branch) return true;
+		const current = await git(worktreePath, ["branch", "--show-current"]);
+		return !current || current === branch;
+	} catch {
+		return false;
+	}
+}
+
+async function branchExists(projectRoot: string, branch: string): Promise<boolean> {
+	try {
+		await git(projectRoot, ["rev-parse", "--verify", `refs/heads/${branch}`]);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 async function createWorktreeInner(projectRoot: string, options: CreateWorktreeOptions = {}): Promise<WorktreeResult> {
@@ -202,15 +277,68 @@ async function createWorktreeInner(projectRoot: string, options: CreateWorktreeO
 		return { success: true, worktreePath: projectRoot, mode: "local" };
 	}
 
+	if (isInsideMelonWorktrees(projectRoot)) {
+		return {
+			success: true,
+			worktreePath: projectRoot,
+			mode: "local",
+			error: "This folder is already a canvas copy. Editing it directly.",
+		};
+	}
+
 	if (!(await isGitRepo(projectRoot))) {
 		return { success: true, worktreePath: projectRoot, mode: "local" };
 	}
 
+	const existing = options.existing;
+	const existingPath = existing?.worktreePath?.trim() || "";
+	const existingBranch = existing?.branch?.trim() || "";
+
+	if (existingPath && (await pathIsUsableCheckout(projectRoot, existingPath, existingBranch || null))) {
+		let branch = existingBranch || undefined;
+		let baseBranch = existing?.baseBranch?.trim() || undefined;
+		try {
+			if (!branch) branch = await git(existingPath, ["branch", "--show-current"]);
+		} catch {
+			/* keep stored */
+		}
+		if (!baseBranch) baseBranch = await getDefaultBranch(projectRoot);
+		return {
+			success: true,
+			worktreePath: existingPath,
+			branch,
+			baseBranch,
+			mode: "isolated",
+		};
+	}
+
 	try {
-		const baseBranch = options.baseBranch?.trim() || (await getDefaultBranch(projectRoot));
-		const branch = generateBranchName();
+		const baseBranch =
+			existing?.baseBranch?.trim() || options.baseBranch?.trim() || (await getDefaultBranch(projectRoot));
 		const parent = worktreesDir(projectRoot);
 		mkdirSync(parent, { recursive: true });
+
+		if (existingBranch && (await branchExists(projectRoot, existingBranch))) {
+			try {
+				await git(projectRoot, ["worktree", "prune"]);
+			} catch {
+				/* ignore */
+			}
+			const worktreePath =
+				existingPath && isMelonWorktreePath(projectRoot, existingPath) && !existsSync(existingPath)
+					? existingPath
+					: join(parent, generateWorktreeFolderName(parent));
+			await git(projectRoot, ["worktree", "add", worktreePath, existingBranch], 120_000);
+			return {
+				success: true,
+				worktreePath,
+				branch: existingBranch,
+				baseBranch,
+				mode: "isolated",
+			};
+		}
+
+		const branch = generateBranchName();
 		const folderName = generateWorktreeFolderName(parent);
 		const worktreePath = join(parent, folderName);
 		const commit = await resolveStartCommit(projectRoot, baseBranch);
@@ -235,25 +363,19 @@ async function createWorktreeInner(projectRoot: string, options: CreateWorktreeO
 	}
 }
 
-/** Create a worktree for a canvas; serialized per projectRoot. */
+/** Create or repair a worktree for a canvas; serialized per projectRoot. */
 export async function createWorktreeForCanvas(
 	projectRoot: string,
 	options: CreateWorktreeOptions = {},
 ): Promise<WorktreeResult> {
-	const prev = createQueues.get(projectRoot) ?? Promise.resolve();
-	let release!: () => void;
-	const done = new Promise<void>((r) => {
-		release = r;
-	});
-	const chained = prev.catch(() => {}).then(() => done);
-	createQueues.set(projectRoot, chained);
-	await prev.catch(() => {});
-	try {
-		return await createWorktreeInner(projectRoot, options);
-	} finally {
-		release();
-		if (createQueues.get(projectRoot) === chained) createQueues.delete(projectRoot);
-	}
+	return withProjectGitLock(projectRoot, () => createWorktreeInner(projectRoot, options));
+}
+
+export async function ensureWorktreeForCanvas(
+	projectRoot: string,
+	options: CreateWorktreeOptions = {},
+): Promise<WorktreeResult> {
+	return createWorktreeForCanvas(projectRoot, options);
 }
 
 export async function removeWorktree(
@@ -269,19 +391,20 @@ export async function removeWorktree(
 			error: "refusing to remove path outside <project>/.melon/worktrees/",
 		};
 	}
-	try {
-		await git(projectRoot, ["worktree", "remove", worktreePath, "--force"], 60_000);
-		return { success: true };
-	} catch (e) {
-		const error = e instanceof Error ? e.message : String(e);
-		// Stale registration — prune and drop the directory if present.
+	return withProjectGitLock(projectRoot, async () => {
 		try {
-			await git(projectRoot, ["worktree", "prune"]);
-		} catch {
-			/* ignore */
+			await git(projectRoot, ["worktree", "remove", worktreePath, "--force"], 60_000);
+			return { success: true };
+		} catch (e) {
+			const error = e instanceof Error ? e.message : String(e);
+			try {
+				await git(projectRoot, ["worktree", "prune"]);
+			} catch {
+				/* ignore */
+			}
+			return { success: false, error };
 		}
-		return { success: false, error };
-	}
+	});
 }
 
 /** List registered melon worktree paths under projectRoot (for diagnostics). */

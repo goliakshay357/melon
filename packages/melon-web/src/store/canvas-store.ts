@@ -173,6 +173,41 @@ function findCard(cardId: string): SessionCard | undefined {
 	return workspaces.get(canvasId)?.cards.find((c) => c.id === cardId);
 }
 
+async function repairActiveWorktree(): Promise<void> {
+	const s = useCanvasStore.getState();
+	if (!s.folder || !s.canvasId || s.useWorktree === false) return;
+	try {
+		const wtRes = await fetch(`/canvases/${s.canvasId}/worktree`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				cwd: s.folder,
+				useWorktree: true,
+				worktreePath: s.worktreePath,
+				branch: s.branch,
+				baseBranch: s.baseBranch,
+			}),
+		});
+		if (!wtRes.ok) return;
+		const body = (await wtRes.json()) as {
+			worktreePath?: string;
+			branch?: string;
+			baseBranch?: string;
+			mode?: CanvasWorktreeMode;
+		};
+		const mode: CanvasWorktreeMode = body.mode === "isolated" ? "isolated" : "local";
+		const path = mode === "isolated" && typeof body.worktreePath === "string" ? body.worktreePath : null;
+		useCanvasStore.setState({
+			worktreePath: path,
+			branch: typeof body.branch === "string" ? body.branch : null,
+			baseBranch: typeof body.baseBranch === "string" ? body.baseBranch : null,
+			worktreeMode: mode,
+		});
+	} catch {
+		/* keep stored metadata */
+	}
+}
+
 function stashActiveWorkspace() {
 	const {
 		canvasId,
@@ -272,13 +307,22 @@ function pushUndo(cards: SessionCard[]) {
 
 function applyCardSnapshot(snapshot: SessionCard[]) {
 	const canvasId = useCanvasStore.getState().canvasId;
+	// Composer text is not layout history (see the undo stack comment above):
+	// carry the live draft over so Cmd+Z on the canvas never retypes the
+	// composer. A card that is gone (undoing a delete) keeps its snapshot draft.
+	const live = new Map(useCanvasStore.getState().cards.map((c) => [c.id, c]));
+	const cards = snapshot.map((c) => {
+		const current = live.get(c.id);
+		if (!current || current.draft === c.draft) return c;
+		return { ...c, draft: current.draft };
+	});
 	useCanvasStore.setState({
-		cards: snapshot,
+		cards,
 		...(canvasId
 			? {
 					canvasActivity: {
 						...useCanvasStore.getState().canvasActivity,
-						[canvasId]: activityOf(snapshot),
+						[canvasId]: activityOf(cards),
 					},
 				}
 			: {}),
@@ -289,7 +333,7 @@ function applyCardSnapshot(snapshot: SessionCard[]) {
 			viewport: useCanvasStore.getState().viewport,
 			name: prev?.name ?? useCanvasStore.getState().canvasName,
 		});
-		reindexCanvasCards(canvasId, snapshot);
+		reindexCanvasCards(canvasId, cards);
 	}
 }
 
@@ -447,7 +491,15 @@ interface CanvasState {
 	startConversation: (
 		text: string,
 		position: { x: number; y: number },
-		options: { model: string; skills: string[]; permission: "full" | "readonly" },
+		options: {
+			model: string;
+			skills: string[];
+			permission: "full" | "readonly";
+			/** Optional first-card size (empty-home: ~55% wide × ~78% tall of the pane). */
+			size?: { width: number; height: number };
+			/** Optional viewport to apply with the first card (typically zoom 1, centered). */
+			viewport?: { x: number; y: number; zoom: number };
+		},
 	) => Promise<boolean>;
 	saveCanvas: () => Promise<void>;
 	scrollAction: ScrollAction;
@@ -466,6 +518,12 @@ interface CanvasState {
 	setModel: (id: string, model: string) => void;
 	setCardError: (id: string, message: string) => void;
 	clearCardError: (id: string) => void;
+	/**
+	 * Write the card's unsent composer text. The updater form reads the current
+	 * draft inside the same store write, so appends can't lose a keystroke that
+	 * landed while an await was in flight.
+	 */
+	setCardDraft: (id: string, draft: string | ((prev: string) => string)) => void;
 	/** Move queued text into the composer draft without dropping what's there. */
 	queueToDraft: (id: string, texts: string[]) => void;
 	/**
@@ -895,6 +953,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			for (const c of get().cards) {
 				if (c.sessionFile && !streams.has(c.id)) await get().hydrateMessages(c.id, c.sessionFile);
 			}
+			await repairActiveWorktree();
 			await touchOpened();
 			return true;
 		};
@@ -1023,11 +1082,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		redoStack.length = 0;
 		const id = `cv_${nanoid(8)}`;
 		const folder = get().folder!;
+		const freshViewport = { x: 0, y: 0, zoom: 1 };
 		set({
 			canvasOpening: true,
 			canvasId: id,
 			canvasName: name || "Untitled",
 			cards: [],
+			viewport: freshViewport,
 			worktreePath: null,
 			branch: null,
 			baseBranch: null,
@@ -1038,6 +1099,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			canvasNotice: useWorktree ? "Preparing Isolated checkout…" : null,
 		});
 		setWorkspaceCards(id, [], {
+			viewport: freshViewport,
 			name: name || "Untitled",
 			useWorktree,
 			worktreePath: null,
@@ -1052,7 +1114,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			const wtRes = await fetch(`/canvases/${id}/worktree`, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ cwd: folder, useWorktree }),
+				body: JSON.stringify({
+					cwd: folder,
+					useWorktree,
+					worktreePath: get().worktreePath,
+					branch: get().branch,
+					baseBranch: get().baseBranch,
+				}),
 			});
 			if (wtRes.ok) {
 				const body = (await wtRes.json()) as {
@@ -1188,6 +1256,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		startingConversation = true;
 		try {
 			if (!get().canvasId) {
+				// First prompt must never block on a dialog: a dismissed or unmounted
+				// modal would silently swallow the message the user just sent. Use the
+				// safe default (private copy); the explicit choice lives on New canvas.
 				const names = new Set(get().canvases.map((canvas) => canvas.name));
 				let number = 1;
 				while (names.has(`Canvas ${number}`)) number++;
@@ -1195,7 +1266,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			}
 			if (!get().canvasId) return false;
 
-			const cardId = get().addCard(position);
+			if (options.viewport) get().setViewport(options.viewport);
+			const cardId = get().addCard(position, null, undefined, "chat", options.size);
 			get().updateCard(cardId, {
 				skills: options.skills,
 				permission: options.permission,
@@ -1221,6 +1293,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			cards: [],
 			canvasId: null,
 			canvasName: "",
+			viewport: { x: 0, y: 0, zoom: 1 },
 			worktreePath: null,
 			branch: null,
 			baseBranch: null,
@@ -1481,6 +1554,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		get().updateCard(id, { error: undefined });
 	},
 
+	setCardDraft(id, draft) {
+		patchCardInStore(id, (c) => ({
+			...c,
+			draft: typeof draft === "function" ? draft(c.draft ?? "") : draft,
+		}));
+	},
+
 	// Server (pi's own queue) is ground truth — every path adopts the list it
 	// returns so the client mirror can never drift from what will execute.
 	queueToDraft(id, texts) {
@@ -1659,7 +1739,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			}
 			attached.delete(id);
 			cardCanvas.delete(id);
-			fetch(`/sessions/${id}/abort`, { method: "POST" }).catch(() => {});
+			const card = findCard(id);
+			const cursorCard = card?.model?.split("/", 1)[0]?.toLowerCase() === "cursor";
+			fetch(`/sessions/${id}${cursorCard ? "" : "/abort"}`, {
+				method: cursorCard ? "DELETE" : "POST",
+			}).catch(() => {});
 		}
 		set((s) => {
 			const cards = s.cards
@@ -1792,7 +1876,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					headers: { "content-type": "application/json" },
 					body: JSON.stringify(
 						sessionFile
-							? { cardId, sessionFile, model: card.model, skills: card.skills ?? [] }
+							? { cardId, sessionFile, model: card.model, skills: card.skills ?? [], cwd }
 							: {
 									cardId,
 									cwd,

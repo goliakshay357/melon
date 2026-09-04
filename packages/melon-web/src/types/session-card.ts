@@ -95,6 +95,13 @@ export interface SessionCard {
 	queue?: string[];
 	/** Restored into the card composer when the first prompt fails to send. */
 	pendingDraft?: string;
+	/**
+	 * Unsent composer text. Lives here, not in the card component: React Flow
+	 * unmounts off-screen nodes (onlyRenderVisibleElements), so component state
+	 * would be dropped whenever the card scrolls out of view or the canvas is
+	 * switched, silently erasing what the user typed.
+	 */
+	draft?: string;
 	/** Blocking extension UI (select/confirm/input) above the inbox. */
 	pendingExtensionUi?: PendingExtensionUi;
 	/** Full trajectory trace — meta + every lifecycle event (for debugging). */

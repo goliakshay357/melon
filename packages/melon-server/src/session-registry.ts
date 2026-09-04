@@ -17,8 +17,43 @@ export interface AttachedSession {
 	promptQueue: string[];
 	/** Guards the drain loop against re-entrant agent_end triggers. */
 	draining?: boolean;
+	/** Monotonic token for Cursor turns; prevents a settled old turn mutating a newer one. */
+	cursorTurnId?: number;
+	/** Cursor turn explicitly stopped by the user; its queue must remain paused. */
+	cursorAbortedTurnId?: number;
 	/** Extension UI (select/confirm/input) → Melon card question panel. */
 	extensionUi?: CardExtensionUiBridge;
+}
+
+export function isCursorSession(session: Pick<AttachedSession, "runtime">): boolean {
+	return (session.runtime.session.model?.provider ?? "").toLowerCase() === "cursor";
+}
+
+/** Claim a Cursor card synchronously before prompt() can yield. */
+export function beginCursorTurn(
+	session: Pick<AttachedSession, "runtime" | "busy" | "cursorTurnId">,
+): number | undefined {
+	if (!isCursorSession(session)) return undefined;
+	const turnId = (session.cursorTurnId ?? 0) + 1;
+	session.cursorTurnId = turnId;
+	session.busy = true;
+	return turnId;
+}
+
+export function abortCurrentCursorTurn(
+	session: Pick<AttachedSession, "runtime" | "cursorTurnId" | "cursorAbortedTurnId">,
+): void {
+	if (isCursorSession(session) && session.cursorTurnId !== undefined) {
+		session.cursorAbortedTurnId = session.cursorTurnId;
+	}
+}
+
+export function isCursorTurnAborted(session: Pick<AttachedSession, "cursorAbortedTurnId">, turnId: number): boolean {
+	return session.cursorAbortedTurnId === turnId;
+}
+
+export function isCurrentCursorTurn(session: Pick<AttachedSession, "cursorTurnId">, turnId: number): boolean {
+	return session.cursorTurnId === turnId;
 }
 
 export class SessionRegistry {
@@ -30,6 +65,10 @@ export class SessionRegistry {
 
 	get(cardId: string): AttachedSession | undefined {
 		return this.sessions.get(cardId);
+	}
+
+	entries(): IterableIterator<[string, AttachedSession]> {
+		return this.sessions.entries();
 	}
 
 	delete(cardId: string): void {

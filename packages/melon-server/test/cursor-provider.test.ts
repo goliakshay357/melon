@@ -13,7 +13,9 @@ process.env.PI_CODING_AGENT_DIR = agentDir;
 
 const { buildApp } = await import("../src/index.ts");
 const { getAgentDir } = await import("@earendil-works/pi-coding-agent");
-const { cursorExtensionPath, hasRealCursorKey, rewriteCursorError } = await import("../src/cursor-extension.ts");
+const { cursorExtensionPath, cursorSessionIsolationAvailable, hasRealCursorKey, rewriteCursorError } = await import(
+	"../src/cursor-extension.ts"
+);
 const { loadSettings } = await import("../src/settings.ts");
 
 // Fail fast if the hermetic dir is not actually in effect — writing keys or
@@ -80,6 +82,7 @@ describe("cursorExtensionPath", () => {
 		if (p === null) return;
 		const pkg = JSON.parse(readFileSync(join(p, "package.json"), "utf8")) as { pi?: { extensions?: string[] } };
 		expect(Array.isArray(pkg.pi?.extensions)).toBe(true);
+		expect(cursorSessionIsolationAvailable()).toBe(true);
 	});
 });
 

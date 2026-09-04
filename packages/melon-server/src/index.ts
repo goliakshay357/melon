@@ -27,6 +27,7 @@ import {
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyPluginAsync } from "fastify";
+import { inspectCanvasShare, shareCanvasWork } from "./canvas-share.ts";
 import {
 	expandHome,
 	loadConfig,
@@ -39,14 +40,22 @@ import {
 import {
 	CURSOR_PROVIDER_ID,
 	cursorExtensionPath,
+	cursorSessionIsolationAvailable,
 	hasRealCursorKey,
 	loadCursorProviderInto,
 	rewriteCursorError,
 } from "./cursor-extension.ts";
-import { activateCursorSessionBinding, stripCursorResumeEntriesFromSessionFile } from "./cursor-session-binding.ts";
+import { runInBoundCursorSession, stripCursorResumeEntriesFromSessionFile } from "./cursor-session-binding.ts";
 import { CardExtensionUiBridge } from "./extension-ui.ts";
 import { fuzzyScore } from "./fuzzy.ts";
-import { SessionRegistry } from "./session-registry.ts";
+import {
+	abortCurrentCursorTurn,
+	beginCursorTurn,
+	isCurrentCursorTurn,
+	isCursorSession,
+	isCursorTurnAborted,
+	SessionRegistry,
+} from "./session-registry.ts";
 import {
 	clearProviderDenylist,
 	denylistModel,
@@ -66,6 +75,10 @@ function splitModel(model: string): [string, string] {
 	const idx = model.indexOf("/");
 	if (idx <= 0) return ["", ""];
 	return [model.slice(0, idx), model.slice(idx + 1)];
+}
+
+function httpError(statusCode: number, message: string): Error & { statusCode: number } {
+	return Object.assign(new Error(message), { statusCode });
 }
 
 /**
@@ -114,6 +127,31 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	await app.register(cors, { origin: true });
 
 	const registry = new SessionRegistry();
+	const cursorAttachLocks = new Map<string, Promise<void>>();
+
+	async function withCursorAttachLocks<T>(keys: string[], run: () => Promise<T>): Promise<T> {
+		const releases: Array<() => void> = [];
+		for (const key of [...new Set(keys)].sort()) {
+			const previous = cursorAttachLocks.get(key) ?? Promise.resolve();
+			let release!: () => void;
+			const current = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const queued = previous.then(() => current);
+			cursorAttachLocks.set(key, queued);
+			await previous;
+			releases.push(() => {
+				release();
+				if (cursorAttachLocks.get(key) === queued) cursorAttachLocks.delete(key);
+			});
+		}
+		try {
+			return await run();
+		} finally {
+			for (const release of releases.reverse()) release();
+		}
+	}
+
 	/**
 	 * Drain a card's server-owned prompt queue. Queued prompts never enter
 	 * pi's followUp queue (pi has no per-item removal, which made cancel/edit
@@ -124,6 +162,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const s = registry.get(cardId);
 		if (!s || s.draining || s.promptQueue.length === 0) return;
 		s.draining = true;
+		let lastCursorTurnId: number | undefined;
 		const run = async () => {
 			while (s.promptQueue.length > 0) {
 				const next = s.promptQueue.shift() as string;
@@ -132,10 +171,14 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				// The client never optimistically renders queued messages — this
 				// event is the moment the text actually reaches the model.
 				registry.broadcast(cardId, { type: "user_message", text: next });
-				s.busy = true;
+				const cursorTurnId = beginCursorTurn(s);
+				lastCursorTurnId = cursorTurnId ?? lastCursorTurnId;
+				if (cursorTurnId === undefined) s.busy = true;
 				try {
-					await activateCursorSessionBinding(s.runtime);
-					await s.runtime.session.prompt(next, { streamingBehavior: "followUp" });
+					await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () =>
+						s.runtime.session.prompt(next, { streamingBehavior: "followUp" }),
+					);
+					if (cursorTurnId !== undefined && isCursorTurnAborted(s, cursorTurnId)) return;
 				} catch (e) {
 					console.error(`[${cardId}] queued prompt THREW ${(e as Error).stack}`);
 					s.extensionUi?.cancelAll();
@@ -149,7 +192,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		};
 		void run().finally(() => {
 			s.draining = false;
-			s.busy = false;
+			// A newer Cursor turn may already own the card after agent_end. An
+			// older queue drain must not mark that newer turn idle.
+			if (lastCursorTurnId === undefined || isCurrentCursorTurn(s, lastCursorTurnId)) s.busy = false;
 		});
 	}
 
@@ -217,7 +262,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					appendSystemPromptOverride,
 					// Bundled provider extensions (cursor) — same extension the GUI
 					// runtime loads, so session model lists match the picker.
-					...(cursorExtensionPath() ? { additionalExtensionPaths: [cursorExtensionPath()!] } : {}),
+					...(cursorSessionIsolationAvailable() && cursorExtensionPath()
+						? { additionalExtensionPaths: [cursorExtensionPath()!] }
+						: {}),
 				},
 			});
 			return {
@@ -246,7 +293,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		try {
 			await runtime.session.bindExtensions({
 				mode: "rpc",
-				...(extensionUi ? { uiContext: extensionUi.createUIContext() } : {}),
+				...(extensionUi ? { uiContext: extensionUi.getUIContext() } : {}),
 			});
 		} catch (e) {
 			console.error("[melon] extension bind failed (continuing):", (e as Error)?.message ?? e);
@@ -259,13 +306,92 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		sessionManager: any,
 		explicitModel?: string,
 		skills: string[] = [],
+		mode: "create" | "resume" | "replace" = "replace",
 	): Promise<any> {
-		registry.get(cardId)?.extensionUi?.cancelAll();
+		const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
+		const wantsCursor = splitModel(wanted)[0].toLowerCase() === CURSOR_PROVIDER_ID;
+		const existingIsCursor =
+			(registry.get(cardId)?.runtime.session.model?.provider ?? "").toLowerCase() === CURSOR_PROVIDER_ID;
+		if (!wantsCursor && !existingIsCursor) {
+			return attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode);
+		}
+		const sessionFile = sessionManager.getSessionFile?.() as string | undefined;
+		return withCursorAttachLocks([`card:${cardId}`, ...(sessionFile ? [`session:${sessionFile}`] : [])], () =>
+			attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode),
+		);
+	}
+
+	async function attachSessionUnlocked(
+		cardId: string,
+		sessionManager: any,
+		explicitModel?: string,
+		skills: string[] = [],
+		mode: "create" | "resume" | "replace" = "replace",
+	): Promise<any> {
+		const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
+		const [wantedProvider, wantedId] = splitModel(wanted);
+		const wantsCursor = wantedProvider.toLowerCase() === CURSOR_PROVIDER_ID;
+		if (wantsCursor && !cursorSessionIsolationAvailable()) {
+			throw httpError(
+				503,
+				"Cursor is unavailable because its per-card isolation patch is missing. Reinstall desktop dependencies and restart Melon.",
+			);
+		}
+
+		const incomingSessionFile = sessionManager.getSessionFile?.() as string | undefined;
+		const existing = registry.get(cardId);
+		const existingIsCursor = (existing?.runtime.session.model?.provider ?? "").toLowerCase() === CURSOR_PROVIDER_ID;
+		const existingSessionFile = existing?.runtime.session.sessionManager.getSessionFile?.() as string | undefined;
+
+		// SSE reconnects call /sessions/resume. For a live Cursor card this must
+		// reconnect to the existing runtime, not create a second runtime writing
+		// the same jsonl and broadcasting under the same card id.
+		if (
+			existing &&
+			existingIsCursor &&
+			wantsCursor &&
+			(mode === "create" || existingSessionFile === incomingSessionFile)
+		) {
+			return existing.runtime;
+		}
+
+		// A Cursor SDK agent pool and bridge are keyed by session file. Two live
+		// cards owning the same file would therefore defeat per-card isolation.
+		// Check first so a rejected move leaves this card's current runtime alive.
+		if (wantsCursor && incomingSessionFile) {
+			for (const [ownerCardId, attached] of registry.entries()) {
+				if (ownerCardId === cardId) continue;
+				const ownerIsCursor = (attached.runtime.session.model?.provider ?? "").toLowerCase() === CURSOR_PROVIDER_ID;
+				const ownerSessionFile = attached.runtime.session.sessionManager.getSessionFile?.();
+				if (ownerIsCursor && ownerSessionFile === incomingSessionFile) {
+					throw httpError(409, `Cursor session is already open in card ${ownerCardId}`);
+				}
+			}
+		}
+
+		// Only change replacement behavior when Cursor is involved. Other
+		// providers retain their existing attach/resume semantics.
+		if (existing && (existingIsCursor || wantsCursor)) {
+			existing.extensionUi?.cancelAll();
+			if (existing.busy) {
+				try {
+					await existing.runtime.session.abort();
+				} catch (e) {
+					console.error(`[${cardId}] Cursor runtime replacement abort failed:`, (e as Error).message);
+				}
+			}
+			await existing.runtime.dispose();
+			if (registry.get(cardId) === existing) registry.delete(cardId);
+		}
+
+		// Load the GUI ModelRuntime (Cursor provider catalog) before the session
+		// extension factory so picker models are ready. Session load registers
+		// that card's pi tool bridge; Melon's multicard SDK patch keeps sibling
+		// bridges alive when later cards also load Cursor.
+		await getModelRuntime();
 		const { runtime, extensionUi } = await createRuntimeFor(sessionManager, skills, cardId);
 		try {
-			const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
-			const [provider, id] = splitModel(wanted);
-			const model = (await getModelRuntime()).getModel(provider, id);
+			const model = (await getModelRuntime()).getModel(wantedProvider, wantedId);
 			if (model) {
 				await runtime.session.setModel(model);
 				touchRecentModel(wanted);
@@ -557,7 +683,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const skills = Array.isArray(body?.skills)
 			? (body.skills as unknown[]).filter((x): x is string => typeof x === "string")
 			: [];
-		const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model, skills);
+		const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model, skills, "create");
 		return {
 			cardId,
 			sessionId: runtime.session.sessionId,
@@ -576,7 +702,21 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const skills = Array.isArray(body?.skills)
 			? (body.skills as unknown[]).filter((x): x is string => typeof x === "string")
 			: [];
-		const runtime = await attachSession(cardId, SessionManager.open(sessionFile), body?.model, skills);
+		let cwdOverride: string | undefined;
+		if (typeof body?.cwd === "string" && body.cwd.trim()) {
+			try {
+				cwdOverride = assertCwd(body.cwd);
+			} catch (e) {
+				return reply.code(400).send({ error: (e as Error).message });
+			}
+		}
+		const runtime = await attachSession(
+			cardId,
+			SessionManager.open(sessionFile, undefined, cwdOverride),
+			body?.model,
+			skills,
+			"resume",
+		);
 		return {
 			cardId,
 			sessionId: runtime.session.sessionId,
@@ -678,6 +818,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			);
 		}
 
+		// fork() leaves this runtime attached to the child file. Dispose that
+		// temporary Cursor owner before creating the child's permanent runtime,
+		// otherwise two bridges and two writers briefly own the same session.
+		if (splitModel(parentModel)[0].toLowerCase() === CURSOR_PROVIDER_ID) {
+			s.extensionUi?.cancelAll();
+			await s.runtime.dispose();
+			if (registry.get(parentCardId) === s) registry.delete(parentCardId);
+		}
+
 		// Fresh runtimes for both cards (fork left `s.runtime` on the child file).
 		await attachSession(newCardId, SessionManager.open(childSessionFile), parentModel, parentSkills);
 		await attachSession(parentCardId, SessionManager.open(parentSessionFile), parentModel, parentSkills);
@@ -697,6 +846,30 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	// ── Canvas persistence: <folder>/.melon/canvases/<id>.json ──
 	function canvasesDir(cwd: string): string {
 		return join(expandHome(cwd), ".melon", "canvases");
+	}
+
+	type CanvasGitRecord = {
+		worktreePath?: string;
+		branch?: string;
+		baseBranch?: string;
+		useWorktree?: boolean;
+		worktreeMode?: "isolated" | "local";
+		pr?: { url?: string };
+	};
+
+	function readCanvasFile(dir: string, canvasId: string): (CanvasGitRecord & Record<string, unknown>) | null {
+		try {
+			return JSON.parse(readFileSync(join(canvasesDir(dir), `${canvasId}.json`), "utf8")) as CanvasGitRecord &
+				Record<string, unknown>;
+		} catch {
+			return null;
+		}
+	}
+
+	function writeCanvasPatch(dir: string, canvasId: string, patch: Record<string, unknown>): void {
+		const file = join(canvasesDir(dir), `${canvasId}.json`);
+		const current = readCanvasFile(dir, canvasId) ?? { id: canvasId };
+		writeFileSync(file, `${JSON.stringify({ ...current, ...patch }, null, 2)}\n`);
 	}
 
 	// List workspaces in a folder (lightweight: reads each file's meta line).
@@ -986,14 +1159,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { query: q, results: searchCanvasesAcrossFolders(q).slice(0, 50) };
 	});
 
-	// Allocate a git worktree for a canvas under <cwd>/.melon/worktrees/.
-	// 1code-style: Isolated by default; falls back to Local (projectRoot) on
-	// non-git folders or create failure.
+	// Allocate or repair a git worktree for a canvas under <cwd>/.melon/worktrees/.
+	// Isolated by default; falls back to Local on non-git folders or create failure.
 	app.post("/canvases/:id/worktree", async (req, reply) => {
 		const body = req.body as {
 			cwd?: string;
 			baseBranch?: string;
 			useWorktree?: boolean;
+			worktreePath?: string | null;
+			branch?: string | null;
 		};
 		let dir: string;
 		try {
@@ -1004,12 +1178,17 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const canvasId = (req.params as { id: string }).id;
 		if (!canvasId) return reply.code(400).send({ error: "canvas id required" });
 
+		const stored = readCanvasFile(dir, canvasId);
 		const result = await createWorktreeForCanvas(dir, {
-			baseBranch: body?.baseBranch,
-			useWorktree: body?.useWorktree,
+			baseBranch: body?.baseBranch ?? stored?.baseBranch,
+			useWorktree: body?.useWorktree ?? stored?.useWorktree,
+			existing: {
+				worktreePath: body?.worktreePath ?? stored?.worktreePath,
+				branch: body?.branch ?? stored?.branch,
+				baseBranch: body?.baseBranch ?? stored?.baseBranch,
+			},
 		});
 		if (!result.success && result.mode === "local" && result.error) {
-			// Soft failure: still usable in Local mode (matches 1code fallback).
 			return {
 				ok: true,
 				canvasId,
@@ -1018,6 +1197,68 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			};
 		}
 		return { ok: true, canvasId, ...result };
+	});
+
+	app.get("/canvases/:id/share-status", async (req, reply) => {
+		const q = req.query as { cwd?: string };
+		let dir: string;
+		try {
+			dir = assertCwd(q.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const canvasId = (req.params as { id: string }).id;
+		const stored = readCanvasFile(dir, canvasId);
+		if (!stored) return reply.code(404).send({ error: "canvas not found" });
+		const mode = stored.worktreeMode === "isolated" ? "isolated" : "local";
+		const status = await inspectCanvasShare({
+			projectRoot: dir,
+			mode,
+			worktreePath: typeof stored.worktreePath === "string" ? stored.worktreePath : dir,
+			branch: stored.branch,
+			baseBranch: stored.baseBranch,
+			prUrl: stored.pr?.url,
+		});
+		return { ok: true, canvasId, ...status };
+	});
+
+	app.post("/canvases/:id/share", async (req, reply) => {
+		const body = req.body as {
+			cwd?: string;
+			confirm?: boolean;
+			title?: string;
+			note?: string;
+		};
+		let dir: string;
+		try {
+			dir = assertCwd(body?.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const canvasId = (req.params as { id: string }).id;
+		const stored = readCanvasFile(dir, canvasId);
+		if (!stored) return reply.code(404).send({ error: "canvas not found" });
+		if (stored.worktreeMode !== "isolated" || typeof stored.worktreePath !== "string" || !stored.branch) {
+			return reply.code(400).send({
+				error: "This canvas edits the original folder, so there is no separate copy to send.",
+			});
+		}
+		const title =
+			(typeof body?.title === "string" && body.title.trim()) ||
+			(typeof stored.name === "string" && stored.name.trim()) ||
+			"Updates from Melon";
+		const result = await shareCanvasWork(dir, {
+			confirm: body?.confirm === true,
+			title,
+			note: typeof body?.note === "string" ? body.note : undefined,
+			worktreePath: stored.worktreePath,
+			branch: stored.branch,
+			baseBranch: stored.baseBranch || "main",
+			prUrl: stored.pr?.url,
+		});
+		if (result.prUrl) writeCanvasPatch(dir, canvasId, { pr: { url: result.prUrl } });
+		if (!result.ok) return reply.code(400).send(result);
+		return { canvasId, ...result };
 	});
 
 	// Delete a canvas file (and its melon worktree when present).
@@ -1045,8 +1286,27 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		}
 
 		const deleteWorktree = q.deleteWorktree !== "0" && q.deleteWorktree !== "false";
+		const force = q.force === "1" || q.force === "true";
 		let worktreeRemoved = false;
 		if (deleteWorktree && worktreePath && isMelonWorktreePath(dir, worktreePath)) {
+			if (!force) {
+				const stored = readCanvasFile(dir, (req.params as { id: string }).id);
+				const status = await inspectCanvasShare({
+					projectRoot: dir,
+					mode: stored?.worktreeMode === "isolated" ? "isolated" : "local",
+					worktreePath,
+					branch,
+					baseBranch: stored?.baseBranch,
+				});
+				if (status.hasChanges || status.ahead > 0) {
+					return reply.code(409).send({
+						error: "unsent-work",
+						summary: "This canvas still has work that hasn't been sent for review.",
+						files: status.files,
+						ahead: status.ahead,
+					});
+				}
+			}
 			const removed = await removeWorktree(dir, worktreePath);
 			worktreeRemoved = removed.success;
 			// Best-effort: drop the dedicated branch if the worktree went away.
@@ -1121,7 +1381,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		// DATA GUARD: refuse to overwrite a populated canvas with an empty one.
 		const existingFile = join(canvasesDir(dir), `${ws.id}.json`);
 		try {
-			const existing = JSON.parse(readFileSync(existingFile, "utf8"));
+			const existing = JSON.parse(readFileSync(existingFile, "utf8")) as Record<string, unknown>;
 			if (
 				(!Array.isArray(ws.cards) || ws.cards.length === 0) &&
 				Array.isArray(existing.cards) &&
@@ -1132,6 +1392,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					existingCards: existing.cards.length,
 				});
 			}
+			if (ws.pr == null && existing.pr != null) ws.pr = existing.pr;
 		} catch {
 			/* no existing file — fine */
 		}
@@ -1732,6 +1993,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			reply.send({ ok: true, queued: true });
 			return;
 		}
+		const cursorTurnId = beginCursorTurn(s);
 		reply.send({ ok: true });
 
 		console.log(`[${cardId}] prompt:start "${String((req.body as any)?.text).slice(0, 60)}"`);
@@ -1740,8 +2002,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			const text = (req.body as any)?.text ?? "";
 			// Skills are activated via pi's native /skill: followUp on toggle —
 			// NOT appended per-prompt (that bloated the context window).
-			await activateCursorSessionBinding(s.runtime);
-			await s.runtime.session.prompt(text);
+			await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () =>
+				s.runtime.session.prompt(text),
+			);
 			console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
 		} catch (e) {
 			console.error(`[${cardId}] prompt:THREW ${(e as Error).stack}`);
@@ -1749,9 +2012,16 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			registry.broadcast(cardId, { type: "error", message: rewriteCursorError((e as Error).message) });
 			registry.broadcast(cardId, { type: "status", status: "error" });
 		} finally {
-			// busy is owned by agent_start/agent_end events; this drain covers
-			// runs that ended without an agent_end (e.g. prompt threw early).
-			drainPromptQueue(cardId);
+			if (cursorTurnId === undefined) {
+				// Preserve existing behavior for non-Cursor providers.
+				drainPromptQueue(cardId);
+			} else if (registry.get(cardId) === s && isCurrentCursorTurn(s, cursorTurnId)) {
+				// agent_end may already have started the next queued turn. Only
+				// the current owner can release busy or drain, and an explicit
+				// Stop keeps queued prompts paused.
+				if (!s.draining) s.busy = false;
+				if (!isCursorTurnAborted(s, cursorTurnId)) drainPromptQueue(cardId);
+			}
 		}
 	});
 
@@ -1800,6 +2070,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	app.post("/sessions/:cardId/abort", async (req, reply) => {
 		const s = registry.get((req.params as any).cardId);
 		if (!s) return reply.code(404).send({ error: "unknown card" });
+		abortCurrentCursorTurn(s);
 		registry.broadcast((req.params as any).cardId, { type: "raw", text: "⏹ stop requested (server)" });
 		// Unblock any open question panel immediately (don't wait for agent_end).
 		s.extensionUi?.cancelAll();
@@ -1809,6 +2080,33 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		} catch (e) {
 			console.error(`[${(req.params as any).cardId}] abort threw:`, (e as Error).message);
 		}
+		return { ok: true };
+	});
+
+	// Cursor owns process-level SDK resources (agent pool, bridge, scoped
+	// resume state). Deleting a Cursor card must emit session_shutdown and
+	// remove that ownership; the existing non-Cursor delete behavior is left
+	// unchanged.
+	app.delete("/sessions/:cardId", async (req, reply) => {
+		const cardId = (req.params as any).cardId as string;
+		const s = registry.get(cardId);
+		if (!s) return { ok: true };
+		if (!isCursorSession(s)) {
+			return reply.code(409).send({ error: "session teardown is only enabled for Cursor cards" });
+		}
+
+		s.extensionUi?.cancelAll();
+		abortCurrentCursorTurn(s);
+		if (s.busy) {
+			try {
+				await s.runtime.session.abort();
+			} catch (e) {
+				console.error(`[${cardId}] Cursor teardown abort failed:`, (e as Error).message);
+			}
+		}
+		await s.runtime.dispose();
+		if (registry.get(cardId) === s) registry.delete(cardId);
+		for (const client of s.clients) client.raw.end();
 		return { ok: true };
 	});
 
