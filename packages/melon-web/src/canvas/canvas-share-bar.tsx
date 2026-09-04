@@ -16,6 +16,7 @@ export function CanvasShareBar() {
     const canvasName = useCanvasStore((s) => s.canvasName);
     const folder = useCanvasStore((s) => s.folder);
     const worktreeMode = useCanvasStore((s) => s.worktreeMode);
+    const cardCount = useCanvasStore((s) => s.cards.length);
     const [open, setOpen] = useState(false);
     const [status, setStatus] = useState<ShareStatus | null>(null);
     const [note, setNote] = useState('');
@@ -23,7 +24,9 @@ export function CanvasShareBar() {
     const [result, setResult] = useState<string | null>(null);
     const [confirmed, setConfirmed] = useState(false);
 
-    if (!canvasId) return null;
+    // Explore / empty home still has a canvasId after createCanvas; hide until
+    // there is real canvas content. Same gate as Toolbar.
+    if (!canvasId || cardCount === 0) return null;
 
     const isolated = worktreeMode === 'isolated';
 

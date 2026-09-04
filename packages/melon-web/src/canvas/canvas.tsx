@@ -340,7 +340,7 @@ export function Canvas() {
             )}
 
             <CanvasNoticeBanner />
-            <CanvasShareBar />
+            {cards.length > 0 && <CanvasShareBar />}
 
             {/* <TopBar /> DISABLED — re-enable later */}
             {cards.length > 0 && <Toolbar />}
