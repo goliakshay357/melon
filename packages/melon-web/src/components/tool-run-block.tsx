@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ChevronRight, Maximize2, Minimize2 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { highlightCode, languageFromPath } from "@/lib/prism-highlight";
+import { escapeHtml, highlightCode, languageFromPath } from "@/lib/prism-highlight";
 
 /** Survives remounts so expand/collapse state does not flicker. */
 const blockUi = new Map<string, boolean>();
@@ -611,14 +611,6 @@ function OutputLines({
 			})}
 		</pre>
 	);
-}
-
-function escapeHtml(text: string): string {
-	return text
-		.replace(/&/g, "&amp;")
-		.replace(/</g, "&lt;")
-		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;");
 }
 
 export function ToolRunBlock({ cardId, run }: { cardId: string; run: ToolRunView }) {

@@ -14,7 +14,7 @@ import {
     X,
 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
-import { askText, confirmAction } from '@/components/dialogs';
+import { askText, askChoice, confirmAction } from '@/components/dialogs';
 import { cn } from '@/lib/utils';
 import { fuzzyMatchIndices, fuzzyScore } from '@/lib/fuzzy';
 import { pickFolder } from '@/lib/pick-folder';
@@ -26,6 +26,8 @@ type CanvasListItem = {
     cwd: string;
     folderName: string;
     modified: string;
+    worktreeMode?: 'isolated' | 'local';
+    worktreeName?: string;
 };
 
 type CanvasSearchMatchKind = 'title' | 'card' | 'message' | 'document';
@@ -114,15 +116,20 @@ export function Sidebar() {
     const searchInputRef = useRef<HTMLInputElement>(null);
 
     const folder = useCanvasStore((s) => s.folder);
+    const worktreePath = useCanvasStore((s) => s.worktreePath);
+    const worktreeMode = useCanvasStore((s) => s.worktreeMode);
+    const branch = useCanvasStore((s) => s.branch);
     const canvasId = useCanvasStore((s) => s.canvasId);
     const canvasActivity = useCanvasStore((s) => s.canvasActivity);
-    const createCanvas = useCanvasStore((s) => s.createCanvas);
+    const createCanvasInFolder = useCanvasStore((s) => s.createCanvasInFolder);
     const openCanvas = useCanvasStore((s) => s.openCanvas);
     const openFolder = useCanvasStore((s) => s.openFolder);
     const resumeSession = useCanvasStore((s) => s.resumeSession);
     const forgetCanvas = useCanvasStore((s) => s.forgetCanvas);
     const canvasTreeRev = useCanvasStore((s) => s.canvasTreeRev);
     const [appVersion, setAppVersion] = useState<string | null>(null);
+    const [cwdCopied, setCwdCopied] = useState(false);
+    const cwdCopiedTimerRef = useRef<number | null>(null);
 
     // Same identity as Melon-<version>-<arch>.dmg — always visible in the navbar.
     useEffect(() => {
@@ -139,6 +146,12 @@ export function Sidebar() {
             });
         return () => {
             alive = false;
+        };
+    }, []);
+
+    useEffect(() => {
+        return () => {
+            if (cwdCopiedTimerRef.current != null) window.clearTimeout(cwdCopiedTimerRef.current);
         };
     }, []);
 
@@ -376,16 +389,42 @@ export function Sidebar() {
         const suggested = `Canvas ${(entry?.canvases.length ?? 0) + 1}`;
         const name = (await askText({ title: 'Name your new canvas', initial: suggested }))?.trim();
         if (!name) return;
-        if (folder !== cwd) await openFolder(cwd);
-        await createCanvas(name);
+        const nested = cwd.includes('/.melon/worktrees/');
+        let useWorktree = !nested;
+        if (!nested) {
+            const choice = await askChoice({
+                title: 'Agent working directory',
+                description: 'Isolated keeps agent edits in a git worktree under .melon/worktrees/. Local edits the project folder directly.',
+                options: [
+                    {
+                        label: 'Isolated',
+                        value: 'isolated',
+                        description: 'New checkout under .melon/worktrees/ (recommended for git repos)',
+                    },
+                    {
+                        label: 'Local',
+                        value: 'local',
+                        description: 'Agent cwd = this project folder',
+                    },
+                ],
+            });
+            if (!choice) return;
+            useWorktree = choice === 'isolated';
+        }
+        await createCanvasInFolder(cwd, name, { useWorktree });
         loadTree();
     };
 
     const deleteCanvasRow = async (cwd: string, id: string) => {
+        const row = tree[cwd]?.canvases?.find((c: { id: string }) => c.id === id) as
+            | { id: string; worktreeMode?: string; worktreeName?: string }
+            | undefined;
+        const isolated = row?.worktreeMode === 'isolated';
         if (!(await confirmAction({
             title: 'Delete this canvas?',
-            description:
-                'The card layout will be removed. If this canvas had an Isolated worktree under .melon/worktrees/, that checkout and its branch will also be deleted. Pi session transcripts remain on disk.',
+            description: isolated
+                ? `The card layout will be removed. The Isolated checkout${row?.worktreeName ? ` (${row.worktreeName})` : ''} under .melon/worktrees/ and its branch will also be deleted. Pi session transcripts remain on disk.`
+                : 'The card layout will be removed. Pi session transcripts remain on disk.',
             confirmLabel: 'Delete',
         })))
             return;
@@ -419,6 +458,39 @@ export function Sidebar() {
 
     const searching = searchQuery.trim().length > 0;
     const searchPending = searching && (searchStatus === 'loading' || searchQuery.trim() !== debouncedQuery);
+
+    // Navbar footer: project vs agent cwd (Local vs Isolated). Click copies agent cwd.
+    const projectLeaf = folder?.split('/').filter(Boolean).pop() ?? null;
+    const agentPath =
+        worktreeMode === 'isolated' && worktreePath && worktreePath !== folder
+            ? worktreePath
+            : folder;
+    const agentLeaf = agentPath?.split('/').filter(Boolean).pop() ?? null;
+    const footerLabel =
+        worktreeMode === 'isolated' && agentLeaf
+            ? `Isolated · ${agentLeaf}${branch ? ` · ${branch}` : ''}`
+            : projectLeaf
+              ? `Local · ${projectLeaf}`
+              : null;
+    const footerTitle =
+        worktreeMode === 'isolated' && worktreePath
+            ? `Click to copy agent cwd\nProject: ${folder ?? ''}\nAgent: ${worktreePath}${branch ? `\nBranch: ${branch}` : ''}`
+            : folder
+              ? `Click to copy agent cwd\n${folder}`
+              : undefined;
+
+    const copyAgentCwd = () => {
+        const cwd = useCanvasStore.getState().agentCwd();
+        if (!cwd) return;
+        void navigator.clipboard.writeText(cwd).then(() => {
+            setCwdCopied(true);
+            if (cwdCopiedTimerRef.current != null) window.clearTimeout(cwdCopiedTimerRef.current);
+            cwdCopiedTimerRef.current = window.setTimeout(() => {
+                setCwdCopied(false);
+                cwdCopiedTimerRef.current = null;
+            }, 1500);
+        });
+    };
 
     return (
         <div
@@ -640,6 +712,15 @@ export function Sidebar() {
                                                                 {kindLabel}
                                                             </span>
                                                         ) : null}
+                                                        {cv.worktreeMode === 'isolated' && cv.worktreeName ? (
+                                                            <span className="shrink-0 truncate text-[9px] text-muted-foreground">
+                                                                🌳 {cv.worktreeName}
+                                                            </span>
+                                                        ) : (
+                                                            <span className="shrink-0 truncate text-[9px] text-muted-foreground">
+                                                                📁 {cv.folderName}
+                                                            </span>
+                                                        )}
                                                     </span>
                                                     {cv.snippet && cv.match !== 'title' ? (
                                                         <span className="truncate pl-4 text-[9px] text-muted-foreground">
@@ -678,7 +759,7 @@ export function Sidebar() {
                                                     'flex w-full items-center gap-1.5 rounded-lg px-2 py-1 text-left transition-colors',
                                                     isActive ? 'bg-primary/10' : 'hover:bg-secondary/70',
                                                 )}
-                                                title={`${cv.name} — ${cv.folderName}`}
+                                                title={`${cv.name} — ${cv.folderName}${cv.worktreeMode === 'isolated' && cv.worktreeName ? ` · Isolated ${cv.worktreeName}` : ''}`}
                                                 onClick={() => openCanvasHit(cv)}
                                             >
                                                 <Layers
@@ -705,7 +786,9 @@ export function Sidebar() {
                                                     ) : null}
                                                 </span>
                                                 <span className="shrink-0 truncate text-[9px] text-muted-foreground">
-                                                    📁 {cv.folderName}
+                                                    {cv.worktreeMode === 'isolated' && cv.worktreeName
+                                                        ? `🌳 ${cv.worktreeName}`
+                                                        : `📁 ${cv.folderName}`}
                                                 </span>
                                             </button>
                                         );
@@ -813,7 +896,7 @@ export function Sidebar() {
                                                                         ? 'font-medium text-primary'
                                                                         : 'text-card-foreground',
                                                                 )}
-                                                                title={`${cv.name} — click to open, double-click to rename`}
+                                                                title={`${cv.name}${cv.worktreeMode === 'isolated' && cv.worktreeName ? ` · Isolated ${cv.worktreeName}` : ''} — click to open, double-click to rename`}
                                                                 onClick={() => {
                                                                     openCanvasHit({ id: cv.id, cwd });
                                                                 }}
@@ -823,6 +906,11 @@ export function Sidebar() {
                                                                 }}
                                                             >
                                                                 {cv.name}
+                                                                {cv.worktreeMode === 'isolated' ? (
+                                                                    <span className="ml-1 text-[9px] font-normal text-muted-foreground">
+                                                                        🌳{cv.worktreeName ? ` ${cv.worktreeName}` : ''}
+                                                                    </span>
+                                                                ) : null}
                                                                 {canvasActivity[cv.id] === "streaming" ? (
                                                                     <span className="ml-1 inline-block size-1.5 animate-pulse rounded-full bg-amber-400" title="AI is running" />
                                                                 ) : canvasActivity[cv.id] === "error" ? (
@@ -963,9 +1051,18 @@ export function Sidebar() {
                             {appVersion ? `Melon ${appVersion}` : 'Melon'}
                         </p>
                         <div className="flex items-center justify-between gap-2">
-                            <span className="min-w-0 truncate text-[10px] text-muted-foreground">
-                                {folder && `📁 …${folder.split('/').slice(-2).join('/')}`}
-                            </span>
+                            {footerLabel ? (
+                                <button
+                                    type="button"
+                                    className="min-w-0 truncate rounded-sm text-left text-[10px] text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                                    title={footerTitle}
+                                    onClick={copyAgentCwd}
+                                >
+                                    {cwdCopied ? 'Copied pwd' : footerLabel}
+                                </button>
+                            ) : (
+                                <span className="min-w-0 truncate text-[10px] text-muted-foreground" />
+                            )}
                             <button
                                 className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
                                 title={activeView === 'canvas' ? 'Settings' : 'Back to chat'}

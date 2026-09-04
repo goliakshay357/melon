@@ -226,8 +226,11 @@ function ActivityLine({ phase }: { phase: ActivityPhase }) {
         const t = setInterval(() => setIdx((i) => (i + 1) % phrases.length), 2200);
         return () => clearInterval(t);
     }, [phase, phrases.length]);
+    // Lives OUTSIDE the messages scroller (pinned above the composer) so
+    // growing thoughts / answer text can never bury it — same always-visible
+    // contract as the header status dot.
     return (
-        <div className="sticky bottom-0 z-[1] -mx-1 flex items-center gap-2 rounded-md bg-card/90 px-2 py-2 backdrop-blur-sm">
+        <div className="flex shrink-0 items-center gap-2 border-t border-border/40 bg-card/95 px-4 py-1.5">
             <Spinner />
             <span className="shimmer-text text-xs font-medium">{phrases[idx % phrases.length]}</span>
         </div>
@@ -768,44 +771,48 @@ function ChatCardNodeInner({
 
     const messagesBody = (scrollTo: React.RefObject<HTMLDivElement>) => {
         // Heartbeat for the whole run — same lifetime as the header status dot.
+        // Rendered outside the scroller so thoughts/tools/answer growth cannot
+        // scroll it out of view (that was why Deep diving / Reasoning vanished).
         const showActivityLine = card.status === 'streaming';
         const activityPhase = showActivityLine ? deriveActivityPhase(card) : 'waiting';
         return (
-        <div className="relative min-h-0 min-w-0 flex-1">
-            <div
-                ref={scrollTo}
-                onScroll={(e) => handleMessagesScroll(e.currentTarget)}
-                className="nodrag nowheel h-full cursor-default select-text space-y-4 overflow-y-auto px-4 py-3"
-            >
-                {card.messages.length === 0 && !showActivityLine && (
-                    <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                        Ask something to start this thread.
-                    </p>
-                )}
-                {card.messages.map((m, i) => (
-                    <MessageBlocks
-                        key={i}
-                        m={m}
-                        index={i}
-                        cardId={id}
-                        streaming={card.status === 'streaming'}
-                        totalMessages={card.messages.length}
-                    />
-                ))}
-                {showActivityLine && <ActivityLine phase={activityPhase} />}
-            </div>
-            {showDown && (
-                <button
-                    className="nodrag absolute bottom-3 right-3 z-10 flex size-7 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        goToBottom();
-                    }}
-                    title="Scroll to latest output"
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <div className="relative min-h-0 flex-1">
+                <div
+                    ref={scrollTo}
+                    onScroll={(e) => handleMessagesScroll(e.currentTarget)}
+                    className="nodrag nowheel h-full cursor-default select-text space-y-4 overflow-y-auto px-4 py-3"
                 >
-                    <ChevronDown className="size-4" />
-                </button>
-            )}
+                    {card.messages.length === 0 && !showActivityLine && (
+                        <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                            Ask something to start this thread.
+                        </p>
+                    )}
+                    {card.messages.map((m, i) => (
+                        <MessageBlocks
+                            key={i}
+                            m={m}
+                            index={i}
+                            cardId={id}
+                            streaming={card.status === 'streaming'}
+                            totalMessages={card.messages.length}
+                        />
+                    ))}
+                </div>
+                {showDown && (
+                    <button
+                        className="nodrag absolute bottom-3 right-3 z-10 flex size-7 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            goToBottom();
+                        }}
+                        title="Scroll to latest output"
+                    >
+                        <ChevronDown className="size-4" />
+                    </button>
+                )}
+            </div>
+            {showActivityLine && <ActivityLine phase={activityPhase} />}
         </div>
         );
     };

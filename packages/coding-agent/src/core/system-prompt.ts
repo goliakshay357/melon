@@ -115,6 +115,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	// Always include these
 	addGuideline("Be concise in your responses");
 	addGuideline("Show file paths clearly when working with files");
+	addGuideline(
+		"When asking the user a question with options: short plain English, as if they are new — no jargon stacks or AI-slop; labels say what happens if they pick it",
+	);
 
 	const guidelines = guidelinesList.map((g) => `- ${g}`).join("\n");
 
