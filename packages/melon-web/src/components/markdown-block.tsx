@@ -4,8 +4,8 @@ import { MelonCode } from "./melon-code-fence";
 
 /**
  * Assistant message markdown via streamdown (incomplete-syntax aware while
- * streaming). Fenced code uses Melon's own toolbar (see melon-code-fence);
- * ```viz-html / ```viz-file still become Melon iframes.
+ * streaming). Fenced code uses Melon's toolbar + Prism highlighting
+ * (see melon-code-fence); ```viz-html / ```viz-file still become Melon iframes.
  */
 export const MarkdownBlock = memo(function MarkdownBlock({
 	content,

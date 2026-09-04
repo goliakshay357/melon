@@ -6,6 +6,7 @@ import { useEffect, useState } from 'react';
  * Usage anywhere:
  *   const name = await askText({ title: 'Name your canvas', initial: 'Canvas 1' });
  *   const ok = await confirmAction({ title: 'Delete canvas?' });
+ *   const mode = await askChoice({ title: 'Isolation', options: [...] });
  * Requires <DialogHost /> mounted once.
  */
 
@@ -23,6 +24,13 @@ type Request =
           description?: string;
           confirmLabel?: string;
           resolve: (v: boolean) => void;
+      }
+    | {
+          kind: 'choice';
+          title: string;
+          description?: string;
+          options: Array<{ label: string; value: string; description?: string }>;
+          resolve: (v: string | null) => void;
       };
 
 let push: ((r: Request) => void) | null = null;
@@ -43,6 +51,14 @@ export function confirmAction(opts: {
     return new Promise((resolve) => push?.({ kind: 'confirm', ...opts, resolve }));
 }
 
+export function askChoice(opts: {
+    title: string;
+    description?: string;
+    options: Array<{ label: string; value: string; description?: string }>;
+}): Promise<string | null> {
+    return new Promise((resolve) => push?.({ kind: 'choice', ...opts, resolve }));
+}
+
 export function DialogHost() {
     const [req, setReq] = useState<Request | null>(null);
     const [value, setValue] = useState('');
@@ -59,8 +75,11 @@ export function DialogHost() {
 
     const close = (result: unknown) => {
         if (!req) return;
-        if (req.kind === 'text') (req.resolve as (v: string | null) => void)(result as string | null);
-        else (req.resolve as (v: boolean) => void)(result as boolean);
+        if (req.kind === 'text' || req.kind === 'choice') {
+            (req.resolve as (v: string | null) => void)(result as string | null);
+        } else {
+            (req.resolve as (v: boolean) => void)(result as boolean);
+        }
         setReq(null);
     };
 
@@ -68,7 +87,7 @@ export function DialogHost() {
         <RadixDialog.Root
             open={req !== null}
             onOpenChange={(o) => {
-                if (!o) close(req?.kind === 'text' ? null : false);
+                if (!o) close(req?.kind === 'confirm' ? false : null);
             }}
         >
             <RadixDialog.Portal>
@@ -80,7 +99,7 @@ export function DialogHost() {
                     <RadixDialog.Title className="text-sm font-semibold text-card-foreground">
                         {req?.title}
                     </RadixDialog.Title>
-                    {req?.kind === 'confirm' && req.description && (
+                    {req && (req.kind === 'confirm' || req.kind === 'choice') && req.description && (
                         <RadixDialog.Description className="mt-2 text-xs leading-relaxed text-muted-foreground">
                             {req.description}
                         </RadixDialog.Description>
@@ -128,6 +147,31 @@ export function DialogHost() {
                                 onClick={() => close(true)}
                             >
                                 {req.confirmLabel ?? 'Delete'}
+                            </button>
+                        </div>
+                    )}
+
+                    {req?.kind === 'choice' && (
+                        <div className="mt-4 space-y-2">
+                            {req.options.map((opt) => (
+                                <button
+                                    key={opt.value}
+                                    className="flex w-full flex-col items-start rounded-lg border border-border px-3 py-2 text-left transition-colors hover:border-ring hover:bg-secondary/60"
+                                    onClick={() => close(opt.value)}
+                                >
+                                    <span className="text-xs font-medium text-card-foreground">{opt.label}</span>
+                                    {opt.description ? (
+                                        <span className="mt-0.5 text-[11px] text-muted-foreground">
+                                            {opt.description}
+                                        </span>
+                                    ) : null}
+                                </button>
+                            ))}
+                            <button
+                                className="w-full rounded-lg px-3 py-1.5 text-xs text-muted-foreground hover:bg-secondary"
+                                onClick={() => close(null)}
+                            >
+                                Cancel
                             </button>
                         </div>
                     )}

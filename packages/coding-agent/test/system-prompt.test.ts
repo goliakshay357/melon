@@ -24,6 +24,18 @@ describe("buildSystemPrompt", () => {
 
 			expect(prompt).toContain("Show file paths clearly");
 		});
+
+		test("asks for plain-English user questions", () => {
+			const prompt = buildSystemPrompt({
+				selectedTools: [],
+				contextFiles: [],
+				skills: [],
+				cwd: process.cwd(),
+			});
+
+			expect(prompt).toContain("When asking the user a question with options");
+			expect(prompt).toContain("short plain English");
+		});
 	});
 
 	describe("default tools", () => {

@@ -18,6 +18,7 @@ import { EmptyCanvasHero } from './empty-canvas-hero';
 import { Toolbar } from './toolbar';
 import { Sidebar } from './sidebar';
 import { VizFullscreenLayer } from '@/components/viz-fullscreen-layer';
+import { CanvasNoticeBanner } from '@/components/canvas-notice-banner';
 // import { TopBar } from './topbar';  // DISABLED — re-enable later
 import { useCanvasStore } from '@/store/canvas-store';
 import { useActiveTheme } from '@/theme/theme-store';
@@ -305,6 +306,8 @@ export function Canvas() {
                     serverOffline={serverOffline}
                 />
             )}
+
+            <CanvasNoticeBanner />
 
             {/* <TopBar /> DISABLED — re-enable later */}
             {cards.length > 0 && <Toolbar />}

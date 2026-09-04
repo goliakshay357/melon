@@ -9,6 +9,9 @@ import {
 	type ToolRun,
 } from "@/types/session-card";
 
+/** Agent isolation for a canvas (1code-style worktree). */
+export type CanvasWorktreeMode = "isolated" | "local";
+
 function cardWidth(c: SessionCard): number {
 	return c.size?.width ?? DEFAULT_CARD_SIZE.width;
 }
@@ -53,12 +56,34 @@ interface WorkspaceSnapshot {
 	branch?: string | null;
 	baseBranch?: string | null;
 	useWorktree?: boolean;
+	worktreeMode?: CanvasWorktreeMode;
 }
 
 const WORKSPACE_LRU_MAX = 8;
 const workspaces = new Map<string, WorkspaceSnapshot>();
 /** cardId → canvasId so SSE can patch background canvases. */
 const cardCanvas = new Map<string, string>();
+
+/** Write/replace a workspace cache entry without dropping isolation fields. */
+function setWorkspaceCards(
+	canvasId: string,
+	cards: SessionCard[],
+	patch?: Partial<Omit<WorkspaceSnapshot, "cards" | "touchedAt">>,
+): void {
+	const state = useCanvasStore.getState();
+	const prev = workspaces.get(canvasId);
+	workspaces.set(canvasId, {
+		cards,
+		viewport: patch?.viewport ?? prev?.viewport ?? state.viewport,
+		name: patch?.name ?? prev?.name ?? state.canvasName,
+		touchedAt: Date.now(),
+		worktreePath: patch && "worktreePath" in patch ? patch.worktreePath : (prev?.worktreePath ?? state.worktreePath),
+		branch: patch && "branch" in patch ? patch.branch : (prev?.branch ?? state.branch),
+		baseBranch: patch && "baseBranch" in patch ? patch.baseBranch : (prev?.baseBranch ?? state.baseBranch),
+		useWorktree: patch && "useWorktree" in patch ? patch.useWorktree : (prev?.useWorktree ?? state.useWorktree),
+		worktreeMode: patch && "worktreeMode" in patch ? patch.worktreeMode : (prev?.worktreeMode ?? state.worktreeMode),
+	});
+}
 
 function activityOf(cards: SessionCard[]): CanvasActivity {
 	if (cards.some((c) => c.status === "streaming")) return "streaming";
@@ -143,19 +168,32 @@ function findCard(cardId: string): SessionCard | undefined {
 }
 
 function stashActiveWorkspace() {
-	const { canvasId, cards, viewport, canvasName, canvasActivity, worktreePath, branch, baseBranch, useWorktree } =
-		useCanvasStore.getState();
-	if (!canvasId) return;
-	workspaces.set(canvasId, {
-		cards: cards.map((c) => ({ ...c })),
+	const {
+		canvasId,
+		cards,
 		viewport,
-		name: canvasName,
-		touchedAt: Date.now(),
+		canvasName,
+		canvasActivity,
 		worktreePath,
 		branch,
 		baseBranch,
 		useWorktree,
-	});
+		worktreeMode,
+	} = useCanvasStore.getState();
+	if (!canvasId) return;
+	setWorkspaceCards(
+		canvasId,
+		cards.map((c) => ({ ...c })),
+		{
+			viewport,
+			name: canvasName,
+			worktreePath,
+			branch,
+			baseBranch,
+			useWorktree,
+			worktreeMode,
+		},
+	);
 	reindexCanvasCards(canvasId, cards);
 	useCanvasStore.setState({
 		canvasActivity: { ...canvasActivity, [canvasId]: activityOf(cards) },
@@ -178,13 +216,16 @@ function patchCardInStore(cardId: string, updater: (c: SessionCard) => SessionCa
 		useCanvasStore.setState({ cards, canvasActivity });
 		if (canvasId) {
 			const prev = workspaces.get(canvasId);
-			if (prev) workspaces.set(canvasId, { ...prev, cards, touchedAt: Date.now() });
+			if (prev) setWorkspaceCards(canvasId, cards);
 			else {
-				workspaces.set(canvasId, {
-					cards,
+				setWorkspaceCards(canvasId, cards, {
 					viewport: state.viewport,
 					name: state.canvasName,
-					touchedAt: Date.now(),
+					worktreePath: state.worktreePath,
+					branch: state.branch,
+					baseBranch: state.baseBranch,
+					useWorktree: state.useWorktree,
+					worktreeMode: state.worktreeMode,
 				});
 			}
 			reindexCanvasCards(canvasId, cards);
@@ -238,11 +279,9 @@ function applyCardSnapshot(snapshot: SessionCard[]) {
 	});
 	if (canvasId) {
 		const prev = workspaces.get(canvasId);
-		workspaces.set(canvasId, {
-			cards: snapshot,
+		setWorkspaceCards(canvasId, snapshot, {
 			viewport: useCanvasStore.getState().viewport,
 			name: prev?.name ?? useCanvasStore.getState().canvasName,
-			touchedAt: Date.now(),
 		});
 		reindexCanvasCards(canvasId, snapshot);
 	}
@@ -336,10 +375,9 @@ export interface CanvasMeta {
 	id: string;
 	name: string;
 	modified?: string;
+	worktreeMode?: CanvasWorktreeMode;
+	worktreeName?: string;
 }
-
-/** Agent isolation for a canvas (1code-style worktree). */
-export type CanvasWorktreeMode = "isolated" | "local";
 
 export type AppView = "canvas" | "skills" | "themes";
 
@@ -364,6 +402,13 @@ interface CanvasState {
 	baseBranch: string | null;
 	useWorktree: boolean;
 	worktreeMode: CanvasWorktreeMode;
+	/** Isolated path is set but the checkout directory is missing on disk. */
+	worktreeMissing: boolean;
+	/** Short UI notice (save failure, isolation fallback, missing checkout). */
+	canvasNotice: string | null;
+	dismissCanvasNotice: () => void;
+	/** Downgrade Isolated → Local when checkout is missing. */
+	continueLocalAfterMissingWorktree: () => Promise<void>;
 	/** true once the initial restore from disk succeeded — autosave armed. */
 	hydrated: boolean;
 	serverOffline: boolean;
@@ -392,6 +437,8 @@ interface CanvasState {
 	openCanvas: (cwd: string, id: string) => Promise<void>;
 	switchCanvas: (id: string) => Promise<void>;
 	createCanvas: (name: string, opts?: { useWorktree?: boolean }) => Promise<void>;
+	/** Create a canvas in `cwd` without openFolder wipe / wrong-cwd save. */
+	createCanvasInFolder: (cwd: string, name: string, opts?: { useWorktree?: boolean }) => Promise<void>;
 	/** Drop a canvas from the live cache (SSE, activity). Call when deleting. */
 	forgetCanvas: (id: string) => void;
 	/** Agent working directory for the active canvas (worktree or folder). */
@@ -480,6 +527,35 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	baseBranch: null,
 	useWorktree: true,
 	worktreeMode: "local",
+	worktreeMissing: false,
+	canvasNotice: null,
+	dismissCanvasNotice() {
+		set({ canvasNotice: null });
+	},
+	async continueLocalAfterMissingWorktree() {
+		const folder = get().folder;
+		if (!folder) return;
+		set({
+			worktreePath: null,
+			worktreeMode: "local",
+			worktreeMissing: false,
+			branch: null,
+			baseBranch: null,
+			useWorktree: false,
+			canvasNotice: "Continuing in Local mode — agent edits the project folder.",
+		});
+		const id = get().canvasId;
+		if (id) {
+			setWorkspaceCards(id, get().cards, {
+				worktreePath: null,
+				worktreeMode: "local",
+				branch: null,
+				baseBranch: null,
+				useWorktree: false,
+			});
+		}
+		await get().saveCanvas();
+	},
 	canvasOpening: false,
 	canvases: [],
 	canvasTreeRev: 0,
@@ -487,6 +563,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	hydrated: false,
 	serverOffline: false,
 	agentCwd() {
+		// Missing Isolated checkout must not send sessions to a dead path.
+		if (get().worktreeMode === "isolated" && get().worktreeMissing) return get().folder;
 		return get().worktreePath ?? get().folder;
 	},
 	setViewport(v) {
@@ -605,12 +683,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		} = get();
 		if (!folder || !canvasId || !hydrated) return;
 		const cold = settleTransientStatuses(cards);
+		const savingId = canvasId;
 		try {
 			localStorage.setItem(`melon:backup:${canvasId}`, JSON.stringify({ name: canvasName, viewport, cards: cold }));
 		} catch {
 			/* quota — non-fatal */
 		}
-		await fetch(`/canvases/${canvasId}`, {
+		// Persist Local with null path (not folder) so on-disk mode stays clear.
+		const pathForSave = worktreeMode === "isolated" && worktreePath && worktreePath !== folder ? worktreePath : null;
+		const res = await fetch(`/canvases/${canvasId}`, {
 			method: "PUT",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
@@ -621,14 +702,32 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					cwd: folder,
 					viewport,
 					cards: cold,
-					worktreePath: worktreePath ?? undefined,
+					worktreePath: pathForSave ?? undefined,
 					branch: branch ?? undefined,
 					baseBranch: baseBranch ?? undefined,
 					useWorktree,
 					worktreeMode,
 				},
 			}),
-		}).catch(() => {});
+		}).catch(() => null);
+		if (!res) {
+			set({ canvasNotice: "Could not save canvas (network error)." });
+			return;
+		}
+		if (res.status === 409) {
+			// Server kept populated disk; drop empty in-memory cache and heal if viewing it.
+			workspaces.delete(savingId);
+			if (get().canvasId === savingId && get().cards.length === 0) {
+				set({
+					canvasNotice: "Reloaded canvas — refused to overwrite existing cards with empty state.",
+				});
+				await get().switchCanvas(savingId);
+			}
+			return;
+		}
+		if (!res.ok) {
+			set({ canvasNotice: `Could not save canvas (${res.status}).` });
+		}
 	},
 
 	async switchCanvas(id) {
@@ -645,66 +744,38 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			set((s) => ({ canvasTreeRev: s.canvasTreeRev + 1 }));
 		};
 
-		// Already open — still bump Recent so sidebar stays in sync.
-		if (get().canvasId === id) {
-			await touchOpened();
-			return;
-		}
-
-		switchingCanvas = true;
-		set({ canvasOpening: true });
-		try {
-			const prevId = get().canvasId;
-			if (prevId) {
-				stashActiveWorkspace();
-				await get().saveCanvas();
-			}
-			// Layout history is per active canvas view — don't undo across switches.
-			undoStack.length = 0;
-			redoStack.length = 0;
-
-			const applyWorktree = (cv: {
-				worktreePath?: string | null;
-				branch?: string | null;
-				baseBranch?: string | null;
-				useWorktree?: boolean;
-				worktreeMode?: CanvasWorktreeMode;
-			}) => {
-				const path = typeof cv.worktreePath === "string" ? cv.worktreePath : null;
-				const mode: CanvasWorktreeMode =
-					cv.worktreeMode === "isolated" || (path && path !== folder) ? "isolated" : "local";
-				return {
-					worktreePath: path,
-					branch: typeof cv.branch === "string" ? cv.branch : null,
-					baseBranch: typeof cv.baseBranch === "string" ? cv.baseBranch : null,
-					useWorktree: cv.useWorktree !== false,
-					worktreeMode: mode,
-				};
+		const applyWorktree = (cv: {
+			worktreePath?: string | null;
+			branch?: string | null;
+			baseBranch?: string | null;
+			useWorktree?: boolean;
+			worktreeMode?: CanvasWorktreeMode;
+			worktreeExists?: boolean;
+		}) => {
+			const path = typeof cv.worktreePath === "string" ? cv.worktreePath : null;
+			const mode: CanvasWorktreeMode =
+				cv.worktreeMode === "isolated" || (path && path !== folder) ? "isolated" : "local";
+			const isolatedPath = mode === "isolated" && path && path !== folder ? path : null;
+			const missing = mode === "isolated" && !!isolatedPath && cv.worktreeExists === false;
+			const leaf = isolatedPath?.split("/").filter(Boolean).pop() ?? "worktree";
+			return {
+				worktreePath: isolatedPath,
+				branch: typeof cv.branch === "string" ? cv.branch : null,
+				baseBranch: typeof cv.baseBranch === "string" ? cv.baseBranch : null,
+				useWorktree: cv.useWorktree !== false,
+				worktreeMode: mode,
+				worktreeMissing: missing,
+				...(missing
+					? {
+							canvasNotice: `Isolated checkout missing (${leaf}). Agent would fail until you continue Local or restore the worktree.`,
+						}
+					: { canvasNotice: null }),
 			};
+		};
 
-			const cached = workspaces.get(id);
-			if (cached) {
-				const wt = applyWorktree(cached);
-				set({
-					cards: cached.cards,
-					canvasId: id,
-					canvasName: cached.name,
-					viewport: cached.viewport,
-					...wt,
-					canvasActivity: {
-						...get().canvasActivity,
-						[id]: activityOf(cached.cards),
-					},
-				});
-				reindexCanvasCards(id, cached.cards);
-				workspaces.set(id, { ...cached, ...wt, touchedAt: Date.now() });
-				localStorage.setItem("melon:lastCanvas", id);
-				await touchOpened();
-				return;
-			}
-
+		const loadFromDisk = async (): Promise<boolean> => {
 			const res = await fetch(`/canvases/${id}?cwd=${encodeURIComponent(folder)}`).catch(() => null);
-			if (!res?.ok) return;
+			if (!res?.ok) return false;
 			const cv = await res.json();
 			const loaded = Array.isArray(cv.cards) ? (cv.cards as SessionCard[]) : [];
 			// Cold load: no live SSE for these cards yet. Keep any still-attached
@@ -722,15 +793,122 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				...wt,
 				canvasActivity: { ...get().canvasActivity, [id]: activityOf(cards) },
 			});
-			workspaces.set(id, { cards, viewport, name, touchedAt: Date.now(), ...wt });
+			setWorkspaceCards(id, cards, {
+				viewport,
+				name,
+				worktreePath: wt.worktreePath,
+				branch: wt.branch,
+				baseBranch: wt.baseBranch,
+				useWorktree: wt.useWorktree,
+				worktreeMode: wt.worktreeMode,
+			});
 			reindexCanvasCards(id, cards);
 			localStorage.setItem("melon:lastCanvas", id);
 			evictIdleWorkspaces(id);
-			// Ground truth pass only for cards without a live stream.
 			for (const c of get().cards) {
 				if (c.sessionFile && !streams.has(c.id)) await get().hydrateMessages(c.id, c.sessionFile);
 			}
 			await touchOpened();
+			return true;
+		};
+
+		// Already open — bump Recent. If we're stuck on an empty in-memory view
+		// while disk still has cards (stale [] cache / refused empty save), heal.
+		if (get().canvasId === id) {
+			if (get().cards.length === 0) {
+				switchingCanvas = true;
+				set({ canvasOpening: true });
+				try {
+					await loadFromDisk();
+				} finally {
+					switchingCanvas = false;
+					set({ canvasOpening: false });
+				}
+				return;
+			}
+			await touchOpened();
+			return;
+		}
+
+		switchingCanvas = true;
+		set({ canvasOpening: true });
+		try {
+			const prevId = get().canvasId;
+			if (prevId) {
+				stashActiveWorkspace();
+				await get().saveCanvas();
+			}
+			// Layout history is per active canvas view — don't undo across switches.
+			undoStack.length = 0;
+			redoStack.length = 0;
+
+			const cached = workspaces.get(id);
+			// Trust a non-empty cache. An empty cache may be a createCanvas seed
+			// or a stale stash after a 409 empty-save guard — always recheck disk.
+			if (cached && cached.cards.length > 0) {
+				const wt = applyWorktree(cached);
+				set({
+					cards: cached.cards,
+					canvasId: id,
+					canvasName: cached.name,
+					viewport: cached.viewport,
+					...wt,
+					canvasActivity: {
+						...get().canvasActivity,
+						[id]: activityOf(cached.cards),
+					},
+				});
+				setWorkspaceCards(id, cached.cards, {
+					viewport: cached.viewport,
+					name: cached.name,
+					worktreePath: wt.worktreePath,
+					branch: wt.branch,
+					baseBranch: wt.baseBranch,
+					useWorktree: wt.useWorktree,
+					worktreeMode: wt.worktreeMode,
+				});
+				reindexCanvasCards(id, cached.cards);
+				localStorage.setItem("melon:lastCanvas", id);
+				await touchOpened();
+				// Refresh isolation existence without replacing cards.
+				if (wt.worktreeMode === "isolated" && wt.worktreePath) {
+					const meta = await fetch(`/canvases/${id}?cwd=${encodeURIComponent(folder)}`).catch(() => null);
+					if (meta?.ok) {
+						const cv = await meta.json();
+						const again = applyWorktree(cv);
+						set({
+							worktreeMissing: again.worktreeMissing,
+							worktreePath: again.worktreePath,
+							worktreeMode: again.worktreeMode,
+							branch: again.branch,
+							baseBranch: again.baseBranch,
+							...(again.worktreeMissing ? { canvasNotice: again.canvasNotice } : {}),
+						});
+					}
+				}
+				return;
+			}
+
+			const loaded = await loadFromDisk();
+			if (!loaded && cached) {
+				// Disk miss; fall back to empty cache (brand-new canvas).
+				const wt = applyWorktree(cached);
+				set({
+					cards: cached.cards,
+					canvasId: id,
+					canvasName: cached.name,
+					viewport: cached.viewport,
+					...wt,
+					canvasActivity: {
+						...get().canvasActivity,
+						[id]: activityOf(cached.cards),
+					},
+				});
+				reindexCanvasCards(id, cached.cards);
+				workspaces.set(id, { ...cached, ...wt, touchedAt: Date.now() });
+				localStorage.setItem("melon:lastCanvas", id);
+				await touchOpened();
+			}
 		} finally {
 			switchingCanvas = false;
 			set({ canvasOpening: false });
@@ -748,6 +926,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
 	async createCanvas(name, opts) {
 		if (!get().folder) return;
+		const nestedMelonWt = (get().folder ?? "").includes("/.melon/worktrees/");
+		const useWorktree = opts?.useWorktree !== false && !nestedMelonWt;
 		if (get().canvasId) {
 			stashActiveWorkspace();
 			await get().saveCanvas();
@@ -756,8 +936,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		redoStack.length = 0;
 		const id = `cv_${nanoid(8)}`;
 		const folder = get().folder!;
-		const useWorktree = opts?.useWorktree !== false;
 		set({
+			canvasOpening: true,
 			canvasId: id,
 			canvasName: name || "Untitled",
 			cards: [],
@@ -766,21 +946,21 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			baseBranch: null,
 			useWorktree,
 			worktreeMode: "local",
+			worktreeMissing: false,
 			canvasActivity: { ...get().canvasActivity, [id]: "idle" },
+			canvasNotice: useWorktree ? "Preparing Isolated checkout…" : null,
 		});
-		workspaces.set(id, {
-			cards: [],
+		setWorkspaceCards(id, [], {
 			name: name || "Untitled",
-			touchedAt: Date.now(),
 			useWorktree,
 			worktreePath: null,
 			branch: null,
 			baseBranch: null,
+			worktreeMode: "local",
 		});
 		localStorage.setItem("melon:lastCanvas", id);
 		await get().saveCanvas();
 
-		// 1code-style: allocate Isolated checkout under <folder>/.melon/worktrees/.
 		try {
 			const wtRes = await fetch(`/canvases/${id}/worktree`, {
 				method: "POST",
@@ -793,36 +973,116 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					branch?: string;
 					baseBranch?: string;
 					mode?: CanvasWorktreeMode;
+					fallback?: boolean;
+					error?: string;
 				};
-				const path = typeof body.worktreePath === "string" ? body.worktreePath : folder;
 				const mode: CanvasWorktreeMode = body.mode === "isolated" ? "isolated" : "local";
+				const path = mode === "isolated" && typeof body.worktreePath === "string" ? body.worktreePath : null;
+				const notice =
+					body.fallback || (useWorktree && mode === "local")
+						? body.error
+							? `Isolated worktree failed — using Local. ${body.error}`
+							: "Isolated worktree unavailable — using Local (project folder)."
+						: nestedMelonWt
+							? "Folder is already a Melon worktree — created as Local."
+							: null;
 				set({
-					worktreePath: mode === "isolated" ? path : folder,
+					worktreePath: path,
 					branch: typeof body.branch === "string" ? body.branch : null,
 					baseBranch: typeof body.baseBranch === "string" ? body.baseBranch : null,
 					useWorktree,
 					worktreeMode: mode,
+					worktreeMissing: false,
+					canvasNotice: notice,
 				});
-				const cached = workspaces.get(id);
-				if (cached) {
-					workspaces.set(id, {
-						...cached,
-						worktreePath: get().worktreePath,
-						branch: get().branch,
-						baseBranch: get().baseBranch,
-						useWorktree,
-					});
-				}
+				setWorkspaceCards(id, get().cards, {
+					worktreePath: path,
+					branch: get().branch,
+					baseBranch: get().baseBranch,
+					useWorktree,
+					worktreeMode: mode,
+				});
 				await get().saveCanvas();
+			} else if (useWorktree) {
+				set({
+					canvasNotice: "Isolated worktree request failed — using Local (project folder).",
+				});
 			}
 		} catch {
-			/* Local fallback — agent still runs in folder */
+			if (useWorktree) {
+				set({
+					canvasNotice: "Isolated worktree request failed — using Local (project folder).",
+				});
+			}
+		} finally {
+			set({ canvasOpening: false });
+			if (get().canvasNotice === "Preparing Isolated checkout…") {
+				set({ canvasNotice: null });
+			}
 		}
 
-		// refresh list
 		const res = await fetch(`/canvases?cwd=${encodeURIComponent(get().folder ?? "")}`).catch(() => null);
 		if (res?.ok) set({ canvases: (await res.json()).canvases ?? [] });
 		set((s) => ({ canvasTreeRev: s.canvasTreeRev + 1 }));
+	},
+
+	async createCanvasInFolder(cwd, name, opts) {
+		if (!cwd) return;
+		if (get().folder === cwd) {
+			await get().createCanvas(name, opts);
+			return;
+		}
+		if (switchingCanvas) return;
+		switchingCanvas = true;
+		set({ canvasOpening: true });
+		try {
+			// Persist under the *current* folder before flipping cwd.
+			if (get().canvasId) {
+				stashActiveWorkspace();
+				await get().saveCanvas();
+			}
+			clearAllWorkspaces();
+			undoStack.length = 0;
+			redoStack.length = 0;
+
+			const listRes = await fetch(`/canvases?cwd=${encodeURIComponent(cwd)}`).catch(() => null);
+			let canvases: CanvasMeta[] = [];
+			if (listRes?.ok) {
+				canvases = ((await listRes.json()) as { canvases?: CanvasMeta[] }).canvases ?? [];
+			}
+
+			const nested = cwd.includes("/.melon/worktrees/");
+			set({
+				folder: cwd,
+				canvases,
+				canvasId: null,
+				canvasName: "",
+				cards: [],
+				worktreePath: null,
+				branch: null,
+				baseBranch: null,
+				useWorktree: opts?.useWorktree !== false && !nested,
+				worktreeMode: "local",
+				worktreeMissing: false,
+				canvasActivity: {},
+				hydrated: true,
+				serverOffline: false,
+				canvasNotice: nested
+					? "This folder is already under .melon/worktrees — new canvases default to Local."
+					: canvases.length > 0
+						? `${canvases.length} canvas${canvases.length === 1 ? "" : "es"} in this folder — creating a new one.`
+						: null,
+			});
+			localStorage.setItem("melon:lastFolder", cwd);
+			localStorage.removeItem("melon:lastCanvas");
+
+			await get().createCanvas(name, {
+				useWorktree: opts?.useWorktree !== false && !nested,
+			});
+		} finally {
+			switchingCanvas = false;
+			set({ canvasOpening: false });
+		}
 	},
 
 	async startConversation(text, position, options) {
@@ -857,6 +1117,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		// Keep the empty-state composer up: set the folder, load the canvas
 		// list for the sidebar, but do not auto-open an existing canvas.
 		// First send (or an explicit sidebar click) creates/opens a canvas.
+		const nested = rawFolder.includes("/.melon/worktrees/");
 		clearAllWorkspaces();
 		set({
 			folder: rawFolder,
@@ -867,16 +1128,31 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			worktreePath: null,
 			branch: null,
 			baseBranch: null,
-			useWorktree: true,
+			useWorktree: !nested,
 			worktreeMode: "local",
+			worktreeMissing: false,
 			canvasActivity: {},
+			canvasNotice: nested
+				? "This folder is already a Melon worktree checkout — prefer the project root as the Melon folder."
+				: null,
 		});
 		localStorage.setItem("melon:lastFolder", rawFolder);
 		localStorage.removeItem("melon:lastCanvas");
 		const res = await fetch(`/canvases?cwd=${encodeURIComponent(rawFolder)}`).catch(() => null);
 		let canvases: CanvasMeta[] = [];
 		if (res?.ok) canvases = (await res.json()).canvases ?? [];
-		set({ canvases, hydrated: true, serverOffline: false });
+		const countNote =
+			canvases.length > 0
+				? `${canvases.length} canvas${canvases.length === 1 ? "" : "es"} in the sidebar — pick one or start a new chat.`
+				: null;
+		set({
+			canvases,
+			hydrated: true,
+			serverOffline: false,
+			canvasNotice: nested
+				? "This folder is already a Melon worktree checkout — prefer the project root as the Melon folder."
+				: countNote,
+		});
 	},
 
 	async openCanvas(cwd, id) {
@@ -915,12 +1191,19 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			const path = typeof cv.worktreePath === "string" ? cv.worktreePath : null;
 			const mode: CanvasWorktreeMode =
 				cv.worktreeMode === "isolated" || (path && path !== cwd) ? "isolated" : "local";
+			const isolatedPath = mode === "isolated" && path && path !== cwd ? path : null;
+			const missing = mode === "isolated" && !!isolatedPath && cv.worktreeExists === false;
+			const leaf = isolatedPath?.split("/").filter(Boolean).pop() ?? "worktree";
 			const wt = {
-				worktreePath: path,
+				worktreePath: isolatedPath,
 				branch: typeof cv.branch === "string" ? cv.branch : null,
 				baseBranch: typeof cv.baseBranch === "string" ? cv.baseBranch : null,
 				useWorktree: cv.useWorktree !== false,
 				worktreeMode: mode,
+				worktreeMissing: missing,
+				canvasNotice: missing
+					? `Isolated checkout missing (${leaf}). Agent would fail until you continue Local or restore the worktree.`
+					: null,
 			};
 
 			clearAllWorkspaces();
@@ -938,7 +1221,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				hydrated: true,
 				serverOffline: false,
 			});
-			workspaces.set(id, { cards, viewport, name, touchedAt: Date.now(), ...wt });
+			setWorkspaceCards(id, cards, {
+				viewport,
+				name,
+				worktreePath: wt.worktreePath,
+				branch: wt.branch,
+				baseBranch: wt.baseBranch,
+				useWorktree: wt.useWorktree,
+				worktreeMode: wt.worktreeMode,
+			});
 			reindexCanvasCards(id, cards);
 			localStorage.setItem("melon:lastFolder", cwd);
 			localStorage.setItem("melon:lastCanvas", id);
@@ -984,13 +1275,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			const canvasId = s.canvasId;
 			if (canvasId) {
 				cardCanvas.set(card.id, canvasId);
-				const prev = workspaces.get(canvasId);
-				workspaces.set(canvasId, {
-					cards,
+				setWorkspaceCards(canvasId, cards, {
 					viewport: s.viewport,
 					name: s.canvasName,
-					touchedAt: Date.now(),
-					...(prev ? {} : {}),
 				});
 			}
 			return { cards };

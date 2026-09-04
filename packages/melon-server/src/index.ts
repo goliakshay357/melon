@@ -162,6 +162,17 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		"- Work only inside the current project directory and paths the user explicitly gives you.",
 		"- If a task seems to require changing Melon itself (rare), ask the user first.",
 		"",
+		"Asking the user a question (always apply — ask_question, select, confirm, options, Cursor questions):",
+		"- Write like you're talking to a smart friend who is new here. Short. Everyday words. No AI-slop.",
+		"- Question: one clear sentence. Ask what you need them to pick — not a design review.",
+		"- Option labels: what happens if they pick it, in plain words (about a dozen words max).",
+		"- Option descriptions (if any): one friendly line a beginner gets. Do not restack jargon from the label.",
+		"- Prefer concrete outcomes over abstract engineering talk.",
+		'- Bad: "Confirm the fix for the Deep diving / Reasoning activity line wiring."',
+		'- Good: "What should Deep diving / Reasoning do while the AI is thinking?"',
+		'- Bad option: "Keep shimmer the whole time status is streaming (like the header status dot)"',
+		'- Good option: "Keep showing it the whole time the green light is on"',
+		"",
 		"Inline rendering in Melon chat (always apply):",
 		"- Melon renders assistant messages as rich content, NOT plain text. Fenced blocks turn into LIVE interactive viewers inside the chat card:",
 		"- Small self-contained HTML scenes (few KB): emit a ```viz-html``` fence containing ONE complete HTML document. It renders in a \u2248380px-wide frame (auto-height up to 700px). Design for \u2264380px width, no horizontal overflow.",
@@ -726,7 +737,29 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		cwd: string;
 		folderName: string;
 		modified: string;
+		worktreeMode?: "isolated" | "local";
+		worktreeName?: string;
 	};
+
+	function isolationMeta(
+		raw: {
+			worktreePath?: unknown;
+			worktreeMode?: unknown;
+		},
+		projectRoot: string,
+	): {
+		worktreeMode: "isolated" | "local";
+		worktreeName?: string;
+		worktreeExists?: boolean;
+	} {
+		const path = typeof raw.worktreePath === "string" ? raw.worktreePath : null;
+		const mode: "isolated" | "local" =
+			raw.worktreeMode === "isolated" || (path != null && path !== projectRoot) ? "isolated" : "local";
+		if (mode !== "isolated" || !path) return { worktreeMode: "local" };
+		const exists = statSync(path, { throwIfNoEntry: false })?.isDirectory() === true;
+		const worktreeName = path.split("/").filter(Boolean).pop() ?? path;
+		return { worktreeMode: "isolated", worktreeName, worktreeExists: exists };
+	}
 
 	type CanvasSearchMatchKind = "title" | "card" | "message" | "document";
 
@@ -788,6 +821,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 						cwd: f.cwd,
 						folderName,
 						modified: raw.modified ?? "",
+						...isolationMeta(raw, f.cwd),
 					});
 				} catch {
 					/* skip corrupt */
@@ -819,6 +853,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					id?: string;
 					name?: string;
 					modified?: string;
+					worktreePath?: unknown;
+					worktreeMode?: unknown;
 					cards?: Array<{
 						id?: string;
 						title?: string;
@@ -840,6 +876,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					cwd: f.cwd,
 					folderName,
 					modified: raw.modified ?? "",
+					...isolationMeta(raw, f.cwd),
 				};
 
 				let best: CanvasSearchHit | null = null;
@@ -865,6 +902,17 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 						score: folderScore + 20,
 						snippet: folderName,
 					});
+				}
+				if (base.worktreeName) {
+					const wtScore = fuzzyScore(query, base.worktreeName);
+					if (wtScore !== null && titleScore === null) {
+						consider({
+							...base,
+							match: "title",
+							score: wtScore + 15,
+							snippet: base.worktreeName,
+						});
+					}
 				}
 
 				for (const card of raw.cards ?? []) {
@@ -1022,9 +1070,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	// Load one workspace fully.
 	app.get("/canvases/:id", async (req, reply) => {
 		const q = req.query as any;
-		const file = join(canvasesDir(expandHome(q.cwd)), `${(req.params as any).id}.json`);
+		const dir = expandHome(q.cwd);
+		const file = join(canvasesDir(dir), `${(req.params as any).id}.json`);
 		try {
-			return JSON.parse(readFileSync(file, "utf8"));
+			const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+			const iso = isolationMeta(raw, dir);
+			return { ...raw, ...iso };
 		} catch {
 			return reply.code(404).send({ error: "canvas not found" });
 		}
@@ -1127,6 +1178,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const canvases: Array<{
 			id: string;
 			name: string;
+			worktreeMode?: "isolated" | "local";
+			worktreeName?: string;
 			sessions: Array<{ file: string; title?: string }>;
 		}> = [];
 		try {
@@ -1140,7 +1193,14 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 							bound.add(c.sessionFile);
 							return { file: c.sessionFile, title: c.title };
 						});
-					canvases.push({ id: cv.id, name: cv.name ?? "Untitled", sessions });
+					const iso = isolationMeta(cv, dir);
+					canvases.push({
+						id: cv.id,
+						name: cv.name ?? "Untitled",
+						worktreeMode: iso.worktreeMode,
+						worktreeName: iso.worktreeName,
+						sessions,
+					});
 				} catch {
 					/* skip corrupt */
 				}

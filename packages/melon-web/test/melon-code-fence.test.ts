@@ -28,9 +28,10 @@ describe("melon code fence layout contract", () => {
 		const css = readFileSync(join(webRoot, "src/globals.css"), "utf8");
 		assert.match(css, /\.melon-code-fence-toolbar\s*\{[^}]*display:\s*flex/s);
 		assert.match(css, /\.melon-code-fence-actions\s*\{[^}]*flex-direction:\s*row/s);
-		assert.ok(css.includes("code-block-copy-button"));
-		assert.ok(css.includes("code-block-download-button"));
-		assert.match(css, /\.melon-code-fence \[data-streamdown="code-block-header"\]\s*\{[^}]*display:\s*none/s);
+		assert.ok(css.includes("melon-code-fence-btn"));
+		assert.ok(css.includes("melon-code-fence-pre"));
+		assert.equal(css.includes("code-block-copy-button"), false);
+		assert.equal(css.includes('[data-streamdown="code-block-header"]'), false);
 	});
 
 	it("keeps markdown wired to MelonCode (not Streamdown sticky toolbar)", () => {
@@ -40,12 +41,23 @@ describe("melon code fence layout contract", () => {
 		assert.ok(src.includes("code: MelonCode"));
 	});
 
-	it("MelonCode nests CodeBlock without action children (no sticky overlay)", () => {
+	it("MelonCode owns Prism body and Melon toolbar (no nested Streamdown CodeBlock)", () => {
 		const src = readFileSync(join(webRoot, "src/components/melon-code-fence.tsx"), "utf8");
 		assert.ok(src.includes("melon-code-fence-toolbar"));
-		assert.ok(src.includes("CodeBlockCopyButton"));
-		assert.ok(src.includes("CodeBlockDownloadButton"));
-		assert.ok(src.includes("<CodeBlock"));
-		assert.equal(/<CodeBlock[^>]*>\s*<CodeBlockCopyButton/s.test(src), false);
+		assert.ok(src.includes("highlightCode"));
+		assert.ok(src.includes("tool-prism"));
+		assert.ok(src.includes("Download"));
+		assert.ok(src.includes("Copy"));
+		assert.equal(src.includes("CodeBlockCopyButton"), false);
+		assert.equal(src.includes("<CodeBlock"), false);
+	});
+
+	it("prism-highlight resolves fence aliases and highlights via Prism", () => {
+		const src = readFileSync(join(webRoot, "src/lib/prism-highlight.ts"), "utf8");
+		assert.ok(src.includes("resolvePrismLanguage"));
+		assert.ok(src.includes('py: "python"'));
+		assert.ok(src.includes('ts: "typescript"'));
+		assert.ok(src.includes("Prism.highlight"));
+		assert.ok(src.includes("escapeHtml"));
 	});
 });
