@@ -77,7 +77,7 @@ export function stripCursorResumeEntriesFromSessionFile(sessionFile: string): nu
 			rewritten.push(String(entry.__raw));
 			continue;
 		}
-		const next = { ...entry, parentId };
+		const next: Record<string, unknown> = { ...entry, parentId };
 		rewritten.push(JSON.stringify(next));
 		parentId = typeof next.id === "string" ? next.id : parentId;
 	}

@@ -245,7 +245,6 @@ export function Sidebar() {
                                 </p>
                                 <div className="mb-2 space-y-0.5 pb-2">
                                     {recent.map((cv) => {
-                                        const isActive = folder === cv.cwd && cv.id === canvasId;
                                         return (
                                             <button
                                                 key={`${cv.cwd}::${cv.id}`}
