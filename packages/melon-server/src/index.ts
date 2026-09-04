@@ -833,8 +833,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					continue;
 				}
 				const id = raw.id ?? file.replace(/\.json$/, "");
-				const name =
-					typeof raw.name === "string" && raw.name.trim() ? raw.name : "Untitled";
+				const name = typeof raw.name === "string" && raw.name.trim() ? raw.name : "Untitled";
 				const base: CanvasMeta = {
 					id,
 					name,
@@ -869,10 +868,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				}
 
 				for (const card of raw.cards ?? []) {
-					const cardTitle =
-						typeof card.title === "string" && card.title.trim()
-							? card.title
-							: "Untitled chat";
+					const cardTitle = typeof card.title === "string" && card.title.trim() ? card.title : "Untitled chat";
 					const cardScore = fuzzyScore(query, cardTitle);
 					if (cardScore !== null) {
 						consider({
