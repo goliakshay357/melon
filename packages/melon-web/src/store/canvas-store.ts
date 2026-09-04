@@ -367,6 +367,11 @@ interface CanvasState {
 	/** true once the initial restore from disk succeeded — autosave armed. */
 	hydrated: boolean;
 	serverOffline: boolean;
+	/**
+	 * True while switchCanvas/openCanvas is loading a target canvas.
+	 * UI must not show EmptyCanvasHero during this window.
+	 */
+	canvasOpening: boolean;
 	canvases: CanvasMeta[]; // canvases within current folder
 	canvasTreeRev: number; // bumped on every canvas mutation — navigator listens
 	/** Per-canvas run status — drives navbar dots for active AND background canvases. */
@@ -380,6 +385,11 @@ interface CanvasState {
 	flushPending: () => void;
 	renameCanvas: (cwd: string, canvasId: string, name: string) => Promise<void>;
 	openFolder: (folder: string) => Promise<void>;
+	/**
+	 * Open a canvas, including when it lives in another folder.
+	 * Unlike openFolder, does not wipe to the empty-home composer mid-switch.
+	 */
+	openCanvas: (cwd: string, id: string) => Promise<void>;
 	switchCanvas: (id: string) => Promise<void>;
 	createCanvas: (name: string, opts?: { useWorktree?: boolean }) => Promise<void>;
 	/** Drop a canvas from the live cache (SSE, activity). Call when deleting. */
@@ -470,6 +480,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	baseBranch: null,
 	useWorktree: true,
 	worktreeMode: "local",
+	canvasOpening: false,
 	canvases: [],
 	canvasTreeRev: 0,
 	canvasActivity: {},
@@ -641,6 +652,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}
 
 		switchingCanvas = true;
+		set({ canvasOpening: true });
 		try {
 			const prevId = get().canvasId;
 			if (prevId) {
@@ -721,6 +733,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			await touchOpened();
 		} finally {
 			switchingCanvas = false;
+			set({ canvasOpening: false });
 		}
 	},
 
@@ -864,6 +877,84 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		let canvases: CanvasMeta[] = [];
 		if (res?.ok) canvases = (await res.json()).canvases ?? [];
 		set({ canvases, hydrated: true, serverOffline: false });
+	},
+
+	async openCanvas(cwd, id) {
+		if (get().folder === cwd) {
+			await get().switchCanvas(id);
+			return;
+		}
+		if (switchingCanvas) return;
+		switchingCanvas = true;
+		set({ canvasOpening: true });
+		try {
+			// Persist under the *current* folder before changing cwd — saveCanvas
+			// reads folder from state.
+			if (get().canvasId) {
+				stashActiveWorkspace();
+				await get().saveCanvas();
+			}
+
+			// Fetch list + canvas BEFORE mutating visible state. The previous
+			// path set canvasId=null (and sometimes left cards=[]) mid-flight,
+			// which stuck the empty-home hero when the load failed or the
+			// prior view was already empty.
+			const [listRes, canvasRes] = await Promise.all([
+				fetch(`/canvases?cwd=${encodeURIComponent(cwd)}`).catch(() => null),
+				fetch(`/canvases/${id}?cwd=${encodeURIComponent(cwd)}`).catch(() => null),
+			]);
+			if (!canvasRes?.ok) return;
+
+			let canvases: CanvasMeta[] = [];
+			if (listRes?.ok) canvases = ((await listRes.json()) as { canvases?: CanvasMeta[] }).canvases ?? [];
+			const cv = await canvasRes.json();
+			const loaded = Array.isArray(cv.cards) ? (cv.cards as SessionCard[]) : [];
+			const cards = loaded.map((c) => (streams.has(c.id) ? c : settleTransientStatuses([c])[0]!));
+			const name = (cv.name as string | undefined) ?? "Untitled";
+			const viewport = cv.viewport as CanvasState["viewport"];
+			const path = typeof cv.worktreePath === "string" ? cv.worktreePath : null;
+			const mode: CanvasWorktreeMode =
+				cv.worktreeMode === "isolated" || (path && path !== cwd) ? "isolated" : "local";
+			const wt = {
+				worktreePath: path,
+				branch: typeof cv.branch === "string" ? cv.branch : null,
+				baseBranch: typeof cv.baseBranch === "string" ? cv.baseBranch : null,
+				useWorktree: cv.useWorktree !== false,
+				worktreeMode: mode,
+			};
+
+			clearAllWorkspaces();
+			undoStack.length = 0;
+			redoStack.length = 0;
+			set({
+				folder: cwd,
+				canvases,
+				canvasId: id,
+				canvasName: name,
+				cards,
+				viewport,
+				...wt,
+				canvasActivity: { [id]: activityOf(cards) },
+				hydrated: true,
+				serverOffline: false,
+			});
+			workspaces.set(id, { cards, viewport, name, touchedAt: Date.now(), ...wt });
+			reindexCanvasCards(id, cards);
+			localStorage.setItem("melon:lastFolder", cwd);
+			localStorage.setItem("melon:lastCanvas", id);
+			for (const c of get().cards) {
+				if (c.sessionFile && !streams.has(c.id)) await get().hydrateMessages(c.id, c.sessionFile);
+			}
+			await fetch(`/canvases/${id}/touch`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ cwd }),
+			}).catch(() => null);
+			set((s) => ({ canvasTreeRev: s.canvasTreeRev + 1 }));
+		} finally {
+			switchingCanvas = false;
+			set({ canvasOpening: false });
+		}
 	},
 	scrollAction: (localStorage.getItem("melon:scroll_action") as ScrollAction) || "pan",
 

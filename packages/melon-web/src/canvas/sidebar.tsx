@@ -117,7 +117,7 @@ export function Sidebar() {
     const canvasId = useCanvasStore((s) => s.canvasId);
     const canvasActivity = useCanvasStore((s) => s.canvasActivity);
     const createCanvas = useCanvasStore((s) => s.createCanvas);
-    const switchCanvas = useCanvasStore((s) => s.switchCanvas);
+    const openCanvas = useCanvasStore((s) => s.openCanvas);
     const openFolder = useCanvasStore((s) => s.openFolder);
     const resumeSession = useCanvasStore((s) => s.resumeSession);
     const forgetCanvas = useCanvasStore((s) => s.forgetCanvas);
@@ -347,27 +347,14 @@ export function Sidebar() {
                 });
             });
         };
-        const doSwitch = () => {
-            void switchCanvas(cv.id)
-                .catch(() => {})
-                .finally(() => {
-                    setSwitchingCanvasId(null);
-                    revealInTree();
-                });
-        };
-        if (folder !== cv.cwd) {
-            void openFolder(cv.cwd)
-                .then(doSwitch)
-                .catch(() => setSwitchingCanvasId(null));
-        } else if (canvasId === cv.id) {
-            // Already on this canvas — still clear search + expand/scroll + touch Recent.
-            void switchCanvas(cv.id).finally(() => {
+        // openCanvas handles same-folder and cross-folder atomically — never
+        // routes through openFolder (which wipes cards to [] for empty-home).
+        void openCanvas(cv.cwd, cv.id)
+            .catch(() => {})
+            .finally(() => {
                 setSwitchingCanvasId(null);
                 revealInTree();
             });
-        } else {
-            doSwitch();
-        }
     };
 
     // Native OS dialog — the only way in. Cancel = no-op.

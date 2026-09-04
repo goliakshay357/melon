@@ -39,6 +39,7 @@ export function Canvas() {
     const storedViewport = useCanvasStore((s) => s.viewport);
     const hydrated = useCanvasStore((s) => s.hydrated);
     const serverOffline = useCanvasStore((s) => s.serverOffline);
+    const canvasOpening = useCanvasStore((s) => s.canvasOpening);
 
     const [nodes, setNodes] = useState<AppNode[]>([]);
     const theme = useActiveTheme();
@@ -297,7 +298,7 @@ export function Canvas() {
                 )}
             </ReactFlow>
 
-            {cards.length === 0 && (
+            {cards.length === 0 && !canvasOpening && (
                 <EmptyCanvasHero
                     position={heroCardPosition}
                     hydrated={hydrated}

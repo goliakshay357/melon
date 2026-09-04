@@ -426,6 +426,128 @@ it("keeps an empty canvas after choosing a folder that already has canvases", as
 	expect(useCanvasStore.getState().cards).toHaveLength(0);
 });
 
+it("does not wipe cards to empty while opening a canvas in another folder", async () => {
+	useCanvasStore.setState({
+		folder: "/Users/me/project-a",
+		canvasId: "cv_a",
+		canvasName: "A",
+		hydrated: true,
+		cards: [],
+		canvasOpening: false,
+	});
+	useCanvasStore.getState().addCard({ x: 10, y: 20 });
+	const priorCardId = useCanvasStore.getState().cards[0].id;
+	const cardCounts: number[] = [];
+
+	let releaseList!: () => void;
+	const listGate = new Promise<void>((r) => {
+		releaseList = r;
+	});
+
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (url: string, init?: { method?: string }) => {
+			const u = String(url);
+			const method = init?.method ?? "GET";
+			fetchCalls.push(`${method} ${u}`);
+			if (u.startsWith("/canvases?") && method === "GET") {
+				await listGate;
+				return {
+					ok: true,
+					status: 200,
+					json: async () => ({ canvases: [{ id: "cv_b", name: "B" }] }),
+				} as Response;
+			}
+			if (u.includes("/canvases/cv_b") && method === "GET") {
+				return {
+					ok: true,
+					status: 200,
+					json: async () => ({
+						id: "cv_b",
+						name: "B",
+						cards: [
+							{
+								id: "card_b",
+								title: "B card",
+								position: { x: 0, y: 0 },
+								parentId: null,
+								kind: "chat",
+								status: "idle",
+								messages: [],
+								size: { width: 400, height: 300 },
+							},
+						],
+						viewport: undefined,
+					}),
+				} as Response;
+			}
+			if (method === "PUT" || u.includes("/touch")) {
+				return { ok: true, status: 200, json: async () => ({}) } as Response;
+			}
+			return { ok: true, status: 200, json: async () => ({}) } as Response;
+		}),
+	);
+
+	const unsub = useCanvasStore.subscribe((s) => {
+		cardCounts.push(s.cards.length);
+	});
+	const opening = useCanvasStore.getState().openCanvas("/Users/me/project-b", "cv_b");
+	// Atomic open: folder/canvasId stay on the prior canvas until both fetches
+	// complete — never null mid-flight (that stuck EmptyCanvasHero).
+	for (let i = 0; i < 50 && !useCanvasStore.getState().canvasOpening; i++) {
+		await sleep(10);
+	}
+	expect(useCanvasStore.getState().canvasOpening).toBe(true);
+	expect(useCanvasStore.getState().folder).toBe("/Users/me/project-a");
+	expect(useCanvasStore.getState().canvasId).toBe("cv_a");
+	expect(useCanvasStore.getState().cards.map((c) => c.id)).toEqual([priorCardId]);
+	releaseList();
+	await opening;
+	unsub();
+
+	expect(useCanvasStore.getState().canvasId).toBe("cv_b");
+	expect(useCanvasStore.getState().folder).toBe("/Users/me/project-b");
+	expect(useCanvasStore.getState().cards.map((c) => c.id)).toEqual(["card_b"]);
+	expect(useCanvasStore.getState().canvasOpening).toBe(false);
+	expect(cardCounts.every((n) => n > 0)).toBe(true);
+});
+
+it("keeps the current canvas when a cross-folder openCanvas fetch fails", async () => {
+	useCanvasStore.setState({
+		folder: "/Users/me/project-a",
+		canvasId: "cv_a",
+		canvasName: "A",
+		hydrated: true,
+		cards: [],
+		canvasOpening: false,
+	});
+	useCanvasStore.getState().addCard({ x: 1, y: 2 });
+	const priorCardId = useCanvasStore.getState().cards[0].id;
+
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (url: string, init?: { method?: string }) => {
+			const u = String(url);
+			const method = init?.method ?? "GET";
+			if (method === "PUT") return { ok: true, status: 200, json: async () => ({}) } as Response;
+			if (u.includes("/canvases/cv_missing")) {
+				return { ok: false, status: 404, json: async () => ({}) } as Response;
+			}
+			if (u.startsWith("/canvases?")) {
+				return { ok: true, status: 200, json: async () => ({ canvases: [] }) } as Response;
+			}
+			return { ok: true, status: 200, json: async () => ({}) } as Response;
+		}),
+	);
+
+	await useCanvasStore.getState().openCanvas("/Users/me/project-b", "cv_missing");
+
+	expect(useCanvasStore.getState().folder).toBe("/Users/me/project-a");
+	expect(useCanvasStore.getState().canvasId).toBe("cv_a");
+	expect(useCanvasStore.getState().cards.map((c) => c.id)).toEqual([priorCardId]);
+	expect(useCanvasStore.getState().canvasOpening).toBe(false);
+});
+
 it("never starts a new session without an explicit folder", async () => {
 	useCanvasStore.setState({ folder: null, canvasId: null, cards: [] });
 
