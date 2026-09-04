@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { useOnViewportChange, useReactFlow } from '@xyflow/react';
 import { Maximize, ZoomIn, ZoomOut } from 'lucide-react'; // Moon, Sun disabled
+import { CanvasShareControls } from './canvas-share-bar';
 // import { useCanvasStore } from '@/store/canvas-store';  // DISABLED (scroll-pane)
 // import { getTheme, THEMES } from '@/theme/themes';  // DISABLED (theme toggle)
 // import { useThemeStore } from '@/theme/theme-store';  // DISABLED (theme toggle)
@@ -38,6 +39,7 @@ export function Toolbar() {
             >
                 <Maximize className="size-4" />
             </button>
+            <CanvasShareControls />
             {/* DISABLED — theme toggle + scroll pane
             <div className="mx-1 h-5 w-px bg-border" />
             <button className={btn} onClick={cycleTheme} title={`Theme: ${theme.label}`}>

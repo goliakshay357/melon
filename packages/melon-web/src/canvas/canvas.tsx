@@ -19,7 +19,6 @@ import { Toolbar } from './toolbar';
 import { Sidebar } from './sidebar';
 import { VizFullscreenLayer } from '@/components/viz-fullscreen-layer';
 import { CanvasNoticeBanner } from '@/components/canvas-notice-banner';
-import { CanvasShareBar } from './canvas-share-bar';
 // import { TopBar } from './topbar';  // DISABLED — re-enable later
 import { useCanvasStore, currentSpawnSize } from '@/store/canvas-store';
 import { focusViewport, isFullyVisible, SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH, type WorldRect } from '@/lib/spawn';
@@ -340,7 +339,6 @@ export function Canvas() {
             )}
 
             <CanvasNoticeBanner />
-            {cards.length > 0 && <CanvasShareBar />}
 
             {/* <TopBar /> DISABLED — re-enable later */}
             {cards.length > 0 && <Toolbar />}

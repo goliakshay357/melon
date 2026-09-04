@@ -11,7 +11,11 @@ type ShareStatus = {
     mode?: string;
 };
 
-export function CanvasShareBar() {
+/**
+ * Worktree mode + share action for the bottom canvas bubble.
+ * Kept out of the top chrome so explore/home stays clean.
+ */
+export function CanvasShareControls() {
     const canvasId = useCanvasStore((s) => s.canvasId);
     const canvasName = useCanvasStore((s) => s.canvasName);
     const folder = useCanvasStore((s) => s.folder);
@@ -24,8 +28,6 @@ export function CanvasShareBar() {
     const [result, setResult] = useState<string | null>(null);
     const [confirmed, setConfirmed] = useState(false);
 
-    // Explore / empty home still has a canvasId after createCanvas; hide until
-    // there is real canvas content. Same gate as Toolbar.
     if (!canvasId || cardCount === 0) return null;
 
     const isolated = worktreeMode === 'isolated';
@@ -65,29 +67,33 @@ export function CanvasShareBar() {
 
     return (
         <>
-            <div className="absolute left-1/2 top-3 z-10 flex -translate-x-1/2 items-center gap-2 rounded-xl border border-border bg-card/95 px-3 py-1.5 shadow-sm backdrop-blur">
-                <span
-                    className={
-                        isolated
-                            ? 'rounded-md bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary'
-                            : 'rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground'
-                    }
-                    title={isolated ? 'All chats on this canvas share one private copy' : 'Chats edit the original project folder'}
+            <div className="mx-1 h-5 w-px bg-border" />
+            <span
+                className={
+                    isolated
+                        ? 'rounded-md bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary'
+                        : 'rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground'
+                }
+                title={
+                    isolated
+                        ? 'All chats on this canvas share one private copy'
+                        : 'Chats edit the original project folder'
+                }
+            >
+                {isolated ? 'Worktree' : 'This project'}
+            </span>
+            {isolated && (
+                <button
+                    type="button"
+                    className="rounded-md bg-primary px-2 py-0.5 text-[10px] font-medium text-primary-foreground hover:bg-primary/90"
+                    onClick={() => {
+                        setOpen(true);
+                        void loadStatus();
+                    }}
                 >
-                    {isolated ? 'Private copy' : 'Original folder'}
-                </span>
-                {isolated && (
-                    <button
-                        className="rounded-md bg-primary px-2 py-0.5 text-[10px] font-medium text-primary-foreground hover:bg-primary/90"
-                        onClick={() => {
-                            setOpen(true);
-                            void loadStatus();
-                        }}
-                    >
-                        Send for review
-                    </button>
-                )}
-            </div>
+                    Send for review
+                </button>
+            )}
 
             <RadixDialog.Root open={open} onOpenChange={setOpen}>
                 <RadixDialog.Portal>
@@ -145,12 +151,14 @@ export function CanvasShareBar() {
 
                         <div className="mt-4 flex justify-end gap-2">
                             <button
+                                type="button"
                                 className="rounded-lg px-3 py-1.5 text-xs text-muted-foreground hover:bg-secondary"
                                 onClick={() => setOpen(false)}
                             >
                                 Close
                             </button>
                             <button
+                                type="button"
                                 disabled={!status?.canShare || !confirmed || busy}
                                 className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-40"
                                 onClick={() => void send()}
