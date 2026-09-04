@@ -5,6 +5,8 @@ export interface MelonSettings {
     providerKeys?: Record<string, string>;
     /** Models the provider rejected ("not supported") — hidden from the picker. */
     denylistedModels?: string[];
+    /** Melon web UI theme id (e.g. moonfly). Survives webview storage resets. */
+    theme?: string;
 }
 export declare function loadSettings(): MelonSettings;
 export declare function saveSettings(next: MelonSettings): void;

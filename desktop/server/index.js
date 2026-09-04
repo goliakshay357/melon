@@ -6,8 +6,9 @@
 //   POST /sessions                    {cardId, cwd}         → {sessionId, sessionFile, model}
 //   POST /sessions/resume             {cardId, sessionFile} → {sessionId, cwd, model}
 //   GET  /projects                                          → {projects: [{cwd, sessions[]}]}
-//   GET  /sessions/:cardId/events     SSE                   → delta | status | tool | error
+//   GET  /sessions/:cardId/events     SSE                   → delta | status | tool | error | extension_ui
 //   POST /sessions/:cardId/prompt     {text}                → {ok}
+//   POST /sessions/:cardId/extension-ui  {id, value|confirmed|cancelled}
 //   POST /sessions/:cardId/abort
 import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -18,13 +19,18 @@ import { createAgentSessionFromServices, createAgentSessionRuntime, createAgentS
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
+import { inspectCanvasShare, shareCanvasWork } from "./canvas-share.js";
 import { expandHome, loadConfig, modelToString, preview, structuredToolArgs, toolTextPreview, } from "./config.js";
-import { CURSOR_PROVIDER_ID, cursorExtensionPath, hasRealCursorKey, loadCursorProviderInto, rewriteCursorError, } from "./cursor-extension.js";
-import { SessionRegistry } from "./session-registry.js";
+import { CURSOR_PROVIDER_ID, cursorExtensionPath, cursorSessionIsolationAvailable, hasRealCursorKey, loadCursorProviderInto, rewriteCursorError, } from "./cursor-extension.js";
+import { runInBoundCursorSession, stripCursorResumeEntriesFromSessionFile } from "./cursor-session-binding.js";
+import { CardExtensionUiBridge } from "./extension-ui.js";
+import { fuzzyScore } from "./fuzzy.js";
+import { abortCurrentCursorTurn, beginCursorTurn, isCurrentCursorTurn, isCursorSession, isCursorTurnAborted, SessionRegistry, } from "./session-registry.js";
 import { clearProviderDenylist, denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel, } from "./settings.js";
 import { deleteSkill, loadSkills, materializeSkills, readSkill, saveSkill } from "./skills.js";
 import { isMutationTool, mutationDiffOutput, readFileSnapshot, resolveToolPath } from "./tool-diff.js";
 import { lookupToolDiff, saveToolDiff } from "./tool-diff-store.js";
+import { createWorktreeForCanvas, isMelonWorktreePath, removeWorktree } from "./worktree.js";
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
 function splitModel(model) {
@@ -32,6 +38,9 @@ function splitModel(model) {
     if (idx <= 0)
         return ["", ""];
     return [model.slice(0, idx), model.slice(idx + 1)];
+}
+function httpError(statusCode, message) {
+    return Object.assign(new Error(message), { statusCode });
 }
 /**
  * Product version shown in Settings and stamped into release artifacts.
@@ -70,9 +79,38 @@ async function getModelRuntime() {
 }
 export async function buildApp(deps = {}) {
     const config = loadConfig(deps.config);
-    const app = Fastify({ logger: false });
+    // Canvas PUT sends the full card transcript as one JSON body. Fastify's
+    // default 1 MiB bodyLimit returns 413 once a canvas grows past that.
+    const CANVAS_BODY_LIMIT = 10 * 1024 * 1024; // 10 MiB
+    const app = Fastify({ logger: false, bodyLimit: CANVAS_BODY_LIMIT });
     await app.register(cors, { origin: true });
     const registry = new SessionRegistry();
+    const cursorAttachLocks = new Map();
+    async function withCursorAttachLocks(keys, run) {
+        const releases = [];
+        for (const key of [...new Set(keys)].sort()) {
+            const previous = cursorAttachLocks.get(key) ?? Promise.resolve();
+            let release;
+            const current = new Promise((resolve) => {
+                release = resolve;
+            });
+            const queued = previous.then(() => current);
+            cursorAttachLocks.set(key, queued);
+            await previous;
+            releases.push(() => {
+                release();
+                if (cursorAttachLocks.get(key) === queued)
+                    cursorAttachLocks.delete(key);
+            });
+        }
+        try {
+            return await run();
+        }
+        finally {
+            for (const release of releases.reverse())
+                release();
+        }
+    }
     /**
      * Drain a card's server-owned prompt queue. Queued prompts never enter
      * pi's followUp queue (pi has no per-item removal, which made cancel/edit
@@ -84,6 +122,7 @@ export async function buildApp(deps = {}) {
         if (!s || s.draining || s.promptQueue.length === 0)
             return;
         s.draining = true;
+        let lastCursorTurnId;
         const run = async () => {
             while (s.promptQueue.length > 0) {
                 const next = s.promptQueue.shift();
@@ -92,12 +131,18 @@ export async function buildApp(deps = {}) {
                 // The client never optimistically renders queued messages — this
                 // event is the moment the text actually reaches the model.
                 registry.broadcast(cardId, { type: "user_message", text: next });
-                s.busy = true;
+                const cursorTurnId = beginCursorTurn(s);
+                lastCursorTurnId = cursorTurnId ?? lastCursorTurnId;
+                if (cursorTurnId === undefined)
+                    s.busy = true;
                 try {
-                    await s.runtime.session.prompt(next, { streamingBehavior: "followUp" });
+                    await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => s.runtime.session.prompt(next, { streamingBehavior: "followUp" }));
+                    if (cursorTurnId !== undefined && isCursorTurnAborted(s, cursorTurnId))
+                        return;
                 }
                 catch (e) {
                     console.error(`[${cardId}] queued prompt THREW ${e.stack}`);
+                    s.extensionUi?.cancelAll();
                     registry.broadcast(cardId, { type: "error", message: rewriteCursorError(e.message) });
                     registry.broadcast(cardId, { type: "status", status: "error" });
                     // Stop — surface the failure; remaining items stay queued so the
@@ -108,7 +153,10 @@ export async function buildApp(deps = {}) {
         };
         void run().finally(() => {
             s.draining = false;
-            s.busy = false;
+            // A newer Cursor turn may already own the card after agent_end. An
+            // older queue drain must not mark that newer turn idle.
+            if (lastCursorTurnId === undefined || isCurrentCursorTurn(s, lastCursorTurnId))
+                s.busy = false;
         });
     }
     /**
@@ -123,13 +171,27 @@ export async function buildApp(deps = {}) {
         "- Work only inside the current project directory and paths the user explicitly gives you.",
         "- If a task seems to require changing Melon itself (rare), ask the user first.",
         "",
+        "Asking the user a question (always apply — ask_question, select, confirm, options, Cursor questions):",
+        "- Write like you're talking to a smart friend who is new here. Short. Everyday words. No AI-slop.",
+        "- Question: one clear sentence. Ask what you need them to pick — not a design review.",
+        "- Option labels: what happens if they pick it, in plain words (about a dozen words max).",
+        "- Option descriptions (if any): one friendly line a beginner gets. Do not restack jargon from the label.",
+        "- Prefer concrete outcomes over abstract engineering talk.",
+        '- Bad: "Confirm the fix for the Deep diving / Reasoning activity line wiring."',
+        '- Good: "What should Deep diving / Reasoning do while the AI is thinking?"',
+        '- Bad option: "Keep shimmer the whole time status is streaming (like the header status dot)"',
+        '- Good option: "Keep showing it the whole time the green light is on"',
+        "",
         "Inline rendering in Melon chat (always apply):",
         "- Melon renders assistant messages as rich content, NOT plain text. Fenced blocks turn into LIVE interactive viewers inside the chat card:",
         "- Small self-contained HTML scenes (few KB): emit a ```viz-html``` fence containing ONE complete HTML document. It renders in a \u2248380px-wide frame (auto-height up to 700px). Design for \u2264380px width, no horizontal overflow.",
         "- Files on disk (archify deliver output, or any complete HTML artifact you wrote via a tool): emit a ```viz-file``` fence whose body is EXACTLY one line: the absolute file path, a pipe (|), then the session working directory. Example: ```/abs/path/to/artifact.html|/abs/session/cwd```. Melon fetches that file and renders it inline in the chat card. NEVER paste large HTML inline, and NEVER just link the file in prose \u2014 the fence is the embedding mechanism.",
         "- NEVER claim the chat is text-only or that you cannot embed. When you produce an HTML artifact, the ```viz-file``` fence embeds it.",
+        '- When the user asks for a diagram, visual, figure, or to "show" how something works, include a ```viz-html``` scene in that reply (do not wait to be told the fence name).',
+        "- Default those scenes to simple HTML + CSS (inline SVG ok). Few KB. No three.js, WebGL, or CDN-heavy libraries unless the user asks for 3D / orbit / interactive WebGL, or you have loaded the visualization skill for this turn.",
+        "- Do not force a viz block on ordinary Q&A that did not ask for a visual.",
     ].join("\n");
-    async function createRuntimeFor(sessionManager, enabledSkills = []) {
+    async function createRuntimeFor(sessionManager, enabledSkills = [], cardId) {
         const factory = async ({ cwd, sessionManager: sm, sessionStartEvent, }) => {
             // Restrict the skill CATALOG to only the card's enabled skills, so the
             // model's system prompt doesn't list (and self-invoke) everything.
@@ -148,7 +210,9 @@ export async function buildApp(deps = {}) {
                     appendSystemPromptOverride,
                     // Bundled provider extensions (cursor) — same extension the GUI
                     // runtime loads, so session model lists match the picker.
-                    ...(cursorExtensionPath() ? { additionalExtensionPaths: [cursorExtensionPath()] } : {}),
+                    ...(cursorSessionIsolationAvailable() && cursorExtensionPath()
+                        ? { additionalExtensionPaths: [cursorExtensionPath()] }
+                        : {}),
                 },
             });
             return {
@@ -165,28 +229,93 @@ export async function buildApp(deps = {}) {
             agentDir: getAgentDir(),
             sessionManager,
         });
-        // Bind extensions in "rpc" mode — Melon is an interactive GUI peer of the
-        // TUI/RPC frontends, not a one-shot print run. Extensions gate
-        // terminal-only behavior on ctx.mode; pi-cursor-sdk, for instance, only
-        // registers its native tool replay outside "print" mode. Without this,
-        // all Cursor tool activity (bash/read/write/...) renders as
-        // thinking-block traces instead of tool cards. This also emits
-        // session_start, which melon-server previously never delivered. Fail-open
-        // so a broken extension cannot take down card creation.
+        // Extension UI bridge: Melon is an interactive GUI peer of the TUI/RPC
+        // frontends. Bind in "rpc" mode with a real uiContext so ctx.hasUI is
+        // true and select/confirm/input reach the card question panel (Cursor
+        // ask_question, permission hooks, …). Fail-open so a broken extension
+        // cannot take down card creation.
+        const extensionUi = cardId !== undefined
+            ? new CardExtensionUiBridge(cardId, (payload) => registry.broadcast(cardId, payload))
+            : undefined;
         try {
-            await runtime.session.bindExtensions({ mode: "rpc" });
+            await runtime.session.bindExtensions({
+                mode: "rpc",
+                ...(extensionUi ? { uiContext: extensionUi.getUIContext() } : {}),
+            });
         }
         catch (e) {
             console.error("[melon] extension bind failed (continuing):", e?.message ?? e);
         }
-        return runtime;
+        return { runtime, extensionUi };
     }
-    async function attachSession(cardId, sessionManager, explicitModel, skills = []) {
-        const runtime = await createRuntimeFor(sessionManager, skills);
+    async function attachSession(cardId, sessionManager, explicitModel, skills = [], mode = "replace") {
+        const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
+        const wantsCursor = splitModel(wanted)[0].toLowerCase() === CURSOR_PROVIDER_ID;
+        const existingIsCursor = (registry.get(cardId)?.runtime.session.model?.provider ?? "").toLowerCase() === CURSOR_PROVIDER_ID;
+        if (!wantsCursor && !existingIsCursor) {
+            return attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode);
+        }
+        const sessionFile = sessionManager.getSessionFile?.();
+        return withCursorAttachLocks([`card:${cardId}`, ...(sessionFile ? [`session:${sessionFile}`] : [])], () => attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode));
+    }
+    async function attachSessionUnlocked(cardId, sessionManager, explicitModel, skills = [], mode = "replace") {
+        const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
+        const [wantedProvider, wantedId] = splitModel(wanted);
+        const wantsCursor = wantedProvider.toLowerCase() === CURSOR_PROVIDER_ID;
+        if (wantsCursor && !cursorSessionIsolationAvailable()) {
+            throw httpError(503, "Cursor is unavailable because its per-card isolation patch is missing. Reinstall desktop dependencies and restart Melon.");
+        }
+        const incomingSessionFile = sessionManager.getSessionFile?.();
+        const existing = registry.get(cardId);
+        const existingIsCursor = (existing?.runtime.session.model?.provider ?? "").toLowerCase() === CURSOR_PROVIDER_ID;
+        const existingSessionFile = existing?.runtime.session.sessionManager.getSessionFile?.();
+        // SSE reconnects call /sessions/resume. For a live Cursor card this must
+        // reconnect to the existing runtime, not create a second runtime writing
+        // the same jsonl and broadcasting under the same card id.
+        if (existing &&
+            existingIsCursor &&
+            wantsCursor &&
+            (mode === "create" || existingSessionFile === incomingSessionFile)) {
+            return existing.runtime;
+        }
+        // A Cursor SDK agent pool and bridge are keyed by session file. Two live
+        // cards owning the same file would therefore defeat per-card isolation.
+        // Check first so a rejected move leaves this card's current runtime alive.
+        if (wantsCursor && incomingSessionFile) {
+            for (const [ownerCardId, attached] of registry.entries()) {
+                if (ownerCardId === cardId)
+                    continue;
+                const ownerIsCursor = (attached.runtime.session.model?.provider ?? "").toLowerCase() === CURSOR_PROVIDER_ID;
+                const ownerSessionFile = attached.runtime.session.sessionManager.getSessionFile?.();
+                if (ownerIsCursor && ownerSessionFile === incomingSessionFile) {
+                    throw httpError(409, `Cursor session is already open in card ${ownerCardId}`);
+                }
+            }
+        }
+        // Only change replacement behavior when Cursor is involved. Other
+        // providers retain their existing attach/resume semantics.
+        if (existing && (existingIsCursor || wantsCursor)) {
+            existing.extensionUi?.cancelAll();
+            if (existing.busy) {
+                try {
+                    await existing.runtime.session.abort();
+                }
+                catch (e) {
+                    console.error(`[${cardId}] Cursor runtime replacement abort failed:`, e.message);
+                }
+            }
+            await existing.runtime.dispose();
+            if (registry.get(cardId) === existing)
+                registry.delete(cardId);
+        }
+        // Load the GUI ModelRuntime (Cursor provider catalog) before the session
+        // extension factory so picker models are ready. Session load registers
+        // that card's pi tool bridge; Melon's multicard SDK patch keeps sibling
+        // bridges alive when later cards also load Cursor.
+        await getModelRuntime();
+        const { runtime, extensionUi } = await createRuntimeFor(sessionManager, skills, cardId);
         try {
-            const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
-            const [provider, id] = splitModel(wanted);
-            const model = (await getModelRuntime()).getModel(provider, id);
+            const model = (await getModelRuntime()).getModel(wantedProvider, wantedId);
             if (model) {
                 await runtime.session.setModel(model);
                 touchRecentModel(wanted);
@@ -197,7 +326,14 @@ export async function buildApp(deps = {}) {
             console.error("model switch failed:", e?.message ?? e);
         }
         wireEvents(cardId, runtime);
-        registry.set(cardId, { runtime, clients: new Set(), busy: false, activeSkills: skills, promptQueue: [] });
+        registry.set(cardId, {
+            runtime,
+            clients: new Set(),
+            busy: false,
+            activeSkills: skills,
+            promptQueue: [],
+            extensionUi,
+        });
         return runtime;
     }
     function wireEvents(cardId, runtime) {
@@ -291,6 +427,8 @@ export async function buildApp(deps = {}) {
                     // asked for a halt; remaining items stay queued (chips) and can
                     // be cancelled or resumed by sending again.
                     const stopReason = String(msgs[msgs.length - 1]?.stopReason ?? "");
+                    if (stopReason === "aborted" || stopReason === "error")
+                        entry?.extensionUi?.cancelAll();
                     if (stopReason !== "aborted")
                         drainPromptQueue(cardId);
                 }
@@ -404,6 +542,7 @@ export async function buildApp(deps = {}) {
                                     args: snap.args,
                                     before: snap.before,
                                     fallbackText: output,
+                                    result: event.result,
                                 });
                             }
                         }
@@ -489,7 +628,7 @@ export async function buildApp(deps = {}) {
         const skills = Array.isArray(body?.skills)
             ? body.skills.filter((x) => typeof x === "string")
             : [];
-        const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model, skills);
+        const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model, skills, "create");
         return {
             cardId,
             sessionId: runtime.session.sessionId,
@@ -508,7 +647,16 @@ export async function buildApp(deps = {}) {
         const skills = Array.isArray(body?.skills)
             ? body.skills.filter((x) => typeof x === "string")
             : [];
-        const runtime = await attachSession(cardId, SessionManager.open(sessionFile), body?.model, skills);
+        let cwdOverride;
+        if (typeof body?.cwd === "string" && body.cwd.trim()) {
+            try {
+                cwdOverride = assertCwd(body.cwd);
+            }
+            catch (e) {
+                return reply.code(400).send({ error: e.message });
+            }
+        }
+        const runtime = await attachSession(cardId, SessionManager.open(sessionFile, undefined, cwdOverride), body?.model, skills, "resume");
         return {
             cardId,
             sessionId: runtime.session.sessionId,
@@ -567,6 +715,11 @@ export async function buildApp(deps = {}) {
     // Fork: copy root→leaf path into a NEW .jsonl (pi-native clone).
     // Child becomes a live session under newCardId; the parent keeps its own
     // runtime re-opened on its original file.
+    //
+    // Cursor: the branched jsonl copies `cursor-sdk-agent-resume` handles. In
+    // Melon's multi-card process those make the child resume the parent's
+    // Cursor agent. Strip them, then reopen both cards as distinct runtimes so
+    // the child bootstraps a NEW Cursor agent from the inherited transcript.
     app.post("/sessions/:cardId/fork", async (req, reply) => {
         const parentCardId = req.params.cardId;
         const body = req.body;
@@ -574,8 +727,9 @@ export async function buildApp(deps = {}) {
         let s = registry.get(parentCardId);
         // Card not live (e.g. server restarted)? Re-open it from disk.
         if (!s && body?.sessionFile) {
+            const { runtime } = await createRuntimeFor(SessionManager.open(body.sessionFile), [], parentCardId);
             s = {
-                runtime: await createRuntimeFor(SessionManager.open(body.sessionFile)),
+                runtime,
                 clients: new Set(),
                 busy: false,
                 promptQueue: [],
@@ -590,12 +744,31 @@ export async function buildApp(deps = {}) {
             return reply.code(400).send({ error: "nothing to fork yet — send a message first" });
         }
         const leaf = s.runtime.session.sessionManager.getLeafEntry();
+        const parentModel = modelToString(s.runtime.session.model);
+        const parentSkills = s.activeSkills ?? [];
         const res = await s.runtime.fork(leaf?.id ?? "", { position: "at" });
         if (res.cancelled)
             return reply.code(409).send({ error: "fork cancelled" });
-        wireEvents(newCardId, s.runtime);
-        registry.set(newCardId, { runtime: s.runtime, clients: new Set(), busy: false, promptQueue: [] });
-        await attachSession(parentCardId, SessionManager.open(parentSessionFile));
+        const childSessionFile = s.runtime.session.sessionFile;
+        if (!childSessionFile) {
+            return reply.code(500).send({ error: "fork produced no child session file" });
+        }
+        const stripped = stripCursorResumeEntriesFromSessionFile(childSessionFile);
+        if (stripped > 0) {
+            console.log(`[melon] fork ${parentCardId}→${newCardId}: stripped ${stripped} cursor resume handle(s) from child session`);
+        }
+        // fork() leaves this runtime attached to the child file. Dispose that
+        // temporary Cursor owner before creating the child's permanent runtime,
+        // otherwise two bridges and two writers briefly own the same session.
+        if (splitModel(parentModel)[0].toLowerCase() === CURSOR_PROVIDER_ID) {
+            s.extensionUi?.cancelAll();
+            await s.runtime.dispose();
+            if (registry.get(parentCardId) === s)
+                registry.delete(parentCardId);
+        }
+        // Fresh runtimes for both cards (fork left `s.runtime` on the child file).
+        await attachSession(newCardId, SessionManager.open(childSessionFile), parentModel, parentSkills);
+        await attachSession(parentCardId, SessionManager.open(parentSessionFile), parentModel, parentSkills);
         const childRuntime = registry.get(newCardId);
         return {
             newCardId,
@@ -604,11 +777,25 @@ export async function buildApp(deps = {}) {
             model: modelToString(childRuntime.runtime.session.model),
             forkedFromEntryId: leaf?.id,
             parentSessionFile,
+            strippedCursorResumeEntries: stripped,
         };
     });
     // ── Canvas persistence: <folder>/.melon/canvases/<id>.json ──
     function canvasesDir(cwd) {
         return join(expandHome(cwd), ".melon", "canvases");
+    }
+    function readCanvasFile(dir, canvasId) {
+        try {
+            return JSON.parse(readFileSync(join(canvasesDir(dir), `${canvasId}.json`), "utf8"));
+        }
+        catch {
+            return null;
+        }
+    }
+    function writeCanvasPatch(dir, canvasId, patch) {
+        const file = join(canvasesDir(dir), `${canvasId}.json`);
+        const current = readCanvasFile(dir, canvasId) ?? { id: canvasId };
+        writeFileSync(file, `${JSON.stringify({ ...current, ...patch }, null, 2)}\n`);
     }
     // List workspaces in a folder (lightweight: reads each file's meta line).
     app.get("/canvases", async (req, reply) => {
@@ -648,10 +835,46 @@ export async function buildApp(deps = {}) {
         }
         return { canvases: out };
     });
-    // Recent canvases across ALL known folders (by last-modified), for the sidebar.
-    app.get("/canvases/recent", async () => {
-        const recents = [];
+    function isolationMeta(raw, projectRoot) {
+        const path = typeof raw.worktreePath === "string" ? raw.worktreePath : null;
+        const mode = raw.worktreeMode === "isolated" || (path != null && path !== projectRoot) ? "isolated" : "local";
+        if (mode !== "isolated" || !path)
+            return { worktreeMode: "local" };
+        const exists = statSync(path, { throwIfNoEntry: false })?.isDirectory() === true;
+        const worktreeName = path.split("/").filter(Boolean).pop() ?? path;
+        return { worktreeMode: "isolated", worktreeName, worktreeExists: exists };
+    }
+    const MATCH_RANK = {
+        title: 0,
+        card: 1,
+        message: 2,
+        document: 3,
+    };
+    /** Collapse whitespace and clip a window around the first contiguous needle, else start. */
+    function snippetAround(text, needle, radius = 36) {
+        const flat = text.replace(/\s+/g, " ").trim();
+        if (!flat)
+            return "";
+        const lower = flat.toLowerCase();
+        const contiguous = needle.toLowerCase().replace(/\s+/g, " ").trim();
+        let i = contiguous ? lower.indexOf(contiguous) : -1;
+        if (i < 0) {
+            // Fuzzy: window from first matching character of the query.
+            const q0 = contiguous[0];
+            i = q0 ? lower.indexOf(q0) : 0;
+            if (i < 0)
+                i = 0;
+        }
+        const start = Math.max(0, i - radius);
+        const end = Math.min(flat.length, i + Math.max(contiguous.length, 1) + radius);
+        return `${start > 0 ? "…" : ""}${flat.slice(start, end)}${end < flat.length ? "…" : ""}`;
+    }
+    /** Lightweight meta for every canvas under known folders (skips missing/corrupt). */
+    function listCanvasMetaAcrossFolders() {
+        const out = [];
         for (const f of loadFolderHistory()) {
+            if (statSync(f.cwd, { throwIfNoEntry: false })?.isDirectory() !== true)
+                continue;
             const dir = canvasesDir(f.cwd);
             let files;
             try {
@@ -660,17 +883,19 @@ export async function buildApp(deps = {}) {
             catch {
                 continue;
             }
+            const folderName = f.cwd.split("/").pop() ?? f.cwd;
             for (const file of files) {
                 if (!file.endsWith(".json"))
                     continue;
                 try {
                     const raw = JSON.parse(readFileSync(join(dir, file), "utf8"));
-                    recents.push({
+                    out.push({
                         id: raw.id ?? file.replace(/\.json$/, ""),
-                        name: raw.name ?? "Untitled",
+                        name: typeof raw.name === "string" && raw.name.trim() ? raw.name : "Untitled",
                         cwd: f.cwd,
-                        folderName: f.cwd.split("/").pop() ?? f.cwd,
+                        folderName,
                         modified: raw.modified ?? "",
+                        ...isolationMeta(raw, f.cwd),
                     });
                 }
                 catch {
@@ -678,10 +903,246 @@ export async function buildApp(deps = {}) {
                 }
             }
         }
+        return out;
+    }
+    /**
+     * Cross-folder fuzzy canvas search: title → card → message → document.
+     * Subsequence match (brd → board); nearest scores first. One hit per canvas.
+     */
+    function searchCanvasesAcrossFolders(query) {
+        const hits = [];
+        for (const f of loadFolderHistory()) {
+            if (statSync(f.cwd, { throwIfNoEntry: false })?.isDirectory() !== true)
+                continue;
+            const dir = canvasesDir(f.cwd);
+            let files;
+            try {
+                files = readdirSync(dir);
+            }
+            catch {
+                continue;
+            }
+            const folderName = f.cwd.split("/").pop() ?? f.cwd;
+            for (const file of files) {
+                if (!file.endsWith(".json"))
+                    continue;
+                let raw;
+                try {
+                    raw = JSON.parse(readFileSync(join(dir, file), "utf8"));
+                }
+                catch {
+                    continue;
+                }
+                const id = raw.id ?? file.replace(/\.json$/, "");
+                const name = typeof raw.name === "string" && raw.name.trim() ? raw.name : "Untitled";
+                const base = {
+                    id,
+                    name,
+                    cwd: f.cwd,
+                    folderName,
+                    modified: raw.modified ?? "",
+                    ...isolationMeta(raw, f.cwd),
+                };
+                let best = null;
+                const consider = (hit) => {
+                    if (!best) {
+                        best = hit;
+                        return;
+                    }
+                    const kindDelta = MATCH_RANK[hit.match] - MATCH_RANK[best.match];
+                    if (kindDelta < 0 || (kindDelta === 0 && hit.score < best.score))
+                        best = hit;
+                };
+                const titleScore = fuzzyScore(query, name);
+                if (titleScore !== null) {
+                    consider({ ...base, match: "title", score: titleScore });
+                }
+                // Also allow matching via folder basename (same title in many folders).
+                const folderScore = fuzzyScore(query, folderName);
+                if (folderScore !== null && titleScore === null) {
+                    consider({
+                        ...base,
+                        match: "title",
+                        score: folderScore + 20,
+                        snippet: folderName,
+                    });
+                }
+                if (base.worktreeName) {
+                    const wtScore = fuzzyScore(query, base.worktreeName);
+                    if (wtScore !== null && titleScore === null) {
+                        consider({
+                            ...base,
+                            match: "title",
+                            score: wtScore + 15,
+                            snippet: base.worktreeName,
+                        });
+                    }
+                }
+                for (const card of raw.cards ?? []) {
+                    const cardTitle = typeof card.title === "string" && card.title.trim() ? card.title : "Untitled chat";
+                    const cardScore = fuzzyScore(query, cardTitle);
+                    if (cardScore !== null) {
+                        consider({
+                            ...base,
+                            match: "card",
+                            score: cardScore,
+                            snippet: cardTitle,
+                            cardId: card.id,
+                            cardTitle,
+                        });
+                    }
+                    if (card.kind === "document" && typeof card.documentContent === "string") {
+                        const docScore = fuzzyScore(query, card.documentContent);
+                        if (docScore !== null) {
+                            consider({
+                                ...base,
+                                match: "document",
+                                score: docScore,
+                                snippet: snippetAround(card.documentContent, query),
+                                cardId: card.id,
+                                cardTitle,
+                            });
+                        }
+                    }
+                    for (const msg of card.messages ?? []) {
+                        if (typeof msg.text !== "string" || !msg.text)
+                            continue;
+                        const msgScore = fuzzyScore(query, msg.text);
+                        if (msgScore === null)
+                            continue;
+                        consider({
+                            ...base,
+                            match: "message",
+                            score: msgScore,
+                            snippet: snippetAround(msg.text, query),
+                            cardId: card.id,
+                            cardTitle,
+                        });
+                        break;
+                    }
+                }
+                if (best)
+                    hits.push(best);
+            }
+        }
+        hits.sort((a, b) => {
+            const kindDelta = MATCH_RANK[a.match] - MATCH_RANK[b.match];
+            if (kindDelta !== 0)
+                return kindDelta;
+            if (a.score !== b.score)
+                return a.score - b.score;
+            return (b.modified ?? "").localeCompare(a.modified ?? "");
+        });
+        return hits;
+    }
+    // Recent canvases across ALL known folders (by last-modified), for the sidebar.
+    app.get("/canvases/recent", async () => {
+        const recents = listCanvasMetaAcrossFolders();
         recents.sort((a, b) => (b.modified ?? "").localeCompare(a.modified ?? ""));
         return { recent: recents.slice(0, 12) };
     });
-    // Delete a canvas file.
+    // Search canvases across ALL known folders (sidebar): title, card title, messages, docs.
+    app.get("/canvases/search", async (req) => {
+        const q = String(req.query?.q ?? "").trim();
+        if (!q)
+            return { query: q, results: [] };
+        return { query: q, results: searchCanvasesAcrossFolders(q).slice(0, 50) };
+    });
+    // Allocate or repair a git worktree for a canvas under <cwd>/.melon/worktrees/.
+    // Isolated by default; falls back to Local on non-git folders or create failure.
+    app.post("/canvases/:id/worktree", async (req, reply) => {
+        const body = req.body;
+        let dir;
+        try {
+            dir = assertCwd(body?.cwd);
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        const canvasId = req.params.id;
+        if (!canvasId)
+            return reply.code(400).send({ error: "canvas id required" });
+        const stored = readCanvasFile(dir, canvasId);
+        const result = await createWorktreeForCanvas(dir, {
+            baseBranch: body?.baseBranch ?? stored?.baseBranch,
+            useWorktree: body?.useWorktree ?? stored?.useWorktree,
+            existing: {
+                worktreePath: body?.worktreePath ?? stored?.worktreePath,
+                branch: body?.branch ?? stored?.branch,
+                baseBranch: body?.baseBranch ?? stored?.baseBranch,
+            },
+        });
+        if (!result.success && result.mode === "local" && result.error) {
+            return {
+                ok: true,
+                canvasId,
+                ...result,
+                fallback: true,
+            };
+        }
+        return { ok: true, canvasId, ...result };
+    });
+    app.get("/canvases/:id/share-status", async (req, reply) => {
+        const q = req.query;
+        let dir;
+        try {
+            dir = assertCwd(q.cwd);
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        const canvasId = req.params.id;
+        const stored = readCanvasFile(dir, canvasId);
+        if (!stored)
+            return reply.code(404).send({ error: "canvas not found" });
+        const mode = stored.worktreeMode === "isolated" ? "isolated" : "local";
+        const status = await inspectCanvasShare({
+            projectRoot: dir,
+            mode,
+            worktreePath: typeof stored.worktreePath === "string" ? stored.worktreePath : dir,
+            branch: stored.branch,
+            baseBranch: stored.baseBranch,
+            prUrl: stored.pr?.url,
+        });
+        return { ok: true, canvasId, ...status };
+    });
+    app.post("/canvases/:id/share", async (req, reply) => {
+        const body = req.body;
+        let dir;
+        try {
+            dir = assertCwd(body?.cwd);
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        const canvasId = req.params.id;
+        const stored = readCanvasFile(dir, canvasId);
+        if (!stored)
+            return reply.code(404).send({ error: "canvas not found" });
+        if (stored.worktreeMode !== "isolated" || typeof stored.worktreePath !== "string" || !stored.branch) {
+            return reply.code(400).send({
+                error: "This canvas edits the original folder, so there is no separate copy to send.",
+            });
+        }
+        const title = (typeof body?.title === "string" && body.title.trim()) ||
+            (typeof stored.name === "string" && stored.name.trim()) ||
+            "Updates from Melon";
+        const result = await shareCanvasWork(dir, {
+            confirm: body?.confirm === true,
+            title,
+            note: typeof body?.note === "string" ? body.note : undefined,
+            worktreePath: stored.worktreePath,
+            branch: stored.branch,
+            baseBranch: stored.baseBranch || "main",
+            prUrl: stored.pr?.url,
+        });
+        if (result.prUrl)
+            writeCanvasPatch(dir, canvasId, { pr: { url: result.prUrl } });
+        if (!result.ok)
+            return reply.code(400).send(result);
+        return { canvasId, ...result };
+    });
+    // Delete a canvas file (and its melon worktree when present).
     app.delete("/canvases/:id", async (req, reply) => {
         const q = req.query;
         let dir;
@@ -693,9 +1154,56 @@ export async function buildApp(deps = {}) {
         }
         const { rmSync } = await import("node:fs");
         const file = join(canvasesDir(dir), `${req.params.id}.json`);
+        let worktreePath;
+        let branch;
+        try {
+            const raw = JSON.parse(readFileSync(file, "utf8"));
+            worktreePath = typeof raw.worktreePath === "string" ? raw.worktreePath : undefined;
+            branch = typeof raw.branch === "string" ? raw.branch : undefined;
+        }
+        catch {
+            /* missing / corrupt — still try unlink */
+        }
+        const deleteWorktree = q.deleteWorktree !== "0" && q.deleteWorktree !== "false";
+        const force = q.force === "1" || q.force === "true";
+        let worktreeRemoved = false;
+        if (deleteWorktree && worktreePath && isMelonWorktreePath(dir, worktreePath)) {
+            if (!force) {
+                const stored = readCanvasFile(dir, req.params.id);
+                const status = await inspectCanvasShare({
+                    projectRoot: dir,
+                    mode: stored?.worktreeMode === "isolated" ? "isolated" : "local",
+                    worktreePath,
+                    branch,
+                    baseBranch: stored?.baseBranch,
+                });
+                if (status.hasChanges || status.ahead > 0) {
+                    return reply.code(409).send({
+                        error: "unsent-work",
+                        summary: "This canvas still has work that hasn't been sent for review.",
+                        files: status.files,
+                        ahead: status.ahead,
+                    });
+                }
+            }
+            const removed = await removeWorktree(dir, worktreePath);
+            worktreeRemoved = removed.success;
+            // Best-effort: drop the dedicated branch if the worktree went away.
+            if (removed.success && branch) {
+                try {
+                    const { execFile } = await import("node:child_process");
+                    await new Promise((resolve) => {
+                        execFile("git", ["-C", dir, "branch", "-D", branch], { timeout: 30_000 }, () => resolve());
+                    });
+                }
+                catch {
+                    /* branch may be checked out elsewhere or already gone */
+                }
+            }
+        }
         try {
             rmSync(file);
-            return { ok: true };
+            return { ok: true, worktreeRemoved };
         }
         catch {
             return reply.code(404).send({ error: "canvas not found" });
@@ -704,9 +1212,35 @@ export async function buildApp(deps = {}) {
     // Load one workspace fully.
     app.get("/canvases/:id", async (req, reply) => {
         const q = req.query;
-        const file = join(canvasesDir(expandHome(q.cwd)), `${req.params.id}.json`);
+        const dir = expandHome(q.cwd);
+        const file = join(canvasesDir(dir), `${req.params.id}.json`);
         try {
-            return JSON.parse(readFileSync(file, "utf8"));
+            const raw = JSON.parse(readFileSync(file, "utf8"));
+            const iso = isolationMeta(raw, dir);
+            return { ...raw, ...iso };
+        }
+        catch {
+            return reply.code(404).send({ error: "canvas not found" });
+        }
+    });
+    // Bump modified time only — keeps Recent / Workspaces order in sync on open.
+    app.post("/canvases/:id/touch", async (req, reply) => {
+        const body = (req.body ?? {});
+        let dir;
+        try {
+            dir = assertCwd(body.cwd);
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        const id = req.params.id;
+        const file = join(canvasesDir(dir), `${id}.json`);
+        try {
+            const raw = JSON.parse(readFileSync(file, "utf8"));
+            const modified = new Date().toISOString();
+            raw.modified = modified;
+            writeFileSync(file, JSON.stringify(raw));
+            return { ok: true, id, modified };
         }
         catch {
             return reply.code(404).send({ error: "canvas not found" });
@@ -738,6 +1272,8 @@ export async function buildApp(deps = {}) {
                     existingCards: existing.cards.length,
                 });
             }
+            if (ws.pr == null && existing.pr != null)
+                ws.pr = existing.pr;
         }
         catch {
             /* no existing file — fine */
@@ -799,7 +1335,14 @@ export async function buildApp(deps = {}) {
                         bound.add(c.sessionFile);
                         return { file: c.sessionFile, title: c.title };
                     });
-                    canvases.push({ id: cv.id, name: cv.name ?? "Untitled", sessions });
+                    const iso = isolationMeta(cv, dir);
+                    canvases.push({
+                        id: cv.id,
+                        name: cv.name ?? "Untitled",
+                        worktreeMode: iso.worktreeMode,
+                        worktreeName: iso.worktreeName,
+                        sessions,
+                    });
                 }
                 catch {
                     /* skip corrupt */
@@ -1059,6 +1602,13 @@ export async function buildApp(deps = {}) {
             return reply.code(400).send({ error: "body required" });
         const cur = loadSettings();
         const next = { ...cur, ...body };
+        // Theme id must be a non-empty string when provided (web owns the catalog).
+        if ("theme" in body) {
+            if (typeof body.theme !== "string" || !body.theme.trim()) {
+                return reply.code(400).send({ error: "theme must be a non-empty string" });
+            }
+            next.theme = body.theme.trim();
+        }
         saveSettings(next);
         return { ok: true, settings: next };
     });
@@ -1262,7 +1812,39 @@ export async function buildApp(deps = {}) {
         });
         reply.raw.flushHeaders(); // send headers NOW — SSE has no body yet
         s.clients.add(reply);
+        // Replay a blocking question if the client reconnects mid-dialog.
+        const pendingUi = s.extensionUi?.getPendingEvent();
+        if (pendingUi)
+            reply.raw.write(`data: ${JSON.stringify(pendingUi)}\n\n`);
         req.raw.on("close", () => s.clients.delete(reply));
+    });
+    // Answer (or cancel) a pending extension UI dialog for this card.
+    app.post("/sessions/:cardId/extension-ui", async (req, reply) => {
+        const cardId = req.params.cardId;
+        const s = registry.get(cardId);
+        if (!s)
+            return reply.code(404).send({ error: "unknown card" });
+        const body = (req.body ?? {});
+        const id = typeof body.id === "string" ? body.id : "";
+        if (!id)
+            return reply.code(400).send({ error: "id required" });
+        let response;
+        if (body.cancelled === true) {
+            response = { id, cancelled: true };
+        }
+        else if (typeof body.confirmed === "boolean") {
+            response = { id, confirmed: body.confirmed };
+        }
+        else if (typeof body.value === "string") {
+            response = { id, value: body.value };
+        }
+        else {
+            return reply.code(400).send({ error: "value, confirmed, or cancelled required" });
+        }
+        if (!s.extensionUi?.respond(response)) {
+            return reply.code(409).send({ error: "no matching pending extension UI request" });
+        }
+        reply.send({ ok: true });
     });
     app.post("/sessions/:cardId/prompt", async (req, reply) => {
         const s = registry.get(req.params.cardId);
@@ -1282,6 +1864,7 @@ export async function buildApp(deps = {}) {
             reply.send({ ok: true, queued: true });
             return;
         }
+        const cursorTurnId = beginCursorTurn(s);
         reply.send({ ok: true });
         console.log(`[${cardId}] prompt:start "${String(req.body?.text).slice(0, 60)}"`);
         registry.broadcast(cardId, { type: "raw", text: "\u2b07 prompt received by server" });
@@ -1289,18 +1872,29 @@ export async function buildApp(deps = {}) {
             const text = req.body?.text ?? "";
             // Skills are activated via pi's native /skill: followUp on toggle —
             // NOT appended per-prompt (that bloated the context window).
-            await s.runtime.session.prompt(text);
+            await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => s.runtime.session.prompt(text));
             console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
         }
         catch (e) {
             console.error(`[${cardId}] prompt:THREW ${e.stack}`);
+            s.extensionUi?.cancelAll();
             registry.broadcast(cardId, { type: "error", message: rewriteCursorError(e.message) });
             registry.broadcast(cardId, { type: "status", status: "error" });
         }
         finally {
-            // busy is owned by agent_start/agent_end events; this drain covers
-            // runs that ended without an agent_end (e.g. prompt threw early).
-            drainPromptQueue(cardId);
+            if (cursorTurnId === undefined) {
+                // Preserve existing behavior for non-Cursor providers.
+                drainPromptQueue(cardId);
+            }
+            else if (registry.get(cardId) === s && isCurrentCursorTurn(s, cursorTurnId)) {
+                // agent_end may already have started the next queued turn. Only
+                // the current owner can release busy or drain, and an explicit
+                // Stop keeps queued prompts paused.
+                if (!s.draining)
+                    s.busy = false;
+                if (!isCursorTurnAborted(s, cursorTurnId))
+                    drainPromptQueue(cardId);
+            }
         }
     });
     // The queue lives on the registry entry (s.promptQueue) — cancel is a
@@ -1348,7 +1942,10 @@ export async function buildApp(deps = {}) {
         const s = registry.get(req.params.cardId);
         if (!s)
             return reply.code(404).send({ error: "unknown card" });
+        abortCurrentCursorTurn(s);
         registry.broadcast(req.params.cardId, { type: "raw", text: "⏹ stop requested (server)" });
+        // Unblock any open question panel immediately (don't wait for agent_end).
+        s.extensionUi?.cancelAll();
         try {
             await s.runtime.session.abort();
             registry.broadcast(req.params.cardId, { type: "raw", text: "■ generation stopped" });
@@ -1358,11 +1955,44 @@ export async function buildApp(deps = {}) {
         }
         return { ok: true };
     });
+    // Cursor owns process-level SDK resources (agent pool, bridge, scoped
+    // resume state). Deleting a Cursor card must emit session_shutdown and
+    // remove that ownership; the existing non-Cursor delete behavior is left
+    // unchanged.
+    app.delete("/sessions/:cardId", async (req, reply) => {
+        const cardId = req.params.cardId;
+        const s = registry.get(cardId);
+        if (!s)
+            return { ok: true };
+        if (!isCursorSession(s)) {
+            return reply.code(409).send({ error: "session teardown is only enabled for Cursor cards" });
+        }
+        s.extensionUi?.cancelAll();
+        abortCurrentCursorTurn(s);
+        if (s.busy) {
+            try {
+                await s.runtime.session.abort();
+            }
+            catch (e) {
+                console.error(`[${cardId}] Cursor teardown abort failed:`, e.message);
+            }
+        }
+        await s.runtime.dispose();
+        if (registry.get(cardId) === s)
+            registry.delete(cardId);
+        for (const client of s.clients)
+            client.raw.end();
+        return { ok: true };
+    });
     // Serve web UI in production (when web-dist exists next to server)
     // Resolve web-dist relative to THIS script (not cwd — packaged apps launch from / or home).
     const webDist = join(dirname(fileURLToPath(import.meta.url)), "..", "web-dist");
     if (existsSync(join(webDist, "index.html"))) {
-        await app.register(fastifyStatic, { root: webDist });
+        // Parent monorepo may hoist a newer fastify than this package's pin;
+        // plugin generics then disagree across the two copies. Runtime is fine.
+        await app.register(fastifyStatic, {
+            root: webDist,
+        });
         app.setNotFoundHandler((req, reply) => {
             if (req.method === "GET") {
                 return reply.type("text/html").send(readFileSync(join(webDist, "index.html")));
@@ -1370,6 +2000,8 @@ export async function buildApp(deps = {}) {
             reply.code(404).send({ error: "not found" });
         });
     }
+    // Test hook: live session bridge for extension-ui route tests.
+    app.__testGetExtensionUi = (cardId) => registry.get(cardId)?.extensionUi;
     return app;
 }
 // One-time migration: Melon is isolated in ~/.melon/agent. On first run, if it's

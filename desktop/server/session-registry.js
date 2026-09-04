@@ -1,3 +1,26 @@
+export function isCursorSession(session) {
+    return (session.runtime.session.model?.provider ?? "").toLowerCase() === "cursor";
+}
+/** Claim a Cursor card synchronously before prompt() can yield. */
+export function beginCursorTurn(session) {
+    if (!isCursorSession(session))
+        return undefined;
+    const turnId = (session.cursorTurnId ?? 0) + 1;
+    session.cursorTurnId = turnId;
+    session.busy = true;
+    return turnId;
+}
+export function abortCurrentCursorTurn(session) {
+    if (isCursorSession(session) && session.cursorTurnId !== undefined) {
+        session.cursorAbortedTurnId = session.cursorTurnId;
+    }
+}
+export function isCursorTurnAborted(session, turnId) {
+    return session.cursorAbortedTurnId === turnId;
+}
+export function isCurrentCursorTurn(session, turnId) {
+    return session.cursorTurnId === turnId;
+}
 export class SessionRegistry {
     sessions = new Map();
     set(cardId, session) {
@@ -5,6 +28,9 @@ export class SessionRegistry {
     }
     get(cardId) {
         return this.sessions.get(cardId);
+    }
+    entries() {
+        return this.sessions.entries();
     }
     delete(cardId) {
         this.sessions.delete(cardId);
