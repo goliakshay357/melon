@@ -6,8 +6,9 @@
 //   POST /sessions                    {cardId, cwd}         → {sessionId, sessionFile, model}
 //   POST /sessions/resume             {cardId, sessionFile} → {sessionId, cwd, model}
 //   GET  /projects                                          → {projects: [{cwd, sessions[]}]}
-//   GET  /sessions/:cardId/events     SSE                   → delta | status | tool | error
+//   GET  /sessions/:cardId/events     SSE                   → delta | status | tool | error | extension_ui
 //   POST /sessions/:cardId/prompt     {text}                → {ok}
+//   POST /sessions/:cardId/extension-ui  {id, value|confirmed|cancelled}
 //   POST /sessions/:cardId/abort
 
 import { randomUUID } from "node:crypto";
@@ -43,6 +44,7 @@ import {
 	rewriteCursorError,
 } from "./cursor-extension.ts";
 import { activateCursorSessionBinding, stripCursorResumeEntriesFromSessionFile } from "./cursor-session-binding.ts";
+import { CardExtensionUiBridge } from "./extension-ui.ts";
 import { SessionRegistry } from "./session-registry.ts";
 import {
 	clearProviderDenylist,
@@ -55,6 +57,7 @@ import {
 import { deleteSkill, loadSkills, materializeSkills, readSkill, saveSkill } from "./skills.ts";
 import { isMutationTool, mutationDiffOutput, readFileSnapshot, resolveToolPath } from "./tool-diff.ts";
 import { lookupToolDiff, saveToolDiff } from "./tool-diff-store.ts";
+import { createWorktreeForCanvas, isMelonWorktreePath, removeWorktree } from "./worktree.ts";
 
 // Split "provider/model-id" on the FIRST slash only — model IDs may contain
 // slashes (e.g. OpenRouter "stealth/ox-alpha", "ai21/jamba-large-1.7").
@@ -131,6 +134,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					await s.runtime.session.prompt(next, { streamingBehavior: "followUp" });
 				} catch (e) {
 					console.error(`[${cardId}] queued prompt THREW ${(e as Error).stack}`);
+					s.extensionUi?.cancelAll();
 					registry.broadcast(cardId, { type: "error", message: rewriteCursorError((e as Error).message) });
 					registry.broadcast(cardId, { type: "status", status: "error" });
 					// Stop — surface the failure; remaining items stay queued so the
@@ -164,7 +168,11 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		"- NEVER claim the chat is text-only or that you cannot embed. When you produce an HTML artifact, the ```viz-file``` fence embeds it.",
 	].join("\n");
 
-	async function createRuntimeFor(sessionManager: any, enabledSkills: string[] = []): Promise<any> {
+	async function createRuntimeFor(
+		sessionManager: any,
+		enabledSkills: string[] = [],
+		cardId?: string,
+	): Promise<{ runtime: any; extensionUi?: CardExtensionUiBridge }> {
 		const factory: any = async ({
 			cwd,
 			sessionManager: sm,
@@ -208,20 +216,24 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			agentDir: getAgentDir(),
 			sessionManager,
 		});
-		// Bind extensions in "rpc" mode — Melon is an interactive GUI peer of the
-		// TUI/RPC frontends, not a one-shot print run. Extensions gate
-		// terminal-only behavior on ctx.mode; pi-cursor-sdk, for instance, only
-		// registers its native tool replay outside "print" mode. Without this,
-		// all Cursor tool activity (bash/read/write/...) renders as
-		// thinking-block traces instead of tool cards. This also emits
-		// session_start, which melon-server previously never delivered. Fail-open
-		// so a broken extension cannot take down card creation.
+		// Extension UI bridge: Melon is an interactive GUI peer of the TUI/RPC
+		// frontends. Bind in "rpc" mode with a real uiContext so ctx.hasUI is
+		// true and select/confirm/input reach the card question panel (Cursor
+		// ask_question, permission hooks, …). Fail-open so a broken extension
+		// cannot take down card creation.
+		const extensionUi =
+			cardId !== undefined
+				? new CardExtensionUiBridge(cardId, (payload) => registry.broadcast(cardId, payload))
+				: undefined;
 		try {
-			await runtime.session.bindExtensions({ mode: "rpc" });
+			await runtime.session.bindExtensions({
+				mode: "rpc",
+				...(extensionUi ? { uiContext: extensionUi.createUIContext() } : {}),
+			});
 		} catch (e) {
 			console.error("[melon] extension bind failed (continuing):", (e as Error)?.message ?? e);
 		}
-		return runtime;
+		return { runtime, extensionUi };
 	}
 
 	async function attachSession(
@@ -230,7 +242,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		explicitModel?: string,
 		skills: string[] = [],
 	): Promise<any> {
-		const runtime = await createRuntimeFor(sessionManager, skills);
+		registry.get(cardId)?.extensionUi?.cancelAll();
+		const { runtime, extensionUi } = await createRuntimeFor(sessionManager, skills, cardId);
 		try {
 			const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
 			const [provider, id] = splitModel(wanted);
@@ -244,7 +257,14 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			console.error("model switch failed:", (e as Error)?.message ?? e);
 		}
 		wireEvents(cardId, runtime);
-		registry.set(cardId, { runtime, clients: new Set(), busy: false, activeSkills: skills, promptQueue: [] });
+		registry.set(cardId, {
+			runtime,
+			clients: new Set(),
+			busy: false,
+			activeSkills: skills,
+			promptQueue: [],
+			extensionUi,
+		});
 		return runtime;
 	}
 
@@ -333,6 +353,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					// asked for a halt; remaining items stay queued (chips) and can
 					// be cancelled or resumed by sending again.
 					const stopReason = String((msgs[msgs.length - 1] as any)?.stopReason ?? "");
+					if (stopReason === "aborted" || stopReason === "error") entry?.extensionUi?.cancelAll();
 					if (stopReason !== "aborted") drainPromptQueue(cardId);
 				}
 				if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
@@ -432,6 +453,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 									args: snap.args,
 									before: snap.before,
 									fallbackText: output,
+									result: event.result,
 								});
 							}
 						} catch {
@@ -605,8 +627,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 
 		// Card not live (e.g. server restarted)? Re-open it from disk.
 		if (!s && body?.sessionFile) {
+			const { runtime } = await createRuntimeFor(SessionManager.open(body.sessionFile), [], parentCardId);
 			s = {
-				runtime: await createRuntimeFor(SessionManager.open(body.sessionFile)),
+				runtime,
 				clients: new Set(),
 				busy: false,
 				promptQueue: [],
@@ -724,7 +747,41 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { recent: recents.slice(0, 12) };
 	});
 
-	// Delete a canvas file.
+	// Allocate a git worktree for a canvas under <cwd>/.melon/worktrees/.
+	// 1code-style: Isolated by default; falls back to Local (projectRoot) on
+	// non-git folders or create failure.
+	app.post("/canvases/:id/worktree", async (req, reply) => {
+		const body = req.body as {
+			cwd?: string;
+			baseBranch?: string;
+			useWorktree?: boolean;
+		};
+		let dir: string;
+		try {
+			dir = assertCwd(body?.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const canvasId = (req.params as { id: string }).id;
+		if (!canvasId) return reply.code(400).send({ error: "canvas id required" });
+
+		const result = await createWorktreeForCanvas(dir, {
+			baseBranch: body?.baseBranch,
+			useWorktree: body?.useWorktree,
+		});
+		if (!result.success && result.mode === "local" && result.error) {
+			// Soft failure: still usable in Local mode (matches 1code fallback).
+			return {
+				ok: true,
+				canvasId,
+				...result,
+				fallback: true,
+			};
+		}
+		return { ok: true, canvasId, ...result };
+	});
+
+	// Delete a canvas file (and its melon worktree when present).
 	app.delete("/canvases/:id", async (req, reply) => {
 		const q = req.query as any;
 		let dir: string;
@@ -735,9 +792,40 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		}
 		const { rmSync } = await import("node:fs");
 		const file = join(canvasesDir(dir), `${(req.params as any).id}.json`);
+		let worktreePath: string | undefined;
+		let branch: string | undefined;
+		try {
+			const raw = JSON.parse(readFileSync(file, "utf8")) as {
+				worktreePath?: string;
+				branch?: string;
+			};
+			worktreePath = typeof raw.worktreePath === "string" ? raw.worktreePath : undefined;
+			branch = typeof raw.branch === "string" ? raw.branch : undefined;
+		} catch {
+			/* missing / corrupt — still try unlink */
+		}
+
+		const deleteWorktree = q.deleteWorktree !== "0" && q.deleteWorktree !== "false";
+		let worktreeRemoved = false;
+		if (deleteWorktree && worktreePath && isMelonWorktreePath(dir, worktreePath)) {
+			const removed = await removeWorktree(dir, worktreePath);
+			worktreeRemoved = removed.success;
+			// Best-effort: drop the dedicated branch if the worktree went away.
+			if (removed.success && branch) {
+				try {
+					const { execFile } = await import("node:child_process");
+					await new Promise<void>((resolve) => {
+						execFile("git", ["-C", dir, "branch", "-D", branch!], { timeout: 30_000 }, () => resolve());
+					});
+				} catch {
+					/* branch may be checked out elsewhere or already gone */
+				}
+			}
+		}
+
 		try {
 			rmSync(file);
-			return { ok: true };
+			return { ok: true, worktreeRemoved };
 		} catch {
 			return reply.code(404).send({ error: "canvas not found" });
 		}
@@ -1312,7 +1400,39 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		});
 		reply.raw.flushHeaders(); // send headers NOW — SSE has no body yet
 		s.clients.add(reply);
+		// Replay a blocking question if the client reconnects mid-dialog.
+		const pendingUi = s.extensionUi?.getPendingEvent();
+		if (pendingUi) reply.raw.write(`data: ${JSON.stringify(pendingUi)}\n\n`);
 		req.raw.on("close", () => s.clients.delete(reply));
+	});
+
+	// Answer (or cancel) a pending extension UI dialog for this card.
+	app.post("/sessions/:cardId/extension-ui", async (req, reply) => {
+		const cardId = (req.params as any).cardId as string;
+		const s = registry.get(cardId);
+		if (!s) return reply.code(404).send({ error: "unknown card" });
+		const body = (req.body ?? {}) as Record<string, unknown>;
+		const id = typeof body.id === "string" ? body.id : "";
+		if (!id) return reply.code(400).send({ error: "id required" });
+
+		let response:
+			| { id: string; value: string }
+			| { id: string; confirmed: boolean }
+			| { id: string; cancelled: true };
+		if (body.cancelled === true) {
+			response = { id, cancelled: true };
+		} else if (typeof body.confirmed === "boolean") {
+			response = { id, confirmed: body.confirmed };
+		} else if (typeof body.value === "string") {
+			response = { id, value: body.value };
+		} else {
+			return reply.code(400).send({ error: "value, confirmed, or cancelled required" });
+		}
+
+		if (!s.extensionUi?.respond(response)) {
+			return reply.code(409).send({ error: "no matching pending extension UI request" });
+		}
+		reply.send({ ok: true });
 	});
 
 	app.post("/sessions/:cardId/prompt", async (req, reply) => {
@@ -1345,6 +1465,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
 		} catch (e) {
 			console.error(`[${cardId}] prompt:THREW ${(e as Error).stack}`);
+			s.extensionUi?.cancelAll();
 			registry.broadcast(cardId, { type: "error", message: rewriteCursorError((e as Error).message) });
 			registry.broadcast(cardId, { type: "status", status: "error" });
 		} finally {
@@ -1400,6 +1521,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const s = registry.get((req.params as any).cardId);
 		if (!s) return reply.code(404).send({ error: "unknown card" });
 		registry.broadcast((req.params as any).cardId, { type: "raw", text: "⏹ stop requested (server)" });
+		// Unblock any open question panel immediately (don't wait for agent_end).
+		s.extensionUi?.cancelAll();
 		try {
 			await s.runtime.session.abort();
 			registry.broadcast((req.params as any).cardId, { type: "raw", text: "■ generation stopped" });
@@ -1421,6 +1544,11 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			reply.code(404).send({ error: "not found" });
 		});
 	}
+
+	// Test hook: live session bridge for extension-ui route tests.
+	(
+		app as FastifyInstance & { __testGetExtensionUi?: (cardId: string) => CardExtensionUiBridge | undefined }
+	).__testGetExtensionUi = (cardId: string) => registry.get(cardId)?.extensionUi;
 
 	return app;
 }

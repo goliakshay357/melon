@@ -7,6 +7,10 @@ export function TopBar() {
     const canvasName = useCanvasStore((s) => s.canvasName);
     const canvasId = useCanvasStore((s) => s.canvasId);
     const folder = useCanvasStore((s) => s.folder);
+    const worktreeMode = useCanvasStore((s) => s.worktreeMode);
+    const branch = useCanvasStore((s) => s.branch);
+    const baseBranch = useCanvasStore((s) => s.baseBranch);
+    const worktreePath = useCanvasStore((s) => s.worktreePath);
     const serverOffline = useCanvasStore((s) => s.serverOffline);
     const [renaming, setRenaming] = useState(false);
     const [draft, setDraft] = useState('');
@@ -19,6 +23,18 @@ export function TopBar() {
         if (!name || !folder || !canvasId || name === canvasName) return;
         useCanvasStore.getState().renameCanvas(folder, canvasId, name);
     };
+
+    const isolationTitle =
+        worktreeMode === 'isolated'
+            ? [
+                    'Isolated git worktree',
+                    branch ? `branch ${branch}` : null,
+                    baseBranch ? `based on ${baseBranch}` : null,
+                    worktreePath ?? null,
+                ]
+                    .filter(Boolean)
+                    .join(' · ')
+            : 'Local — agent edits the project folder directly';
 
     return (
         <div className="absolute left-1/2 top-3 z-10 flex -translate-x-1/2 items-center gap-2 rounded-xl border border-border bg-card/95 px-4 py-2 shadow-sm backdrop-blur">
@@ -48,6 +64,18 @@ export function TopBar() {
                     {canvasName || 'Untitled'}
                 </span>
             )}
+            <span
+                className={
+                    worktreeMode === 'isolated'
+                        ? 'rounded-md bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary'
+                        : 'rounded-md bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground'
+                }
+                title={isolationTitle}
+            >
+                {worktreeMode === 'isolated'
+                    ? `Isolated${branch ? ` · ${branch}` : ''}`
+                    : 'Local'}
+            </span>
             {serverOffline && (
                 <span className="animate-pulse rounded-md bg-danger/15 px-2 py-0.5 text-[10px] font-medium text-danger">
                   ⚠ reconnecting to server…

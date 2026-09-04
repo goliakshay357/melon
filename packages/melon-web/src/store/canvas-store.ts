@@ -1,6 +1,13 @@
 import { nanoid } from "nanoid";
 import { create } from "zustand";
-import { type ChatMessage, DEFAULT_CARD_SIZE, newCardId, type SessionCard, type ToolRun } from "@/types/session-card";
+import {
+	type ChatMessage,
+	DEFAULT_CARD_SIZE,
+	newCardId,
+	type PendingExtensionUi,
+	type SessionCard,
+	type ToolRun,
+} from "@/types/session-card";
 
 function cardWidth(c: SessionCard): number {
 	return c.size?.width ?? DEFAULT_CARD_SIZE.width;
@@ -27,6 +34,8 @@ const streams = new Map<
 		toolNames?: Map<string, string>;
 		/** User pressed stop — freeze the display, ignore further deltas. */
 		stopRequested?: boolean;
+		/** Throttle SSE glitch logs while a question stays open. */
+		lastPendingSseErrorLog?: number;
 	}
 >();
 const attached = new Set<string>(); // cardIds with an existing server-side session
@@ -39,6 +48,10 @@ interface WorkspaceSnapshot {
 	viewport?: { x: number; y: number; zoom: number };
 	name: string;
 	touchedAt: number;
+	worktreePath?: string | null;
+	branch?: string | null;
+	baseBranch?: string | null;
+	useWorktree?: boolean;
 }
 
 const WORKSPACE_LRU_MAX = 8;
@@ -129,13 +142,18 @@ function findCard(cardId: string): SessionCard | undefined {
 }
 
 function stashActiveWorkspace() {
-	const { canvasId, cards, viewport, canvasName, canvasActivity } = useCanvasStore.getState();
+	const { canvasId, cards, viewport, canvasName, canvasActivity, worktreePath, branch, baseBranch, useWorktree } =
+		useCanvasStore.getState();
 	if (!canvasId) return;
 	workspaces.set(canvasId, {
 		cards: cards.map((c) => ({ ...c })),
 		viewport,
 		name: canvasName,
 		touchedAt: Date.now(),
+		worktreePath,
+		branch,
+		baseBranch,
+		useWorktree,
 	});
 	reindexCanvasCards(canvasId, cards);
 	useCanvasStore.setState({
@@ -300,12 +318,17 @@ function pushLog(cardId: string, line: string) {
 type ScrollAction = "pan" | "zoom";
 
 /**
- * Live statuses (streaming/error) must never survive persistence or a dropped
- * SSE stream — the run they describe is gone, so the Stop button would be
- * stuck forever. Coerce back to idle before saving or restoring cards.
+ * Live statuses (streaming/error) and pendingExtensionUi must never survive
+ * persistence or a cold restore — the run/dialog ids die with the process, so
+ * a zombie Stop button or question panel would lie. Strip both before save/load.
  */
 function settleTransientStatuses(cards: SessionCard[]): SessionCard[] {
-	return cards.map((c) => (c.status === "idle" ? c : { ...c, status: "idle" }));
+	return cards.map((c) => {
+		const next = c.status === "idle" ? c : { ...c, status: "idle" as const };
+		if (!next.pendingExtensionUi) return next;
+		const { pendingExtensionUi: _drop, ...rest } = next;
+		return rest;
+	});
 }
 
 export interface CanvasMeta {
@@ -313,6 +336,9 @@ export interface CanvasMeta {
 	name: string;
 	modified?: string;
 }
+
+/** Agent isolation for a canvas (1code-style worktree). */
+export type CanvasWorktreeMode = "isolated" | "local";
 
 export type AppView = "canvas" | "skills" | "themes";
 
@@ -324,9 +350,19 @@ interface CanvasState {
 	/** Navbar collapse state — the settings page offsets by the navbar width. */
 	sidebarCollapsed: boolean;
 	setSidebarCollapsed: (v: boolean) => void;
-	folder: string | null; // real directory this canvas belongs to
+	folder: string | null; // project root this canvas belongs to (canvas JSON location)
 	canvasId: string | null;
 	canvasName: string;
+	/**
+	 * Agent cwd when Isolated. Same as `folder` when Local / unset.
+	 * Canvas JSON stays under `folder`/.melon/canvases/; checkout under
+	 * `folder`/.melon/worktrees/<name>/.
+	 */
+	worktreePath: string | null;
+	branch: string | null;
+	baseBranch: string | null;
+	useWorktree: boolean;
+	worktreeMode: CanvasWorktreeMode;
 	/** true once the initial restore from disk succeeded — autosave armed. */
 	hydrated: boolean;
 	serverOffline: boolean;
@@ -344,9 +380,11 @@ interface CanvasState {
 	renameCanvas: (cwd: string, canvasId: string, name: string) => Promise<void>;
 	openFolder: (folder: string) => Promise<void>;
 	switchCanvas: (id: string) => Promise<void>;
-	createCanvas: (name: string) => Promise<void>;
+	createCanvas: (name: string, opts?: { useWorktree?: boolean }) => Promise<void>;
 	/** Drop a canvas from the live cache (SSE, activity). Call when deleting. */
 	forgetCanvas: (id: string) => void;
+	/** Agent working directory for the active canvas (worktree or folder). */
+	agentCwd: () => string | null;
 	startConversation: (
 		text: string,
 		position: { x: number; y: number },
@@ -380,6 +418,11 @@ interface CanvasState {
 	dropQueued: (id: string, text: string) => Promise<"removed" | "consumed" | "dead" | "failed">;
 	/** Resync the local queue mirror from the server on card mount. */
 	syncQueued: (id: string) => Promise<void>;
+	/** Answer or cancel a pending extension UI dialog above the inbox. */
+	respondExtensionUi: (
+		id: string,
+		body: { id: string; value: string } | { id: string; confirmed: boolean } | { id: string; cancelled: true },
+	) => Promise<void>;
 	setSkills: (id: string, skills: string[]) => void;
 	abortCard: (id: string) => void;
 	addLinkedCard: (sourceId: string) => void;
@@ -421,11 +464,19 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	folder: loc.folder,
 	canvasId: loc.canvasId,
 	canvasName: "",
+	worktreePath: null,
+	branch: null,
+	baseBranch: null,
+	useWorktree: true,
+	worktreeMode: "local",
 	canvases: [],
 	canvasTreeRev: 0,
 	canvasActivity: {},
 	hydrated: false,
 	serverOffline: false,
+	agentCwd() {
+		return get().worktreePath ?? get().folder;
+	},
 	setViewport(v) {
 		set({ viewport: v });
 	},
@@ -527,7 +578,19 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	},
 
 	async saveCanvas() {
-		const { folder, canvasId, canvasName, cards, viewport, hydrated } = get();
+		const {
+			folder,
+			canvasId,
+			canvasName,
+			cards,
+			viewport,
+			hydrated,
+			worktreePath,
+			branch,
+			baseBranch,
+			useWorktree,
+			worktreeMode,
+		} = get();
 		if (!folder || !canvasId || !hydrated) return;
 		const cold = settleTransientStatuses(cards);
 		try {
@@ -546,6 +609,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					cwd: folder,
 					viewport,
 					cards: cold,
+					worktreePath: worktreePath ?? undefined,
+					branch: branch ?? undefined,
+					baseBranch: baseBranch ?? undefined,
+					useWorktree,
+					worktreeMode,
 				},
 			}),
 		}).catch(() => {});
@@ -567,20 +635,41 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			undoStack.length = 0;
 			redoStack.length = 0;
 
+			const applyWorktree = (cv: {
+				worktreePath?: string | null;
+				branch?: string | null;
+				baseBranch?: string | null;
+				useWorktree?: boolean;
+				worktreeMode?: CanvasWorktreeMode;
+			}) => {
+				const path = typeof cv.worktreePath === "string" ? cv.worktreePath : null;
+				const mode: CanvasWorktreeMode =
+					cv.worktreeMode === "isolated" || (path && path !== folder) ? "isolated" : "local";
+				return {
+					worktreePath: path,
+					branch: typeof cv.branch === "string" ? cv.branch : null,
+					baseBranch: typeof cv.baseBranch === "string" ? cv.baseBranch : null,
+					useWorktree: cv.useWorktree !== false,
+					worktreeMode: mode,
+				};
+			};
+
 			const cached = workspaces.get(id);
 			if (cached) {
+				const wt = applyWorktree(cached);
 				set({
 					cards: cached.cards,
 					canvasId: id,
 					canvasName: cached.name,
 					viewport: cached.viewport,
+					...wt,
 					canvasActivity: {
 						...get().canvasActivity,
 						[id]: activityOf(cached.cards),
 					},
 				});
 				reindexCanvasCards(id, cached.cards);
-				workspaces.set(id, { ...cached, touchedAt: Date.now() });
+				workspaces.set(id, { ...cached, ...wt, touchedAt: Date.now() });
 				localStorage.setItem("melon:lastCanvas", id);
 				return;
 			}
@@ -591,20 +680,20 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			const loaded = Array.isArray(cv.cards) ? (cv.cards as SessionCard[]) : [];
 			// Cold load: no live SSE for these cards yet. Keep any still-attached
 			// stream state if the card id somehow survived (should not after clear).
-			const cards = loaded.map((c) => {
-				if (streams.has(c.id)) return c;
-				return c.status === "idle" ? c : { ...c, status: "idle" as const };
-			});
+			// Strip zombie pendingExtensionUi — dialog ids are not durable.
+			const cards = loaded.map((c) => (streams.has(c.id) ? c : settleTransientStatuses([c])[0]!));
 			const name = cv.name ?? "Untitled";
 			const viewport = cv.viewport as CanvasState["viewport"];
+			const wt = applyWorktree(cv);
 			set({
 				cards,
 				canvasId: id,
 				canvasName: name,
 				viewport,
+				...wt,
 				canvasActivity: { ...get().canvasActivity, [id]: activityOf(cards) },
 			});
-			workspaces.set(id, { cards, viewport, name, touchedAt: Date.now() });
+			workspaces.set(id, { cards, viewport, name, touchedAt: Date.now(), ...wt });
 			reindexCanvasCards(id, cards);
 			localStorage.setItem("melon:lastCanvas", id);
 			evictIdleWorkspaces(id);
@@ -626,7 +715,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		});
 	},
 
-	async createCanvas(name) {
+	async createCanvas(name, opts) {
 		if (!get().folder) return;
 		if (get().canvasId) {
 			stashActiveWorkspace();
@@ -635,15 +724,70 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		undoStack.length = 0;
 		redoStack.length = 0;
 		const id = `cv_${nanoid(8)}`;
+		const folder = get().folder!;
+		const useWorktree = opts?.useWorktree !== false;
 		set({
 			canvasId: id,
 			canvasName: name || "Untitled",
 			cards: [],
+			worktreePath: null,
+			branch: null,
+			baseBranch: null,
+			useWorktree,
+			worktreeMode: "local",
 			canvasActivity: { ...get().canvasActivity, [id]: "idle" },
 		});
-		workspaces.set(id, { cards: [], name: name || "Untitled", touchedAt: Date.now() });
+		workspaces.set(id, {
+			cards: [],
+			name: name || "Untitled",
+			touchedAt: Date.now(),
+			useWorktree,
+			worktreePath: null,
+			branch: null,
+			baseBranch: null,
+		});
 		localStorage.setItem("melon:lastCanvas", id);
 		await get().saveCanvas();
+
+		// 1code-style: allocate Isolated checkout under <folder>/.melon/worktrees/.
+		try {
+			const wtRes = await fetch(`/canvases/${id}/worktree`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ cwd: folder, useWorktree }),
+			});
+			if (wtRes.ok) {
+				const body = (await wtRes.json()) as {
+					worktreePath?: string;
+					branch?: string;
+					baseBranch?: string;
+					mode?: CanvasWorktreeMode;
+				};
+				const path = typeof body.worktreePath === "string" ? body.worktreePath : folder;
+				const mode: CanvasWorktreeMode = body.mode === "isolated" ? "isolated" : "local";
+				set({
+					worktreePath: mode === "isolated" ? path : folder,
+					branch: typeof body.branch === "string" ? body.branch : null,
+					baseBranch: typeof body.baseBranch === "string" ? body.baseBranch : null,
+					useWorktree,
+					worktreeMode: mode,
+				});
+				const cached = workspaces.get(id);
+				if (cached) {
+					workspaces.set(id, {
+						...cached,
+						worktreePath: get().worktreePath,
+						branch: get().branch,
+						baseBranch: get().baseBranch,
+						useWorktree,
+					});
+				}
+				await get().saveCanvas();
+			}
+		} catch {
+			/* Local fallback — agent still runs in folder */
+		}
+
 		// refresh list
 		const res = await fetch(`/canvases?cwd=${encodeURIComponent(get().folder ?? "")}`).catch(() => null);
 		if (res?.ok) set({ canvases: (await res.json()).canvases ?? [] });
@@ -669,7 +813,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				permission: options.permission,
 			});
 			get().setModel(cardId, options.model);
-			const sent = await get().sendMessage(cardId, prompt, { cwd: folder });
+			const sent = await get().sendMessage(cardId, prompt, { cwd: get().agentCwd() ?? folder });
 			if (!sent) get().updateCard(cardId, { pendingDraft: prompt });
 			return sent;
 		} finally {
@@ -688,6 +832,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			cards: [],
 			canvasId: null,
 			canvasName: "",
+			worktreePath: null,
+			branch: null,
+			baseBranch: null,
+			useWorktree: true,
+			worktreeMode: "local",
 			canvasActivity: {},
 		});
 		localStorage.setItem("melon:lastFolder", rawFolder);
@@ -826,6 +975,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const st = streams.get(id);
 		if (st) st.stopRequested = true;
 		pushLog(id, "⏹ stop requested — pausing output");
+		get().updateCard(id, { pendingExtensionUi: undefined });
 		fetch(`/sessions/${id}/abort`, { method: "POST" }).catch(() => {});
 	},
 
@@ -911,6 +1061,30 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		if (!res.ok) return;
 		const d = (await res.json()) as { followUp?: string[] };
 		get().updateCard(id, { queue: d.followUp ?? [] });
+	},
+
+	async respondExtensionUi(id, body) {
+		const snapshot = findCard(id)?.pendingExtensionUi;
+		// Clear while in-flight (panel sending flag + this) to avoid double-submit.
+		// Restore on failure so a network/409 blip cannot leave the agent hung
+		// with no UI.
+		get().updateCard(id, { pendingExtensionUi: undefined });
+		pushLog(
+			id,
+			`[extension-ui] respond ${"cancelled" in body && body.cancelled ? "cancelled" : "confirmed" in body ? `confirmed=${body.confirmed}` : `value=${String((body as { value: string }).value).slice(0, 80)}`}`,
+		);
+		const res = await fetch(`/sessions/${id}/extension-ui`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		}).catch(() => null);
+		if (res?.ok) return;
+		pushLog(id, `[extension-ui] respond failed HTTP ${res?.status ?? "?"} — restoring panel`);
+		const cur = findCard(id);
+		// Only restore if nothing newer replaced it (SSE clear / new dialog).
+		if (snapshot && !cur?.pendingExtensionUi) {
+			get().updateCard(id, { pendingExtensionUi: snapshot });
+		}
 	},
 
 	// One path for model changes — keeps UI and backend in sync always.
@@ -1095,7 +1269,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const card = findCard(cardId);
 		if (!card || !text.trim()) return false;
 		const sessionFile = opts?.sessionFile ?? card.sessionFile;
-		const cwd = opts?.cwd ?? get().folder;
+		const cwd = opts?.cwd ?? get().agentCwd() ?? get().folder;
 		if (!sessionFile && !cwd) {
 			get().setCardError(cardId, "Choose a folder before starting a session.");
 			return false;
@@ -1207,7 +1381,18 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					| { type: "error"; message: string }
 					| { type: "context_usage"; tokens: number | null; contextWindow: number; percent: number | null }
 					| { type: "queue"; followUp: string[] }
-					| { type: "user_message"; text: string };
+					| { type: "user_message"; text: string }
+					| {
+							type: "extension_ui";
+							id: string;
+							method: "select" | "confirm" | "input" | "notify";
+							title?: string;
+							options?: string[];
+							message?: string;
+							placeholder?: string;
+							notifyType?: string;
+					  }
+					| { type: "extension_ui_clear"; id?: string };
 
 				// Batched mutation of the newest assistant message (~8fps, anti-flicker).
 				// Pending state lives on the STREAM (not this per-frame closure) so it
@@ -1379,6 +1564,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						pushEvent(cardId, { kind: "system", name: "error", detail: readable });
 						pushLog(cardId, `✗ ${readable}`);
 						get().setCardError(cardId, readable);
+						// Failed turn — clear any open question (server also cancelAlls).
+						useCanvasStore.getState().updateCard(cardId, { pendingExtensionUi: undefined });
 					}
 				} else if (data.type === "thinking") {
 					if (!st!.thinkingEventId) {
@@ -1479,6 +1666,37 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 							percent: data.percent,
 						},
 					});
+				} else if ((data as { type: string }).type === "extension_ui") {
+					const ui = data as {
+						id: string;
+						method: string;
+						title?: string;
+						options?: string[];
+						message?: string;
+						placeholder?: string;
+						notifyType?: string;
+					};
+					if (ui.method === "notify") {
+						pushLog(cardId, `• ${ui.message ?? ""}`);
+						return;
+					}
+					if (ui.method !== "select" && ui.method !== "confirm" && ui.method !== "input") return;
+					const pending: PendingExtensionUi = {
+						id: ui.id,
+						method: ui.method,
+						title: ui.title ?? "",
+						...(ui.options ? { options: ui.options } : {}),
+						...(ui.message ? { message: ui.message } : {}),
+						...(ui.placeholder ? { placeholder: ui.placeholder } : {}),
+					};
+					pushLog(cardId, `[extension-ui] ${ui.method}: ${pending.title.slice(0, 80)}`);
+					useCanvasStore.getState().updateCard(cardId, { pendingExtensionUi: pending });
+				} else if ((data as { type: string }).type === "extension_ui_clear") {
+					const clear = data as { id?: string };
+					const cur = findCard(cardId);
+					if (!cur?.pendingExtensionUi) return;
+					if (clear.id && cur.pendingExtensionUi.id !== clear.id) return;
+					useCanvasStore.getState().updateCard(cardId, { pendingExtensionUi: undefined });
 				} else if ((data as { type: string }).type === "error") {
 					const msg = (data as { message?: string }).message;
 					pushLog(cardId, `✗ agent error: ${msg ?? "unknown"}`);
@@ -1486,7 +1704,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					get().setCardError(cardId, msg ?? "agent error");
 					const cur = findCard(cardId);
 					const queuedBack = cur?.queue ?? [];
-					useCanvasStore.getState().updateCard(cardId, { status: "error", queue: [] });
+					// Turn is dead — drop any question panel so we don't look open while the agent is gone.
+					useCanvasStore.getState().updateCard(cardId, {
+						status: "error",
+						queue: [],
+						pendingExtensionUi: undefined,
+					});
 					if (queuedBack.length) {
 						// The server queue holds these too — clear it or they would
 						// execute as zombies on the next prompt. Server list wins.
@@ -1498,6 +1721,21 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				}
 			};
 			es.onerror = () => {
+				const cur = findCard(cardId);
+				// Mid-question: keep the EventSource so the browser auto-reconnects
+				// and the server can replay the dialog. Do NOT pretend idle (Stop
+				// would vanish while the agent is still blocked on the answer).
+				if (cur?.pendingExtensionUi) {
+					if (cur.status !== "streaming") {
+						useCanvasStore.getState().updateCard(cardId, { status: "streaming" });
+					}
+					const now = Date.now();
+					if (!st!.lastPendingSseErrorLog || now - st!.lastPendingSseErrorLog > 5000) {
+						st!.lastPendingSseErrorLog = now;
+						pushLog(cardId, "✗ SSE glitch — keeping question open (auto-reconnect)");
+					}
+					return;
+				}
 				pushLog(cardId, "✗ SSE dropped — will re-attach on next message");
 				st!.es.close();
 				streams.delete(cardId);
@@ -1505,7 +1743,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				// The run's outcome is now unknowable — release the Stop button
 				// instead of leaving the card stuck on streaming forever. Queued
 				// text never reached the transcript — hand it back (server wins).
-				const cur = findCard(cardId);
 				const queuedBack = cur?.queue ?? [];
 				useCanvasStore.getState().updateCard(cardId, { status: "idle", queue: [] });
 				if (queuedBack.length) {

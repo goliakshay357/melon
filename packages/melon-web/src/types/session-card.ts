@@ -43,6 +43,18 @@ export interface ChatMessage {
  * id / position / lineage. `forkedFromEntryId` is melon-owned because
  * pi's session header records parentSession but NOT the fork-point entry.
  */
+export type ExtensionUiDialogMethod = "select" | "confirm" | "input";
+
+/** Pending extension UI dialog (from Melon SSE `extension_ui`). */
+export interface PendingExtensionUi {
+	id: string;
+	method: ExtensionUiDialogMethod;
+	title: string;
+	options?: string[];
+	message?: string;
+	placeholder?: string;
+}
+
 export interface SessionCard {
 	id: string;
 	/** chat = AI conversation · document = Notion-like markdown editor */
@@ -83,6 +95,8 @@ export interface SessionCard {
 	queue?: string[];
 	/** Restored into the card composer when the first prompt fails to send. */
 	pendingDraft?: string;
+	/** Blocking extension UI (select/confirm/input) above the inbox. */
+	pendingExtensionUi?: PendingExtensionUi;
 	/** Full trajectory trace — meta + every lifecycle event (for debugging). */
 	sessionId?: string;
 	events?: TraceEvent[];

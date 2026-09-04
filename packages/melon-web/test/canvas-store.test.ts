@@ -437,3 +437,104 @@ it("never starts a new session without an explicit folder", async () => {
 	expect(useCanvasStore.getState().cards).toHaveLength(0);
 	expect(fetchCalls.some((call) => call.endsWith("/sessions"))).toBe(false);
 });
+
+it("restores the question panel when extension-ui respond fails", async () => {
+	useCanvasStore.getState().addCard({ x: 0, y: 0 });
+	const cardId = useCanvasStore.getState().cards[0].id;
+	const pending = {
+		id: "ui-1",
+		method: "select" as const,
+		title: "Pick",
+		options: ["a", "b"],
+	};
+	useCanvasStore.getState().updateCard(cardId, { pendingExtensionUi: pending });
+
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async () => ({ ok: false, status: 409, json: async () => ({ error: "no matching" }) }) as Response),
+	);
+
+	await useCanvasStore.getState().respondExtensionUi(cardId, { id: "ui-1", value: "a" });
+
+	expect(useCanvasStore.getState().cards[0].pendingExtensionUi).toEqual(pending);
+});
+
+it("clears the question panel on SSE error frames", async () => {
+	useCanvasStore.getState().addCard({ x: 0, y: 0 });
+	const cardId = useCanvasStore.getState().cards[0].id;
+
+	const sent = await useCanvasStore.getState().sendMessage(cardId, "ask me");
+	expect(sent).toBe(true);
+	const es = FakeEventSource.latest!;
+	es.emit({
+		type: "extension_ui",
+		id: "ui-err",
+		method: "select",
+		title: "Choose",
+		options: ["x"],
+	});
+	expect(useCanvasStore.getState().cards[0].pendingExtensionUi?.id).toBe("ui-err");
+
+	es.emit({ type: "error", message: "boom" });
+	expect(useCanvasStore.getState().cards[0].pendingExtensionUi).toBeUndefined();
+	expect(useCanvasStore.getState().cards[0].status).toBe("error");
+});
+
+it("keeps question open and status streaming on SSE drop mid-dialog", async () => {
+	useCanvasStore.getState().addCard({ x: 0, y: 0 });
+	const cardId = useCanvasStore.getState().cards[0].id;
+
+	await useCanvasStore.getState().sendMessage(cardId, "ask me");
+	const es = FakeEventSource.latest!;
+	es.emit({
+		type: "extension_ui",
+		id: "ui-hold",
+		method: "confirm",
+		title: "Sure?",
+		message: "Really?",
+	});
+	useCanvasStore.getState().updateCard(cardId, { status: "streaming" });
+
+	es.onerror?.();
+
+	const card = useCanvasStore.getState().cards[0];
+	expect(card.pendingExtensionUi?.id).toBe("ui-hold");
+	expect(card.status).toBe("streaming");
+	// EventSource must stay open so the browser can auto-reconnect + replay.
+	expect(FakeEventSource.latest).toBe(es);
+});
+
+it("strips pendingExtensionUi when saving canvas", async () => {
+	useCanvasStore.setState({
+		folder: "/tmp",
+		canvasId: "cv_save",
+		canvasName: "Save me",
+		hydrated: true,
+	});
+	useCanvasStore.getState().addCard({ x: 0, y: 0 });
+	const cardId = useCanvasStore.getState().cards[0].id;
+	useCanvasStore.getState().updateCard(cardId, {
+		status: "streaming",
+		pendingExtensionUi: { id: "z", method: "input", title: "Name" },
+	});
+
+	let savedCards: SessionCard[] | undefined;
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (url: string, init?: RequestInit) => {
+			if (typeof url === "string" && url.startsWith("/canvases/") && init?.method === "PUT") {
+				const body = JSON.parse(String(init.body)) as { canvas: { cards: SessionCard[] } };
+				savedCards = body.canvas.cards;
+			}
+			return { ok: true, status: 200, json: async () => ({}) } as Response;
+		}),
+	);
+
+	await useCanvasStore.getState().saveCanvas();
+
+	expect(savedCards).toBeDefined();
+	expect(savedCards![0].status).toBe("idle");
+	expect(savedCards![0].pendingExtensionUi).toBeUndefined();
+	// In-memory card still has the live dialog.
+	expect(useCanvasStore.getState().cards[0].pendingExtensionUi?.id).toBe("z");
+});

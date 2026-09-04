@@ -31,17 +31,17 @@ export type ToolRunView = {
 type ToolKind = "bash" | "read" | "write" | "edit" | "ls" | "find" | "grep" | "other";
 
 function normalizeName(name: string): string {
-	return name.trim().toLowerCase();
+	return name.trim().toLowerCase().replace(/[\s_-]+/g, "");
 }
 
 function kindOf(name: string): ToolKind {
 	const n = normalizeName(name);
-	if (n === "bash" || n === "shell" || n === "run_terminal_cmd") return "bash";
-	if (n === "read" || n === "read_file") return "read";
-	if (n === "write" || n === "write_file") return "write";
-	if (n === "edit" || n === "str_replace" || n === "search_replace") return "edit";
-	if (n === "ls" || n === "list_dir") return "ls";
-	if (n === "find" || n === "glob" || n === "glob_file_search") return "find";
+	if (n === "bash" || n === "shell" || n === "runterminalcmd") return "bash";
+	if (n === "read" || n === "readfile") return "read";
+	if (n === "write" || n === "writefile") return "write";
+	if (n === "edit" || n === "strreplace" || n === "searchreplace") return "edit";
+	if (n === "ls" || n === "listdir") return "ls";
+	if (n === "find" || n === "glob" || n === "globfilesearch") return "find";
 	if (n === "grep" || n === "rg" || n === "search") return "grep";
 	return "other";
 }
@@ -481,7 +481,7 @@ function headerDetail(kind: ToolKind, args: Record<string, unknown> | null, rawA
 			return cmd ? `$ ${cmd}` : undefined;
 		}
 		case "read": {
-			const path = strArg(args, "path", "file_path", "file");
+			const path = strArg(args, "path", "file_path", "file", "filePath");
 			if (!path) return undefined;
 			const offset = args?.offset;
 			const limit = args?.limit;
@@ -494,7 +494,7 @@ function headerDetail(kind: ToolKind, args: Record<string, unknown> | null, rawA
 		}
 		case "write":
 		case "edit":
-			return strArg(args, "path", "file_path", "file");
+			return strArg(args, "path", "file_path", "file", "filePath");
 		case "ls":
 			return strArg(args, "path", "dir", "directory") ?? ".";
 		case "find": {
@@ -635,7 +635,7 @@ export function ToolRunBlock({ cardId, run }: { cardId: string; run: ToolRunView
 	);
 	const exit = useMemo(() => inferExitCode(run.output, run.status), [run.output, run.status]);
 	const meta = statusMeta(kind, run, exit);
-	const filePath = strArg(args, "path", "file_path", "file");
+	const filePath = strArg(args, "path", "file_path", "file", "filePath");
 
 	useEffect(() => {
 		if (prevStatus.current === "running" && run.status !== "running" && autoControlled.current) {

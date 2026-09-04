@@ -1,4 +1,5 @@
 import type { FastifyReply } from "fastify";
+import type { CardExtensionUiBridge } from "./extension-ui.ts";
 
 export interface AttachedSession {
 	runtime: any; // AgentSessionRuntime — typed loosely: internals shift across pi versions
@@ -16,6 +17,8 @@ export interface AttachedSession {
 	promptQueue: string[];
 	/** Guards the drain loop against re-entrant agent_end triggers. */
 	draining?: boolean;
+	/** Extension UI (select/confirm/input) → Melon card question panel. */
+	extensionUi?: CardExtensionUiBridge;
 }
 
 export class SessionRegistry {

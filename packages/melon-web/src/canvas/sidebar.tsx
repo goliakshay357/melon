@@ -133,14 +133,22 @@ export function Sidebar() {
         if (!(await confirmAction({
             title: 'Delete this canvas?',
             description:
-                'The card layout will be removed. Pi sessions remain on disk and can be reopened later.',
+                'The card layout will be removed. If this canvas had an Isolated worktree under .melon/worktrees/, that checkout and its branch will also be deleted. Pi session transcripts remain on disk.',
             confirmLabel: 'Delete',
         })))
             return;
         forgetCanvas(id);
         if (canvasId === id && folder === cwd) {
             localStorage.removeItem('melon:lastCanvas');
-            useCanvasStore.setState({ cards: [], canvasId: null, canvasName: '' });
+            useCanvasStore.setState({
+                cards: [],
+                canvasId: null,
+                canvasName: '',
+                worktreePath: null,
+                branch: null,
+                baseBranch: null,
+                worktreeMode: 'local',
+            });
         }
         await fetch(`/canvases/${id}?cwd=${encodeURIComponent(cwd)}`, {
             method: 'DELETE',

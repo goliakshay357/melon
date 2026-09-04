@@ -12,6 +12,7 @@ import { Bug, ChevronDown, Copy, Minimize2, Pencil, Plus, X } from 'lucide-react
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { PromptComposer } from '@/components/prompt-composer';
+import { QuestionPanel } from '@/components/question-panel';
 import { ToolRunBlock } from '@/components/tool-run-block';
 import { DEFAULT_CARD_SIZE, type TraceEvent } from '@/types/session-card';
 import { cn } from '@/lib/utils';
@@ -104,9 +105,7 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
                     }}
                 />
             ))}
-            {isStreamingTail ? (
-                <StreamText content={m.text} />
-            ) : m.text.trim() ? (
+            {(isStreamingTail ? m.text.length > 0 : m.text.trim()) ? (
                 <div className="rounded-lg bg-secondary/40 px-3 py-2">
                     <MarkdownBlock content={m.text} />
                 </div>
@@ -182,13 +181,6 @@ function ActivityLine() {
             <Spinner />
             <span className="shimmer-text text-xs font-medium">{ACTIVITY_PHRASES[idx]}</span>
         </div>
-    );
-}
-
-/** Streaming tail — plain text, zero markdown parsing mid-flight. */
-function StreamText({ content }: { content: string }) {
-    return (
-        <div className="whitespace-pre-wrap break-words text-xs leading-relaxed">{content}</div>
     );
 }
 
@@ -724,7 +716,18 @@ function ChatCardNodeInner({
     // component here caused React to remount every message on each render,
     // reloading viz iframes and making the chat bounce).
 
-    const messagesBody = (scrollTo: React.RefObject<HTMLDivElement>) => (
+    const messagesBody = (scrollTo: React.RefObject<HTMLDivElement>) => {
+        const last = card.messages[card.messages.length - 1];
+        // One load line only. Keep the old "waiting after your message" case,
+        // and also show while the assistant turn is live but still has no
+        // answer text (thinking / tools / quiet gaps). Hide once answer
+        // tokens start — the answer markdown is the feedback then.
+        const showActivityLine =
+            card.status === 'streaming' &&
+            (card.messages.length === 0 ||
+                last?.role === 'user' ||
+                (last?.role === 'assistant' && !(last.text?.trim())));
+        return (
         <div className="relative min-h-0 min-w-0 flex-1">
             <div
                 ref={scrollTo}
@@ -746,9 +749,7 @@ function ChatCardNodeInner({
                         totalMessages={card.messages.length}
                     />
                 ))}
-                {card.status === 'streaming' &&
-                    (card.messages.length === 0 ||
-                        card.messages[card.messages.length - 1]?.role === 'user') && <ActivityLine />}
+                {showActivityLine && <ActivityLine />}
             </div>
             {showDown && (
                 <button
@@ -763,10 +764,19 @@ function ChatCardNodeInner({
                 </button>
             )}
         </div>
-    );
+        );
+    };
 
     const footerInput = (
         <div className={cn('shrink-0 border-t border-border p-2', maximized && 'px-4')}>
+            {card.pendingExtensionUi && (
+                <QuestionPanel
+                    pending={card.pendingExtensionUi}
+                    onRespond={(body) => {
+                        void useCanvasStore.getState().respondExtensionUi(id, body);
+                    }}
+                />
+            )}
             {(card.queue?.length ?? 0) > 0 && (
                 <div className="mb-1.5 space-y-1">
                     {card.queue!.map((q, i) => (

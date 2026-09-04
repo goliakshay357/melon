@@ -1,3 +1,7 @@
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildApp, readAppVersion } from "../src/index.ts";
 
@@ -86,6 +90,33 @@ describe("melon-server routes", () => {
 		expect(body.sessionFile).toMatch(/\.jsonl$/);
 		expect(body.model).toContain("/");
 		await app.close();
+	});
+
+	it("POST /canvases/:id/worktree creates under .melon/worktrees", async () => {
+		const dir = mkdtempSync(join(tmpdir(), "melon-api-wt-"));
+		try {
+			execFileSync("git", ["init", "-b", "main"], { cwd: dir });
+			execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: dir });
+			execFileSync("git", ["config", "user.name", "Test"], { cwd: dir });
+			writeFileSync(join(dir, "README.md"), "# t\n");
+			execFileSync("git", ["add", "."], { cwd: dir });
+			execFileSync("git", ["commit", "-m", "init"], { cwd: dir });
+
+			const app = await buildApp();
+			const res = await app.inject({
+				method: "POST",
+				url: "/canvases/cv_test1/worktree",
+				payload: { cwd: dir },
+			});
+			expect(res.statusCode).toBe(200);
+			const body = res.json();
+			expect(body.ok).toBe(true);
+			expect(body.mode).toBe("isolated");
+			expect(String(body.worktreePath)).toContain(join(".melon", "worktrees"));
+			await app.close();
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
+		}
 	});
 });
 
