@@ -3,7 +3,14 @@ import defaultTheme from 'tailwindcss/defaultTheme';
 /** @type {import('tailwindcss').Config} */
 export default {
     darkMode: ['class'],
-    content: ['./index.html', './src/**/*.{js,ts,jsx,tsx}'],
+    // Streamdown ships class names inside its dist bundle; scan them so
+    // code-block / mermaid toolbars get real utilities (sticky, -mt-10, …).
+    content: [
+        './index.html',
+        './src/**/*.{js,ts,jsx,tsx}',
+        // Hoisted to the monorepo root (packages/melon-web has no local copy).
+        '../../node_modules/streamdown/dist/**/*.{js,mjs}',
+    ],
     theme: {
         extend: {
             fontFamily: {
@@ -20,6 +27,11 @@ export default {
                 muted: { DEFAULT: 'hsl(var(--muted))', foreground: 'hsl(var(--muted-foreground))' },
                 accent: { DEFAULT: 'hsl(var(--accent))', foreground: 'hsl(var(--accent-foreground))' },
                 card: { DEFAULT: 'hsl(var(--card))', foreground: 'hsl(var(--card-foreground))' },
+                // Streamdown code chrome uses bg-sidebar / border-sidebar.
+                sidebar: {
+                    DEFAULT: 'hsl(var(--secondary))',
+                    foreground: 'hsl(var(--secondary-foreground))',
+                },
                 success: 'hsl(var(--success))',
                 warning: 'hsl(var(--warning))',
                 danger: { DEFAULT: 'hsl(var(--danger))', foreground: 'hsl(var(--background))' },
