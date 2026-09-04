@@ -107,7 +107,7 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
             ))}
             {(isStreamingTail ? m.text.length > 0 : m.text.trim()) ? (
                 <div className="rounded-lg bg-secondary/40 px-3 py-2">
-                    <MarkdownBlock content={m.text} />
+                    <MarkdownBlock content={m.text} streaming={isStreamingTail} />
                 </div>
             ) : null}
         </div>

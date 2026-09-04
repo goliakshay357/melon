@@ -1,71 +1,66 @@
-import ReactMarkdown from 'react-markdown';
-import { memo } from 'react';
-import { IframeViz } from './iframe-viz';
-import remarkGfm from 'remark-gfm';
+import { memo } from "react";
+import { Streamdown, type CustomRendererProps } from "streamdown";
+import { IframeViz } from "./iframe-viz";
 
 /**
- * An assistant message = a stack of blocks.
- * ```viz-html fences carry inline HTML; ```viz-file fences reference an
- * HTML file on disk (written by a tool/skill like archify) — the iframe
- * fetches it from the server instead of inlining 100s of KB into chat.
+ * Assistant message markdown via streamdown (incomplete-syntax aware while
+ * streaming). ```viz-html / ```viz-file fences still become Melon iframes —
+ * mounted only after the fence closes so half-streamed HTML does not thrash.
  */
 
-type Part =
-    | { kind: 'markdown'; content: string }
-    | { kind: 'viz-html'; content: string }
-    | { kind: 'viz-file'; path: string; cwd?: string };
-
-function splitBlocks(raw: string): Part[] {
-    const parts: Part[] = [];
-    const re = /```viz-html\s*\n([\s\S]*?)```/g;
-    const reFile = /```viz-file\s*\n([^\n`]+)\n```/g;
-    // Collect matches from both fence types, then emit in document order.
-    type M = { index: number; end: number; part: Part };
-    const ms: M[] = [];
-    for (const m of raw.matchAll(re)) {
-        ms.push({ index: m.index, end: m.index + m[0].length, part: { kind: 'viz-html', content: m[1] } });
-    }
-    for (const m of raw.matchAll(reFile)) {
-        // fence body = absolute path to the HTML file (optional "| cwd" suffix)
-        let [path, cwd] = m[1].split('|').map((s) => s.trim());
-        ms.push({ index: m.index, end: m.index + m[0].length, part: { kind: 'viz-file', path, cwd } });
-    }
-    ms.sort((a, b) => a.index - b.index);
-    let last = 0;
-    for (const m of ms) {
-        const before = raw.slice(last, m.index);
-        if (before.trim()) parts.push({ kind: 'markdown', content: before });
-        parts.push(m.part);
-        last = m.end;
-    }
-    const rest = raw.slice(last);
-    if (rest.trim()) parts.push({ kind: 'markdown', content: rest });
-    return parts.length > 0 ? parts : [{ kind: 'markdown', content: raw }];
+function VizPlaceholder({ label }: { label: string }) {
+	return (
+		<div className="my-2 flex h-24 items-center justify-center rounded-md border border-border bg-secondary/50 text-[11px] text-muted-foreground">
+			{label}
+		</div>
+	);
 }
 
-export const MarkdownBlock = memo(function MarkdownBlock({ content }: { content: string }) {
-    return (
-        <div className="md-body">
-            {splitBlocks(content).map((part, i) =>
-                part.kind === 'viz-html' ? (
-                    <IframeViz key={i} code={part.content} />
-                ) : part.kind === 'viz-file' ? (
-                    <IframeViz key={i} path={part.path} cwd={part.cwd} />
-                ) : (
-                    <ReactMarkdown
-                        key={i}
-                        remarkPlugins={[remarkGfm]}
-                        components={{
-                            // Links open in the OS default browser, never inside the app.
-                            a: ({ node: _node, ...props }) => (
-                                <a target="_blank" rel="noopener noreferrer" {...props} />
-                            ),
-                        }}
-                    >
-                        {part.content}
-                    </ReactMarkdown>
-                ),
-            )}
-        </div>
-    );
+function VizHtmlRenderer({ code, isIncomplete }: CustomRendererProps) {
+	if (isIncomplete) return <VizPlaceholder label="Loading visualization…" />;
+	return <IframeViz code={code} />;
+}
+
+function VizFileRenderer({ code, isIncomplete }: CustomRendererProps) {
+	if (isIncomplete) return <VizPlaceholder label="Loading visualization…" />;
+	const [path, cwd] = code
+		.trim()
+		.split("|")
+		.map((s) => s.trim());
+	if (!path) return <VizPlaceholder label="Missing viz file path" />;
+	return <IframeViz path={path} cwd={cwd || undefined} />;
+}
+
+const VIZ_RENDERERS = [
+	{ language: "viz-html", component: VizHtmlRenderer },
+	{ language: "viz-file", component: VizFileRenderer },
+];
+
+export const MarkdownBlock = memo(function MarkdownBlock({
+	content,
+	streaming = false,
+}: {
+	content: string;
+	/** True while this message is the live streaming tail. */
+	streaming?: boolean;
+}) {
+	return (
+		<div className="md-body">
+			<Streamdown
+				isAnimating={streaming}
+				parseIncompleteMarkdown
+				components={{
+					// Links open in the OS default browser, never inside the app.
+					a: ({ href, children, ...props }) => (
+						<a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+							{children}
+						</a>
+					),
+				}}
+				plugins={{ renderers: VIZ_RENDERERS }}
+			>
+				{content}
+			</Streamdown>
+		</div>
+	);
 });

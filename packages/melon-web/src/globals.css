@@ -80,6 +80,12 @@
 .md-body strong { font-weight: 600; }
 .md-body img { max-width: 100%; }
 
+/* Streamdown animation helpers only; keep Melon .md-body density for prose. */
+.md-body [data-sd-animate] {
+    font-size: inherit;
+    line-height: inherit;
+}
+
 /* Mind-map edges: subtle, no glow on selection */
 .react-flow__edge path {
     stroke-width: 2;

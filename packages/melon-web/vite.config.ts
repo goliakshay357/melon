@@ -23,6 +23,10 @@ export default defineConfig({
     },
     base: './',
     plugins: [react()],
+    optimizeDeps: {
+        // New deps mid-session otherwise 504 "Outdated Optimize Dep" until restart.
+        include: ['streamdown'],
+    },
     resolve: {
         alias: {
             '@': path.resolve(__dirname, './src'),
