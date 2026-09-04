@@ -51,8 +51,14 @@ interface QuestionnaireResult {
 // Schema
 const QuestionOptionSchema = Type.Object({
 	value: Type.String({ description: "The value returned when selected" }),
-	label: Type.String({ description: "Display label for the option" }),
-	description: Type.Optional(Type.String({ description: "Optional description shown below label" })),
+	label: Type.String({
+		description: "Short friendly label — what happens if they pick this (everyday words, ~12 words max)",
+	}),
+	description: Type.Optional(
+		Type.String({
+			description: "Optional one-line helper a beginner understands; do not restack jargon from the label",
+		}),
+	),
 });
 
 const QuestionSchema = Type.Object({
@@ -62,8 +68,13 @@ const QuestionSchema = Type.Object({
 			description: "Short contextual label for tab bar, e.g. 'Scope', 'Priority' (defaults to Q1, Q2)",
 		}),
 	),
-	prompt: Type.String({ description: "The full question text to display" }),
-	options: Type.Array(QuestionOptionSchema, { description: "Available options to choose from" }),
+	prompt: Type.String({
+		description:
+			"The question shown to the user. Plain everyday English, one sentence, as if they are new — no jargon stacks or AI-slop.",
+	}),
+	options: Type.Array(QuestionOptionSchema, {
+		description: "Choices in friendly words a beginner gets",
+	}),
 	allowOther: Type.Optional(Type.Boolean({ description: "Allow 'Type something' option (default: true)" })),
 });
 
@@ -86,7 +97,7 @@ export default function questionnaire(pi: ExtensionAPI) {
 		name: "questionnaire",
 		label: "Questionnaire",
 		description:
-			"Ask the user one or more questions. Use for clarifying requirements, getting preferences, or confirming decisions. For single questions, shows a simple option list. For multiple questions, shows a tab-based interface.",
+			"Ask the user one or more questions. Write every question and option in short plain English a beginner gets — no jargon, no AI-slop. Use for clarifying requirements, getting preferences, or confirming decisions. For single questions, shows a simple option list. For multiple questions, shows a tab-based interface.",
 		parameters: QuestionnaireParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {

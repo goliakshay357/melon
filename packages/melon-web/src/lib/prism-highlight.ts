@@ -18,11 +18,14 @@ import "prismjs/components/prism-tsx";
 import "prismjs/components/prism-typescript";
 import "prismjs/components/prism-yaml";
 
-const EXT_LANG: Record<string, string> = {
+/** Fence / extension aliases → Prism grammar ids Melon loads. */
+const LANG_ALIAS: Record<string, string> = {
 	ts: "typescript",
 	tsx: "tsx",
+	typescript: "typescript",
 	js: "javascript",
 	jsx: "jsx",
+	javascript: "javascript",
 	mjs: "javascript",
 	cjs: "javascript",
 	json: "json",
@@ -35,8 +38,10 @@ const EXT_LANG: Record<string, string> = {
 	xml: "markup",
 	svg: "markup",
 	py: "python",
+	python: "python",
 	rb: "bash",
 	rs: "rust",
+	rust: "rust",
 	go: "go",
 	java: "java",
 	kt: "clike",
@@ -46,33 +51,29 @@ const EXT_LANG: Record<string, string> = {
 	cc: "cpp",
 	cxx: "cpp",
 	hpp: "cpp",
+	"c++": "cpp",
 	cs: "csharp",
+	csharp: "csharp",
 	php: "markup",
 	sh: "bash",
 	bash: "bash",
 	zsh: "bash",
 	fish: "bash",
+	shell: "bash",
 	sql: "sql",
 	yaml: "yaml",
 	yml: "yaml",
 	toml: "bash",
-	typescript: "typescript",
-	javascript: "javascript",
-	python: "python",
-	rust: "rust",
-	csharp: "csharp",
-	shell: "bash",
 	zshrc: "bash",
 };
 
-/** Map fence language / extension aliases to a Prism grammar id. */
-export function resolvePrismLanguage(language: string | undefined): string | undefined {
-	if (!language) return undefined;
-	const key = language.toLowerCase().trim();
-	if (!key) return undefined;
-	const mapped = EXT_LANG[key] ?? key;
-	if (Prism.languages[mapped]) return mapped;
-	return undefined;
+/** Map a fence label / extension to a loaded Prism grammar id. */
+export function resolvePrismLanguage(raw: string | undefined): string | undefined {
+	if (!raw) return undefined;
+	const key = raw.trim().toLowerCase();
+	if (!key || key === "text" || key === "plain" || key === "txt") return undefined;
+	const mapped = LANG_ALIAS[key] ?? key;
+	return Prism.languages[mapped] ? mapped : undefined;
 }
 
 export function languageFromPath(filePath: string | undefined): string | undefined {
@@ -80,18 +81,22 @@ export function languageFromPath(filePath: string | undefined): string | undefin
 	const base = filePath.split(/[\\/]/).pop() ?? filePath;
 	const ext = base.includes(".") ? base.split(".").pop()?.toLowerCase() : undefined;
 	if (!ext) return undefined;
-	return resolvePrismLanguage(ext) ?? EXT_LANG[ext];
+	return resolvePrismLanguage(ext) ?? LANG_ALIAS[ext];
+}
+
+export function escapeHtml(text: string): string {
+	return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
 /** Returns HTML (Prism tokens) or null when highlighting is unavailable. */
 export function highlightCode(code: string, language: string | undefined): string | null {
 	if (!code) return null;
-	const resolved = resolvePrismLanguage(language);
-	if (!resolved) return null;
-	const grammar = Prism.languages[resolved];
+	const lang = resolvePrismLanguage(language);
+	if (!lang) return null;
+	const grammar = Prism.languages[lang];
 	if (!grammar) return null;
 	try {
-		return Prism.highlight(code, grammar, resolved);
+		return Prism.highlight(code, grammar, lang);
 	} catch {
 		return null;
 	}

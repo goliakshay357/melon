@@ -32,20 +32,33 @@ interface QuestionDetails {
 
 // Options with labels and optional descriptions
 const OptionSchema = Type.Object({
-	label: Type.String({ description: "Display label for the option" }),
-	description: Type.Optional(Type.String({ description: "Optional description shown below label" })),
+	label: Type.String({
+		description: "Short friendly label — what happens if they pick this (everyday words, ~12 words max)",
+	}),
+	description: Type.Optional(
+		Type.String({
+			description: "Optional one-line helper a beginner understands; do not restack jargon from the label",
+		}),
+	),
 });
 
 const QuestionParams = Type.Object({
-	question: Type.String({ description: "The question to ask the user" }),
-	options: Type.Array(OptionSchema, { description: "Options for the user to choose from" }),
+	question: Type.String({
+		description:
+			"The question to ask. Plain everyday English, one sentence, as if the user is new — no jargon stacks or AI-slop.",
+	}),
+	options: Type.Array(OptionSchema, {
+		description:
+			"Choices. Each label = what happens if they pick it, in friendly words; optional description = one short beginner-friendly line.",
+	}),
 });
 
 export default function question(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "question",
 		label: "Question",
-		description: "Ask the user a question and let them pick from options. Use when you need user input to proceed.",
+		description:
+			"Ask the user a question and let them pick from options. Write the question and options in short plain English a beginner gets — no jargon, no AI-slop. Use when you need user input to proceed.",
 		parameters: QuestionParams,
 		executionMode: "sequential",
 

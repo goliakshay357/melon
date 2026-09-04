@@ -550,6 +550,281 @@ it("keeps the current canvas when a cross-folder openCanvas fetch fails", async 
 	expect(useCanvasStore.getState().canvasOpening).toBe(false);
 });
 
+it("refetches from disk when the in-memory cache has zero cards", async () => {
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (url: string, init?: { method?: string }) => {
+			const u = String(url);
+			const method = init?.method ?? "GET";
+			if (method === "PUT" || u.includes("/touch")) {
+				return { ok: true, status: 200, json: async () => ({}) } as Response;
+			}
+			if (u.includes("/canvases/cv_other") && method === "GET") {
+				return {
+					ok: true,
+					status: 200,
+					json: async () => ({
+						id: "cv_other",
+						name: "Other",
+						cards: [
+							{
+								id: "card_other",
+								title: "Other",
+								position: { x: 0, y: 0 },
+								parentId: null,
+								kind: "chat",
+								status: "idle",
+								messages: [],
+								size: { width: 400, height: 300 },
+							},
+						],
+					}),
+				} as Response;
+			}
+			if (u.includes("/canvases/cv_populated") && method === "GET") {
+				return {
+					ok: true,
+					status: 200,
+					json: async () => ({
+						id: "cv_populated",
+						name: "Populated",
+						cards: [
+							{
+								id: "card_disk",
+								title: "From disk",
+								position: { x: 0, y: 0 },
+								parentId: null,
+								kind: "chat",
+								status: "idle",
+								messages: [],
+								size: { width: 400, height: 300 },
+							},
+						],
+					}),
+				} as Response;
+			}
+			return { ok: false, status: 404, json: async () => ({}) } as Response;
+		}),
+	);
+
+	// Active = empty seed for cv_populated (createCanvas-style). Stash it empty
+	// by switching to another canvas, then switch back — must refetch disk.
+	useCanvasStore.setState({
+		folder: "/Users/me/project",
+		canvasId: "cv_populated",
+		canvasName: "Populated",
+		hydrated: true,
+		cards: [],
+		canvasOpening: false,
+	});
+	await useCanvasStore.getState().switchCanvas("cv_other");
+	expect(useCanvasStore.getState().cards.map((c) => c.id)).toEqual(["card_other"]);
+
+	await useCanvasStore.getState().switchCanvas("cv_populated");
+	expect(useCanvasStore.getState().canvasId).toBe("cv_populated");
+	expect(useCanvasStore.getState().cards.map((c) => c.id)).toEqual(["card_disk"]);
+});
+
+it("heals a stuck empty view when re-selecting the same canvas", async () => {
+	useCanvasStore.setState({
+		folder: "/Users/me/project",
+		canvasId: "cv_stuck",
+		canvasName: "Stuck",
+		hydrated: true,
+		cards: [],
+		canvasOpening: false,
+	});
+
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (url: string, init?: { method?: string }) => {
+			const u = String(url);
+			const method = init?.method ?? "GET";
+			if (method === "PUT" || u.includes("/touch")) {
+				return { ok: true, status: 200, json: async () => ({}) } as Response;
+			}
+			if (u.includes("/canvases/cv_stuck") && method === "GET") {
+				return {
+					ok: true,
+					status: 200,
+					json: async () => ({
+						id: "cv_stuck",
+						name: "Stuck",
+						cards: [
+							{
+								id: "card_healed",
+								title: "Healed",
+								position: { x: 0, y: 0 },
+								parentId: null,
+								kind: "chat",
+								status: "idle",
+								messages: [],
+								size: { width: 400, height: 300 },
+							},
+						],
+					}),
+				} as Response;
+			}
+			return { ok: true, status: 200, json: async () => ({}) } as Response;
+		}),
+	);
+
+	await useCanvasStore.getState().switchCanvas("cv_stuck");
+
+	expect(useCanvasStore.getState().canvasId).toBe("cv_stuck");
+	expect(useCanvasStore.getState().cards.map((c) => c.id)).toEqual(["card_healed"]);
+	expect(useCanvasStore.getState().canvasOpening).toBe(false);
+});
+
+it("preserves Isolated worktree fields after addCard and switch", async () => {
+	useCanvasStore.setState({
+		folder: "/Users/me/project",
+		canvasId: "cv_iso",
+		canvasName: "Iso",
+		hydrated: true,
+		cards: [],
+		worktreePath: "/Users/me/project/.melon/worktrees/calm-canyon",
+		worktreeMode: "isolated",
+		branch: "brave-owl-1",
+		baseBranch: "main",
+		useWorktree: true,
+		worktreeMissing: false,
+		canvasOpening: false,
+	});
+	useCanvasStore.getState().addCard({ x: 1, y: 2 });
+
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (url: string, init?: { method?: string }) => {
+			const u = String(url);
+			const method = init?.method ?? "GET";
+			if (method === "PUT" || u.includes("/touch")) {
+				return { ok: true, status: 200, json: async () => ({}) } as Response;
+			}
+			if (u.includes("/canvases/cv_other") && method === "GET") {
+				return {
+					ok: true,
+					status: 200,
+					json: async () => ({
+						id: "cv_other",
+						name: "Other",
+						cards: [
+							{
+								id: "card_o",
+								title: "O",
+								position: { x: 0, y: 0 },
+								parentId: null,
+								kind: "chat",
+								status: "idle",
+								messages: [],
+								size: { width: 400, height: 300 },
+							},
+						],
+						worktreeMode: "local",
+					}),
+				} as Response;
+			}
+			if (u.includes("/canvases/cv_iso") && method === "GET") {
+				return {
+					ok: true,
+					status: 200,
+					json: async () => ({
+						id: "cv_iso",
+						name: "Iso",
+						worktreePath: "/Users/me/project/.melon/worktrees/calm-canyon",
+						worktreeMode: "isolated",
+						worktreeExists: true,
+						branch: "brave-owl-1",
+						cards: [
+							{
+								id: "card_iso",
+								title: "I",
+								position: { x: 0, y: 0 },
+								parentId: null,
+								kind: "chat",
+								status: "idle",
+								messages: [],
+								size: { width: 400, height: 300 },
+							},
+						],
+					}),
+				} as Response;
+			}
+			return { ok: false, status: 404, json: async () => ({}) } as Response;
+		}),
+	);
+
+	await useCanvasStore.getState().switchCanvas("cv_other");
+	await useCanvasStore.getState().switchCanvas("cv_iso");
+
+	expect(useCanvasStore.getState().worktreeMode).toBe("isolated");
+	expect(useCanvasStore.getState().worktreePath).toBe("/Users/me/project/.melon/worktrees/calm-canyon");
+	expect(useCanvasStore.getState().agentCwd()).toBe("/Users/me/project/.melon/worktrees/calm-canyon");
+});
+
+it("createCanvasInFolder does not save the old canvas under the new folder", async () => {
+	const puts: string[] = [];
+	useCanvasStore.setState({
+		folder: "/Users/me/project-a",
+		canvasId: "cv_a",
+		canvasName: "A",
+		hydrated: true,
+		cards: [
+			{
+				id: "card_a",
+				title: "A",
+				position: { x: 0, y: 0 },
+				parentId: null,
+				kind: "chat",
+				status: "idle",
+				messages: [],
+				size: { width: 400, height: 300 },
+			},
+		],
+		canvasOpening: false,
+	});
+
+	vi.stubGlobal(
+		"fetch",
+		vi.fn(async (url: string, init?: { method?: string; body?: string }) => {
+			const u = String(url);
+			const method = init?.method ?? "GET";
+			if (method === "PUT") {
+				const body = JSON.parse(String(init?.body ?? "{}")) as { cwd?: string; canvas?: { id?: string } };
+				puts.push(`${body.cwd}::${body.canvas?.id}`);
+				return { ok: true, status: 200, json: async () => ({}) } as Response;
+			}
+			if (u.startsWith("/canvases?") && u.includes("project-b")) {
+				return { ok: true, status: 200, json: async () => ({ canvases: [] }) } as Response;
+			}
+			if (u.includes("/worktree") && method === "POST") {
+				return {
+					ok: true,
+					status: 200,
+					json: async () => ({
+						mode: "local",
+						worktreePath: "/Users/me/project-b",
+					}),
+				} as Response;
+			}
+			if (u.startsWith("/canvases?") && method === "GET") {
+				return { ok: true, status: 200, json: async () => ({ canvases: [] }) } as Response;
+			}
+			return { ok: true, status: 200, json: async () => ({}) } as Response;
+		}),
+	);
+
+	await useCanvasStore.getState().createCanvasInFolder("/Users/me/project-b", "New B", {
+		useWorktree: false,
+	});
+
+	expect(puts.some((p) => p.startsWith("/Users/me/project-a::cv_a"))).toBe(true);
+	expect(puts.some((p) => p.startsWith("/Users/me/project-b::cv_a"))).toBe(false);
+	expect(useCanvasStore.getState().folder).toBe("/Users/me/project-b");
+	expect(useCanvasStore.getState().canvasId).not.toBe("cv_a");
+	expect(useCanvasStore.getState().canvasId).toMatch(/^cv_/);
+});
+
 it("never starts a new session without an explicit folder", async () => {
 	useCanvasStore.setState({ folder: null, canvasId: null, cards: [] });
 
