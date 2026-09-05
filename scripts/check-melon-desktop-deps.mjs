@@ -5,7 +5,7 @@
  *
  * Fail CI before packaging if desktop is missing any melon-server dependency.
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -42,3 +42,29 @@ if (mismatched.length > 0) {
 }
 
 console.log("OK: desktop/package.json covers all melon-server runtime dependencies");
+
+// pi-cursor-sdk declares its pi-* peers with "*" — npm does not install them,
+// so dev works via repo-root node_modules while packaged DMGs crash with
+// ERR_MODULE_NOT_FOUND. Everything it imports at runtime (deps + peers) must
+// resolve from desktop/node_modules (electron-builder's packaging root).
+const sdkPkg = JSON.parse(
+	readFileSync(join(root, "desktop/node_modules/pi-cursor-sdk/package.json"), "utf8"),
+);
+const sdkRequires = {
+	...(sdkPkg.dependencies ?? {}),
+	...(sdkPkg.peerDependencies ?? {}),
+};
+const sdkMissing = [];
+for (const name of Object.keys(sdkRequires)) {
+	const inDesktopRoot = existsSync(join(root, "desktop/node_modules", name));
+	const inSdkNested = existsSync(join(root, "desktop/node_modules/pi-cursor-sdk/node_modules", name));
+	if (!inDesktopRoot && !inSdkNested) sdkMissing.push(name);
+}
+if (sdkMissing.length > 0) {
+	console.error("pi-cursor-sdk runtime deps/peers must resolve from desktop/node_modules:");
+	for (const name of sdkMissing) {
+		console.error(`  missing ${name} — add it to desktop/package.json dependencies`);
+	}
+	process.exit(1);
+}
+console.log("OK: pi-cursor-sdk deps and peers resolve from desktop/node_modules");
