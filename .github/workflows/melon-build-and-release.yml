@@ -227,6 +227,37 @@ jobs:
         run: npm ci
         working-directory: desktop
 
+      - name: Compile macOS 26 icon (Assets.car — macOS 26 plates icons without one)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The new-format icon must be compiled by Xcode 26+ actool; pick the
+          # newest installed Xcode (macos-latest = macos-26 ships Xcode 26.x).
+          XB="$(ls -d /Applications/Xcode_2*.app 2>/dev/null | sort -V | tail -1 || true)"
+          if [ -n "$XB" ]; then export DEVELOPER_DIR="$XB"; fi
+          xcrun actool --version
+          mkdir -p desktop/build/car
+          # macOS 26 Tahoe re-renders app icons into the Liquid Glass squircle.
+          # An icns with transparent borders (the pre-Tahoe rounded-rect style)
+          # is treated as legacy and gets scaled onto a white backplate. The
+          # single-size AppIcon compiled into Assets.car is the conforming
+          # format: Tahoe masks it itself, and macOS 12+ prefers it over the
+          # icns when CFBundleIconName is set (that key comes from extendInfo
+          # in desktop/package.json; the icns stays as the pre-macOS-12
+          # fallback). Compiled before electron-builder so extraResources
+          # packs it into the app — and therefore into the DMG.
+          xcrun actool \
+            --compile desktop/build/car \
+            --platform macosx \
+            --minimum-deployment-target 11.0 \
+            --app-icon AppIcon \
+            --enable-on-demand-resources NO \
+            --output-partial-info-plist /tmp/melon-icon-partial.plist \
+            --notices --warnings --errors \
+            desktop/build/AppIcon.xcassets
+          [ -f desktop/build/car/Assets.car ] || { echo "::error::Assets.car was not produced"; exit 1; }
+
       - name: Build Melon (electron-builder, ${{ matrix.arch }})
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'  # no code-signing in CI

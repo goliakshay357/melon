@@ -47,7 +47,16 @@
             "target": [
                 "dmg"
             ],
-            "identity": null
+            "identity": null,
+            "extendInfo": {
+                "CFBundleIconName": "AppIcon"
+            },
+            "extraResources": [
+                {
+                    "from": "build/car/Assets.car",
+                    "to": "Assets.car"
+                }
+            ]
         },
         "asarUnpack": [
             "node_modules/@earendil-works/pi-coding-agent/**/*",
