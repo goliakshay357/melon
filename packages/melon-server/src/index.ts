@@ -8,6 +8,7 @@
 //   GET  /projects                                          → {projects: [{cwd, sessions[]}]}
 //   GET  /sessions/:cardId/events     SSE                   → delta | status | tool | error | extension_ui
 //   POST /sessions/:cardId/prompt     {text}                → {ok}
+//   POST /sessions/:cardId/thinking   {level}               → {ok, level, thinkingLevels}
 //   POST /sessions/:cardId/extension-ui  {id, value|confirmed|cancelled}
 //   POST /sessions/:cardId/abort
 
@@ -313,17 +314,18 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		explicitModel?: string,
 		skills: string[] = [],
 		mode: "create" | "resume" | "replace" = "replace",
+		explicitThinkingLevel?: string,
 	): Promise<any> {
 		const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
 		const wantsCursor = splitModel(wanted)[0].toLowerCase() === CURSOR_PROVIDER_ID;
 		const existingIsCursor =
 			(registry.get(cardId)?.runtime.session.model?.provider ?? "").toLowerCase() === CURSOR_PROVIDER_ID;
 		if (!wantsCursor && !existingIsCursor) {
-			return attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode);
+			return attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode, explicitThinkingLevel);
 		}
 		const sessionFile = sessionManager.getSessionFile?.() as string | undefined;
 		return withCursorAttachLocks([`card:${cardId}`, ...(sessionFile ? [`session:${sessionFile}`] : [])], () =>
-			attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode),
+			attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode, explicitThinkingLevel),
 		);
 	}
 
@@ -333,6 +335,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		explicitModel?: string,
 		skills: string[] = [],
 		mode: "create" | "resume" | "replace" = "replace",
+		explicitThinkingLevel?: string,
 	): Promise<any> {
 		const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
 		const [wantedProvider, wantedId] = splitModel(wanted);
@@ -402,7 +405,10 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				await runtime.session.setModel(model);
 				touchRecentModel(wanted);
 			}
-			runtime.session.setThinkingLevel(config.defaultThinkingLevel);
+			// Client-picked level (pre-attach dropdown choice) wins over the
+			// config default; setThinkingLevel clamps to the model's capabilities.
+			const wantedThinking = explicitThinkingLevel?.trim();
+			runtime.session.setThinkingLevel(wantedThinking || config.defaultThinkingLevel);
 		} catch (e) {
 			console.error("model switch failed:", (e as Error)?.message ?? e);
 		}
@@ -474,6 +480,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 							type: "raw",
 							text: `queued: ${q.steering ?? ""}${q.followUp ?? ""}`,
 						});
+				} else if (event.type === "thinking_level_changed") {
+					// Fires for user picker changes AND model-switch re-clamping
+					// (setModel calls setThinkingLevel internally), so every client
+					// resyncs even when the change came from another tab.
+					registry.broadcast(cardId, {
+						type: "thinking_level",
+						level: event.level,
+						thinkingLevels: runtime.session.getAvailableThinkingLevels(),
+					});
 				} else if (event.type === "agent_end") {
 					const msgs = event.messages ?? [];
 					const last = msgs[msgs.length - 1];
@@ -689,13 +704,22 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const skills = Array.isArray(body?.skills)
 			? (body.skills as unknown[]).filter((x): x is string => typeof x === "string")
 			: [];
-		const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model, skills, "create");
+		const runtime = await attachSession(
+			cardId,
+			SessionManager.create(dir),
+			body?.model,
+			skills,
+			"create",
+			typeof body?.thinkingLevel === "string" ? body.thinkingLevel : undefined,
+		);
 		return {
 			cardId,
 			sessionId: runtime.session.sessionId,
 			sessionFile: runtime.session.sessionFile,
 			cwd: dir,
 			model: modelToString(runtime.session.model),
+			thinkingLevel: runtime.session.thinkingLevel,
+			thinkingLevels: runtime.session.getAvailableThinkingLevels(),
 			followUp: [...runtime.session.getFollowUpMessages()],
 		};
 	});
@@ -722,6 +746,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			body?.model,
 			skills,
 			"resume",
+			typeof body?.thinkingLevel === "string" ? body.thinkingLevel : undefined,
 		);
 		return {
 			cardId,
@@ -729,6 +754,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			sessionFile,
 			cwd: runtime.session.sessionManager.getCwd(),
 			model: modelToString(runtime.session.model),
+			thinkingLevel: runtime.session.thinkingLevel,
+			thinkingLevels: runtime.session.getAvailableThinkingLevels(),
 			followUp: [...runtime.session.getFollowUpMessages()],
 		};
 	});
@@ -843,6 +870,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			sessionId: childRuntime.runtime.session.sessionId,
 			sessionFile: childRuntime.runtime.session.sessionFile,
 			model: modelToString(childRuntime.runtime.session.model),
+			thinkingLevel: childRuntime.runtime.session.thinkingLevel,
+			thinkingLevels: childRuntime.runtime.session.getAvailableThinkingLevels(),
 			forkedFromEntryId: leaf?.id,
 			parentSessionFile,
 			strippedCursorResumeEntries: stripped,
@@ -1728,7 +1757,39 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			}
 			await s.runtime.session.setModel(m);
 			touchRecentModel(model);
-			return { ok: true, model };
+			// setModel re-clamps the thinking level to the new model's
+			// capabilities — return the effective state so the picker resyncs.
+			return {
+				ok: true,
+				model,
+				thinkingLevel: s.runtime.session.thinkingLevel,
+				thinkingLevels: s.runtime.session.getAvailableThinkingLevels(),
+			};
+		} catch (e) {
+			return reply.code(500).send({ error: (e as Error).message });
+		}
+	});
+
+	// Valid level NAMES (pi clamps to the model's supported subset internally).
+	const VALID_THINKING_LEVELS = new Set(["off", "minimal", "low", "medium", "high", "xhigh", "max"]);
+
+	// Change thinking level on a live card session. Applies from the NEXT
+	// streaming call — pi re-feeds agent state at every turn boundary
+	// (prepareNextTurn), so mid-turn changes are followed without a restart.
+	app.post("/sessions/:cardId/thinking", async (req, reply) => {
+		const s = registry.get((req.params as any).cardId);
+		if (!s) return reply.code(404).send({ error: "unknown card" });
+		const level = (req.body as any)?.level;
+		if (typeof level !== "string" || !VALID_THINKING_LEVELS.has(level)) {
+			return reply.code(400).send({ error: "level must be one of off|minimal|low|medium|high|xhigh|max" });
+		}
+		try {
+			s.runtime.session.setThinkingLevel(level);
+			return {
+				ok: true,
+				level: s.runtime.session.thinkingLevel,
+				thinkingLevels: s.runtime.session.getAvailableThinkingLevels(),
+			};
 		} catch (e) {
 			return reply.code(500).send({ error: (e as Error).message });
 		}

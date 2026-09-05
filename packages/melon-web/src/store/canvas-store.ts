@@ -509,6 +509,8 @@ interface CanvasState {
 			model: string;
 			skills: string[];
 			permission: "full" | "readonly";
+			/** Optional pre-attach thinking level (hero composer choice). */
+			thinkingLevel?: string;
 			/** Optional first-card size (empty-home: ~55% wide × ~78% tall of the pane). */
 			size?: { width: number; height: number };
 			/** Optional viewport to apply with the first card (typically zoom 1, centered). */
@@ -530,6 +532,12 @@ interface CanvasState {
 	moveCard: (id: string, position: { x: number; y: number }) => void;
 	updateCard: (id: string, patch: Partial<SessionCard>) => void;
 	setModel: (id: string, model: string) => void;
+	/**
+	 * Per-card thinking level. Optimistic like setModel — the server clamps
+	 * to the model's supported set and pi applies it from the next streaming
+	 * call (mid-turn changes ride prepareNextTurn, no restart).
+	 */
+	setThinkingLevel: (id: string, level: string) => void;
 	/**
 	 * Cursor SDK / catalog failures → debug console. Auto-enables DBG so the
 	 * user can copy the lines without hunting for the toggle.
@@ -1300,6 +1308,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			get().updateCard(cardId, {
 				skills: options.skills,
 				permission: options.permission,
+				...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
 			});
 			get().setModel(cardId, options.model);
 			const sent = await get().sendMessage(cardId, prompt, { cwd: get().agentCwd() ?? folder });
@@ -1495,6 +1504,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		let sessionInfo: {
 			sessionFile?: string;
 			model?: string;
+			thinkingLevel?: string;
+			thinkingLevels?: string[];
 			forkedFromEntryId?: string;
 		} | null = null;
 
@@ -1525,6 +1536,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			size: childSize,
 			sessionFile: sessionInfo?.sessionFile,
 			model: sessionInfo?.model,
+			thinkingLevel: sessionInfo?.thinkingLevel,
+			thinkingLevels: sessionInfo?.thinkingLevels,
 			forkedFromEntryId: sessionInfo?.forkedFromEntryId,
 		});
 		if (sessionInfo?.sessionFile) await get().hydrateMessages(childCardId, sessionInfo.sessionFile);
@@ -1721,7 +1734,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						get().setCardError(id, `Model switch failed: ${err}`);
 						get().updateCard(id, { model: prev });
 					} else {
+						// setModel re-clamps the thinking level to the new model —
+						// adopt the effective state so the thinking picker resyncs.
+						const d = (await r.json().catch(() => ({}))) as {
+							thinkingLevel?: string;
+							thinkingLevels?: string[];
+						};
 						pushLog(id, `✓ model switched to ${model}`);
+						get().updateCard(id, {
+							...(d.thinkingLevel ? { thinkingLevel: d.thinkingLevel } : {}),
+							...(Array.isArray(d.thinkingLevels) ? { thinkingLevels: d.thinkingLevels } : {}),
+						});
 						get().clearCardError(id);
 					}
 				})
@@ -1741,6 +1764,40 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	logCursorDebug(cardId, lines) {
 		if (!cardId) return;
 		pushCursorDebug(cardId, lines);
+	},
+
+	// Per-card thinking level. Optimistic like setModel — on failure revert so
+	// the UI never lies about the backend. The server clamps to the model's
+	// supported set and returns the effective state; pi applies the level from
+	// the next streaming call, so mid-turn changes are followed.
+	setThinkingLevel(id, level) {
+		const prev = findCard(id)?.thinkingLevel;
+		get().updateCard(id, { thinkingLevel: level });
+		if (!attached.has(id)) return;
+		fetch(`/sessions/${id}/thinking`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ level }),
+		})
+			.then(async (r) => {
+				if (!r.ok) {
+					const d = await r.json().catch(() => ({}) as any);
+					pushLog(id, `✗ thinking level change failed: ${d.error ?? r.status} — keeping ${prev ?? "auto"}`);
+					get().updateCard(id, { thinkingLevel: prev });
+					return;
+				}
+				const d = (await r.json()) as { level?: string; thinkingLevels?: string[] };
+				get().updateCard(id, {
+					...(d.level ? { thinkingLevel: d.level } : {}),
+					...(Array.isArray(d.thinkingLevels) ? { thinkingLevels: d.thinkingLevels } : {}),
+				});
+				pushLog(id, `✓ thinking level ${d.level ?? level}`);
+			})
+			.catch((e) => {
+				const err = e instanceof Error ? e.message : String(e);
+				pushLog(id, `✗ thinking level change failed: ${err} — keeping ${prev ?? "auto"}`);
+				get().updateCard(id, { thinkingLevel: prev });
+			});
 	},
 
 	undo() {
@@ -1926,12 +1983,21 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					headers: { "content-type": "application/json" },
 					body: JSON.stringify(
 						sessionFile
-							? { cardId, sessionFile, model: card.model, skills: card.skills ?? [], cwd }
+							? {
+									cardId,
+									sessionFile,
+									model: card.model,
+									skills: card.skills ?? [],
+									cwd,
+									// Pre-attach picker choice — applied instead of the server default.
+									...(card.thinkingLevel ? { thinkingLevel: card.thinkingLevel } : {}),
+								}
 							: {
 									cardId,
 									cwd,
 									model: card.model,
 									skills: card.skills ?? [],
+									...(card.thinkingLevel ? { thinkingLevel: card.thinkingLevel } : {}),
 								},
 					),
 				});
@@ -1940,11 +2006,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					sessionFile?: string;
 					sessionId?: string;
 					model?: string;
+					thinkingLevel?: string;
+					thinkingLevels?: string[];
 					followUp?: string[];
 				};
 				get().updateCard(cardId, {
 					sessionFile: info.sessionFile,
 					model: info.model,
+					// Server truth (incl. clamping to the model's supported levels).
+					...(info.thinkingLevel ? { thinkingLevel: info.thinkingLevel } : {}),
+					...(Array.isArray(info.thinkingLevels) ? { thinkingLevels: info.thinkingLevels } : {}),
 					// Server-truth queue — reconciles the mirror after reload/reconnect.
 					queue: info.followUp ?? [],
 				});
@@ -2009,6 +2080,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					| { type: "status"; status: "idle" | "streaming" | "error" }
 					| { type: "error"; message: string }
 					| { type: "context_usage"; tokens: number | null; contextWindow: number; percent: number | null }
+					| { type: "thinking_level"; level: string; thinkingLevels?: string[] }
 					| { type: "queue"; followUp: string[] }
 					| { type: "user_message"; text: string }
 					| {
@@ -2295,6 +2367,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 							contextWindow: data.contextWindow,
 							percent: data.percent,
 						},
+					});
+				} else if (data.type === "thinking_level") {
+					// Server-truth sync: this client's picker change, another tab's,
+					// or a model-switch re-clamp. Server state always wins.
+					useCanvasStore.getState().updateCard(cardId, {
+						thinkingLevel: data.level,
+						...(Array.isArray(data.thinkingLevels) ? { thinkingLevels: data.thinkingLevels } : {}),
 					});
 				} else if ((data as { type: string }).type === "extension_ui") {
 					const ui = data as {

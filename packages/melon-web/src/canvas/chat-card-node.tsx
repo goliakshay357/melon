@@ -1001,6 +1001,9 @@ function ChatCardNodeInner({
                 onSubmit={submit}
                 model={card.model ?? ''}
                 onModelChange={(model) => useCanvasStore.getState().setModel(id, model)}
+                thinkingLevel={card.thinkingLevel}
+                thinkingLevels={card.thinkingLevels}
+                onThinkingChange={(level) => useCanvasStore.getState().setThinkingLevel(id, level)}
                 skills={card.skills ?? []}
                 onSkillsChange={(skills) => useCanvasStore.getState().setSkills(id, skills)}
                 permission={card.permission ?? 'full'}

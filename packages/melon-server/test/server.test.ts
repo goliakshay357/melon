@@ -92,6 +92,63 @@ describe("melon-server routes", () => {
 		await app.close();
 	});
 
+	it("POST /sessions returns effective thinking state", async () => {
+		const app = await buildApp();
+		const cardId = `think-attach-${Date.now()}`;
+		const res = await app.inject({
+			method: "POST",
+			url: "/sessions",
+			payload: { cardId, cwd: import.meta.dirname, thinkingLevel: "low" },
+		});
+		expect(res.statusCode).toBe(200);
+		const body = res.json();
+		expect(typeof body.thinkingLevel).toBe("string");
+		expect(Array.isArray(body.thinkingLevels)).toBe(true);
+		expect(body.thinkingLevels.length).toBeGreaterThan(0);
+		await app.close();
+	});
+
+	it("POST /sessions/:cardId/thinking sets the level and rejects unknown ones", async () => {
+		const app = await buildApp();
+		const cardId = `think-set-${Date.now()}`;
+		const create = await app.inject({
+			method: "POST",
+			url: "/sessions",
+			payload: { cardId, cwd: import.meta.dirname },
+		});
+		expect(create.statusCode).toBe(200);
+
+		const set = await app.inject({
+			method: "POST",
+			url: `/sessions/${cardId}/thinking`,
+			payload: { level: "high" },
+		});
+		expect(set.statusCode).toBe(200);
+		const body = set.json();
+		expect(body.ok).toBe(true);
+		expect(typeof body.level).toBe("string");
+		expect(Array.isArray(body.thinkingLevels)).toBe(true);
+
+		// The effective level may be clamped by the model, but it must be one
+		// of the model's supported levels.
+		expect(body.thinkingLevels).toContain(body.level);
+
+		const bad = await app.inject({
+			method: "POST",
+			url: `/sessions/${cardId}/thinking`,
+			payload: { level: "bogus" },
+		});
+		expect(bad.statusCode).toBe(400);
+
+		const missing = await app.inject({
+			method: "POST",
+			url: "/sessions/nope/thinking",
+			payload: { level: "high" },
+		});
+		expect(missing.statusCode).toBe(404);
+		await app.close();
+	});
+
 	it("POST /canvases/:id/worktree creates under .melon/worktrees", async () => {
 		const dir = mkdtempSync(join(tmpdir(), "melon-api-wt-"));
 		try {

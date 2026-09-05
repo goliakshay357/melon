@@ -3,6 +3,7 @@ import { ArrowUp, Square } from 'lucide-react';
 import { ModelPicker } from '@/components/model-picker';
 import { ProviderPicker } from '@/components/provider-picker';
 import { SkillsPicker } from '@/components/skills-picker';
+import { ThinkingPicker } from '@/components/thinking-picker';
 import { cn } from '@/lib/utils';
 
 export type ComposerPermission = 'full' | 'readonly';
@@ -17,6 +18,9 @@ export function PromptComposer({
     onSkillsChange,
     permission,
     onPermissionChange,
+    thinkingLevel,
+    thinkingLevels,
+    onThinkingChange,
     sending = false,
     onStop,
     disabled = false,
@@ -36,6 +40,11 @@ export function PromptComposer({
     onSkillsChange: (skills: string[]) => void;
     permission: ComposerPermission;
     onPermissionChange: (permission: ComposerPermission) => void;
+    /** Per-card thinking level (server-synced). Omit to hide the picker. */
+    thinkingLevel?: string;
+    /** Levels the current model supports; falls back to pi's full list. */
+    thinkingLevels?: string[];
+    onThinkingChange?: (level: string) => void;
     sending?: boolean;
     onStop?: () => void;
     disabled?: boolean;
@@ -50,7 +59,7 @@ export function PromptComposer({
 }) {
     const hero = size === 'hero';
     const maxHeight = hero ? 220 : 120;
-    const [openPicker, setOpenPicker] = useState<'model' | 'provider' | 'skills' | null>(null);
+    const [openPicker, setOpenPicker] = useState<'model' | 'provider' | 'skills' | 'thinking' | null>(null);
     const growTextarea = useCallback(
         (el: HTMLTextAreaElement | null) => {
             if (!el) return;
@@ -126,6 +135,15 @@ export function PromptComposer({
                     onOpenChange={(open) => setOpenPicker(open ? 'model' : null)}
                     cardId={cardId}
                 />
+                {onThinkingChange && (
+                    <ThinkingPicker
+                        value={thinkingLevel}
+                        levels={thinkingLevels}
+                        onChange={onThinkingChange}
+                        open={openPicker === 'thinking'}
+                        onOpenChange={(open) => setOpenPicker(open ? 'thinking' : null)}
+                    />
+                )}
                 <select
                     className="cursor-pointer rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none hover:text-foreground"
                     title="Workspace permissions"

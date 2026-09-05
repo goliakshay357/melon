@@ -70,6 +70,13 @@ export interface SessionCard {
 	size?: { width: number; height: number };
 	sessionFile?: string; // pi .jsonl on disk — source of truth for resume
 	model?: string;
+	/** Current thinking level of this card's session (server-synced via SSE). */
+	thinkingLevel?: string;
+	/**
+	 * Levels the current model supports (server-synced). Undefined until the
+	 * first attach; the picker falls back to pi's full list pre-attach.
+	 */
+	thinkingLevels?: string[];
 	logs?: string[]; // live pipe trace, newest last
 	/** Show the on-card debug console (logs). Defaults ON. */
 	debug?: boolean;

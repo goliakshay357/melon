@@ -21,6 +21,7 @@ export function EmptyCanvasHero({
     const [model, setModel] = useState('');
     const [skills, setSkills] = useState<string[]>([]);
     const [permission, setPermission] = useState<ComposerPermission>('full');
+    const [thinkingLevel, setThinkingLevel] = useState<string | undefined>(undefined);
     const [pickingFolder, setPickingFolder] = useState(false);
     const [starting, setStarting] = useState(false);
 
@@ -54,6 +55,7 @@ export function EmptyCanvasHero({
             model,
             skills,
             permission,
+            thinkingLevel,
         });
         if (!sent && useCanvasStore.getState().cards.length === 0) setStarting(false);
     };
@@ -123,6 +125,8 @@ export function EmptyCanvasHero({
                         onSkillsChange={setSkills}
                         permission={permission}
                         onPermissionChange={setPermission}
+                        thinkingLevel={thinkingLevel}
+                        onThinkingChange={setThinkingLevel}
                         disabled={waiting || starting}
                         submitDisabled={!folder || !model}
                         autoFocus={hydrated && !serverOffline}
