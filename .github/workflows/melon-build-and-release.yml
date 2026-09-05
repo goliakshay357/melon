@@ -250,6 +250,7 @@ jobs:
           xcrun actool \
             --compile desktop/build/car \
             --platform macosx \
+            --target-device mac \
             --minimum-deployment-target 11.0 \
             --app-icon AppIcon \
             --enable-on-demand-resources NO \
