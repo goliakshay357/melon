@@ -1,5 +1,15 @@
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
 export declare const CURSOR_PROVIDER_ID = "cursor";
+/** Last Cursor catalog load outcome — exposed to GET /models for DBG. */
+export type CursorCatalogStatus = {
+    loaded: boolean;
+    isolationAvailable: boolean;
+    extensionPath: string | null;
+    modelCount: number;
+    /** Human-readable issues (missing key, discovery failure, patch missing, …). */
+    issues: string[];
+};
+export declare function getCursorCatalogStatus(): CursorCatalogStatus;
 /** Bundled pi-cursor-sdk package dir, or null when not installed. */
 export declare function cursorExtensionPath(): string | null;
 /**

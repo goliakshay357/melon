@@ -21,7 +21,7 @@ import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
 import { inspectCanvasShare, shareCanvasWork } from "./canvas-share.js";
 import { expandHome, loadConfig, modelToString, preview, structuredToolArgs, toolTextPreview, } from "./config.js";
-import { CURSOR_PROVIDER_ID, cursorExtensionPath, cursorSessionIsolationAvailable, hasRealCursorKey, loadCursorProviderInto, rewriteCursorError, } from "./cursor-extension.js";
+import { CURSOR_PROVIDER_ID, cursorExtensionPath, cursorSessionIsolationAvailable, getCursorCatalogStatus, hasRealCursorKey, loadCursorProviderInto, rewriteCursorError, } from "./cursor-extension.js";
 import { runInBoundCursorSession, stripCursorResumeEntriesFromSessionFile } from "./cursor-session-binding.js";
 import { CardExtensionUiBridge } from "./extension-ui.js";
 import { fuzzyScore } from "./fuzzy.js";
@@ -72,7 +72,12 @@ async function getModelRuntime() {
             await loadCursorProviderInto(_modelRuntime);
         }
         catch (e) {
-            console.error("[melon] cursor provider load failed (continuing without it):", e?.message ?? e);
+            const message = e?.message ?? String(e);
+            console.error("[melon] cursor provider load failed (continuing without it):", message);
+            // Status is normally set inside loadCursorProviderInto; this catches unexpected throws.
+            if (!getCursorCatalogStatus().issues.some((i) => i.includes(message))) {
+                console.warn("[melon] cursor: unexpected load failure:", message);
+            }
         }
     }
     return _modelRuntime;
@@ -1435,7 +1440,13 @@ export async function buildApp(deps = {}) {
         const denied = new Set((loadSettings().denylistedModels ?? []).map((x) => x));
         const filtered = all.filter((m) => !denied.has(m.label));
         const models = provider ? filtered.filter((m) => m.provider === provider) : filtered;
-        return { models, total: models.length };
+        const wantsCursor = !provider || provider.toLowerCase() === CURSOR_PROVIDER_ID;
+        const cursor = wantsCursor ? getCursorCatalogStatus() : undefined;
+        // Empty Cursor list is almost always a load/isolation/auth issue — surface it.
+        const error = provider.toLowerCase() === CURSOR_PROVIDER_ID && models.length === 0
+            ? (cursor?.issues[0] ?? "No Cursor models available")
+            : undefined;
+        return { models, total: models.length, ...(cursor ? { cursor } : {}), ...(error ? { error } : {}) };
     });
     // Liveness probe — the frontend polls this to clear the "reconnecting" banner.
     // `version` is the same identity stamped into DMG/AppImage/exe filenames.
@@ -1638,6 +1649,9 @@ export async function buildApp(deps = {}) {
             allProviderIds.add(m.provider);
         for (const pid of Object.keys(authEntries))
             allProviderIds.add(pid);
+        // Always list Cursor so a failed catalog load is visible in the picker.
+        allProviderIds.add(CURSOR_PROVIDER_ID);
+        const cursorStatus = getCursorCatalogStatus();
         const result = [];
         for (const pid of [...allProviderIds].sort()) {
             const status = mr.getProviderAuthStatus(pid);
@@ -1666,6 +1680,9 @@ export async function buildApp(deps = {}) {
                 source: status.source ?? undefined,
                 keyPreview,
                 authType,
+                ...(pid === CURSOR_PROVIDER_ID && (!cursorStatus.loaded || cursorStatus.issues.length > 0)
+                    ? { error: cursorStatus.issues[0] }
+                    : {}),
             });
         }
         result.sort((a, b) => {
@@ -1698,6 +1715,19 @@ export async function buildApp(deps = {}) {
             const st = loadSettings();
             st.providerKeys = { ...(st.providerKeys ?? {}), [provider]: key };
             saveSettings(st);
+            // Re-discover Cursor models now that a real key exists.
+            if (provider === CURSOR_PROVIDER_ID) {
+                try {
+                    await loadCursorProviderInto(await getModelRuntime());
+                }
+                catch (e) {
+                    return reply.code(500).send({
+                        error: e.message,
+                        cursor: getCursorCatalogStatus(),
+                    });
+                }
+                return { ok: true, cursor: getCursorCatalogStatus() };
+            }
             return { ok: true };
         }
         catch (e) {
@@ -2057,5 +2087,10 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()
     // Structured handshake for the Electron parent — do NOT change this format.
     console.log(`MELON_READY ${JSON.stringify({ port: boundPort })}`);
     console.error(`melon-server on http://127.0.0.1:${boundPort}`);
+    const shutdown = () => {
+        void app.close().finally(() => process.exit(0));
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
 }
 //# sourceMappingURL=index.js.map
