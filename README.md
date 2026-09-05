@@ -6,6 +6,7 @@
 
 > **Thinking with AI, without losing the context.**
 
+## Problem
 Most of my work with AI starts as one question. Then it branches.
 
 A side question becomes a research thread. That thread leads somewhere else.
@@ -21,7 +22,7 @@ The problem isn't generating more answers.
 
 ---
 
-## So I built this.
+## Solution
 
 An infinite canvas where I can lay out my thinking with AI.
 
