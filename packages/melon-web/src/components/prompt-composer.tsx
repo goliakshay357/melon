@@ -25,6 +25,7 @@ export function PromptComposer({
     placeholder = 'Ask anything…  (Enter to send, Shift+Enter for newline)',
     className,
     size = 'card',
+    cardId,
 }: {
     value: string;
     onChange: (value: string) => void;
@@ -44,6 +45,8 @@ export function PromptComposer({
     className?: string;
     /** `hero` = taller empty-canvas inbox; `card` = compact card footer. */
     size?: 'card' | 'hero';
+    /** Card id for Cursor debug logging (omit on empty-canvas hero). */
+    cardId?: string;
 }) {
     const hero = size === 'hero';
     const maxHeight = hero ? 220 : 120;
@@ -114,12 +117,14 @@ export function PromptComposer({
                     onChange={onModelChange}
                     open={openPicker === 'provider'}
                     onOpenChange={(open) => setOpenPicker(open ? 'provider' : null)}
+                    cardId={cardId}
                 />
                 <ModelPicker
                     value={model}
                     onChange={onModelChange}
                     open={openPicker === 'model'}
                     onOpenChange={(open) => setOpenPicker(open ? 'model' : null)}
+                    cardId={cardId}
                 />
                 <select
                     className="cursor-pointer rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none hover:text-foreground"

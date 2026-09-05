@@ -1010,6 +1010,7 @@ function ChatCardNodeInner({
                 sending={card.status === 'streaming'}
                 onStop={abortStream}
                 disabled={serverOffline}
+                cardId={id}
                 placeholder={
                     serverOffline
                         ? 'Reconnecting to server…'

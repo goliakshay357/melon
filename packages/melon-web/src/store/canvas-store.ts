@@ -396,6 +396,20 @@ function pushLog(cardId: string, line: string) {
 	}));
 }
 
+/** Cursor failures always land in DBG; turn the panel on so they're visible. */
+function pushCursorDebug(cardId: string, lines: string[]) {
+	if (lines.length === 0) return;
+	patchCardInStore(cardId, (c) => ({ ...c, debug: true }));
+	for (const line of lines) {
+		const text = line.trim();
+		if (!text) continue;
+		pushLog(
+			cardId,
+			text.startsWith("✗") || text.startsWith("•") || text.startsWith("[") ? text : `✗ cursor: ${text}`,
+		);
+	}
+}
+
 type ScrollAction = "pan" | "zoom";
 
 /**
@@ -516,6 +530,11 @@ interface CanvasState {
 	moveCard: (id: string, position: { x: number; y: number }) => void;
 	updateCard: (id: string, patch: Partial<SessionCard>) => void;
 	setModel: (id: string, model: string) => void;
+	/**
+	 * Cursor SDK / catalog failures → debug console. Auto-enables DBG so the
+	 * user can copy the lines without hunting for the toggle.
+	 */
+	logCursorDebug: (cardId: string | undefined, lines: string[]) => void;
 	setCardError: (id: string, message: string) => void;
 	clearCardError: (id: string) => void;
 	/**
@@ -1693,8 +1712,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				.then(async (r) => {
 					if (!r.ok) {
 						const d = await r.json().catch(() => ({}) as any);
-						pushLog(id, `✗ model switch failed: ${d.error ?? r.status} — keeping ${prev ?? "current model"}`);
-						get().setCardError(id, `Model switch failed: ${d.error ?? r.status}`);
+						const err = String(d.error ?? r.status);
+						if (/cursor/i.test(model) || /cursor/i.test(err)) {
+							pushCursorDebug(id, [`model switch failed: ${err} — keeping ${prev ?? "current model"}`]);
+						} else {
+							pushLog(id, `✗ model switch failed: ${err} — keeping ${prev ?? "current model"}`);
+						}
+						get().setCardError(id, `Model switch failed: ${err}`);
 						get().updateCard(id, { model: prev });
 					} else {
 						pushLog(id, `✓ model switched to ${model}`);
@@ -1702,14 +1726,21 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					}
 				})
 				.catch((e) => {
-					pushLog(
-						id,
-						`✗ model switch failed: ${e instanceof Error ? e.message : e} — keeping ${prev ?? "current model"}`,
-					);
-					get().setCardError(id, `Model switch failed: ${e instanceof Error ? e.message : e}`);
+					const err = e instanceof Error ? e.message : String(e);
+					if (/cursor/i.test(model) || /cursor/i.test(err)) {
+						pushCursorDebug(id, [`model switch failed: ${err} — keeping ${prev ?? "current model"}`]);
+					} else {
+						pushLog(id, `✗ model switch failed: ${err} — keeping ${prev ?? "current model"}`);
+					}
+					get().setCardError(id, `Model switch failed: ${err}`);
 					get().updateCard(id, { model: prev });
 				});
 		}
+	},
+
+	logCursorDebug(cardId, lines) {
+		if (!cardId) return;
+		pushCursorDebug(cardId, lines);
 	},
 
 	undo() {
@@ -2160,7 +2191,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						// Show the real failure reason, not just "turn_end (error)".
 						const readable = data.error.split("stack=")[0].trim().slice(0, 300);
 						pushEvent(cardId, { kind: "system", name: "error", detail: readable });
-						pushLog(cardId, `✗ ${readable}`);
+						if (/cursor/i.test(readable)) pushCursorDebug(cardId, [readable]);
+						else pushLog(cardId, `✗ ${readable}`);
 						get().setCardError(cardId, readable);
 						// Failed turn — clear any open question (server also cancelAlls).
 						useCanvasStore.getState().updateCard(cardId, { pendingExtensionUi: undefined });
@@ -2297,7 +2329,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					useCanvasStore.getState().updateCard(cardId, { pendingExtensionUi: undefined });
 				} else if ((data as { type: string }).type === "error") {
 					const msg = (data as { message?: string }).message;
-					pushLog(cardId, `✗ agent error: ${msg ?? "unknown"}`);
+					if (msg && /cursor/i.test(msg)) pushCursorDebug(cardId, [`agent error: ${msg}`]);
+					else pushLog(cardId, `✗ agent error: ${msg ?? "unknown"}`);
 					if (msg) pushEvent(cardId, { kind: "system", name: "error", detail: msg.slice(0, 300) });
 					get().setCardError(cardId, msg ?? "agent error");
 					const cur = findCard(cardId);

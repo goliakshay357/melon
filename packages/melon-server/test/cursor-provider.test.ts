@@ -49,6 +49,31 @@ describe("rewriteCursorError", () => {
 	});
 });
 
+describe("getCursorCatalogStatus", () => {
+	it("is readable after loadCursorProviderInto attempt via /models", async () => {
+		const { getCursorCatalogStatus } = await import("../src/cursor-extension.ts");
+		const app = await buildApp();
+		const res = await app.inject({ method: "GET", url: "/models?provider=cursor" });
+		const body = res.json() as {
+			models: unknown[];
+			total: number;
+			error?: string;
+			cursor?: { loaded: boolean; issues: string[]; isolationAvailable: boolean };
+		};
+		expect(body.cursor).toBeTruthy();
+		expect(Array.isArray(body.cursor?.issues)).toBe(true);
+		expect(typeof body.cursor?.loaded).toBe("boolean");
+		expect(typeof body.cursor?.isolationAvailable).toBe("boolean");
+		if (body.total === 0) {
+			expect(typeof body.error).toBe("string");
+			expect(body.error!.length).toBeGreaterThan(0);
+		}
+		const status = getCursorCatalogStatus();
+		expect(status.issues.length).toBeGreaterThan(0);
+		await app.close();
+	});
+});
+
 describe("hasRealCursorKey", () => {
 	const envKey = process.env.CURSOR_API_KEY;
 	const withEnv = (value: string | undefined, fn: () => void) => {

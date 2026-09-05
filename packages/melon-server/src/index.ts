@@ -41,6 +41,7 @@ import {
 	CURSOR_PROVIDER_ID,
 	cursorExtensionPath,
 	cursorSessionIsolationAvailable,
+	getCursorCatalogStatus,
 	hasRealCursorKey,
 	loadCursorProviderInto,
 	rewriteCursorError,
@@ -108,7 +109,12 @@ async function getModelRuntime(): Promise<ModelRuntime> {
 		try {
 			await loadCursorProviderInto(_modelRuntime);
 		} catch (e) {
-			console.error("[melon] cursor provider load failed (continuing without it):", (e as Error)?.message ?? e);
+			const message = (e as Error)?.message ?? String(e);
+			console.error("[melon] cursor provider load failed (continuing without it):", message);
+			// Status is normally set inside loadCursorProviderInto; this catches unexpected throws.
+			if (!getCursorCatalogStatus().issues.some((i) => i.includes(message))) {
+				console.warn("[melon] cursor: unexpected load failure:", message);
+			}
 		}
 	}
 	return _modelRuntime;
@@ -1561,7 +1567,14 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const denied = new Set((loadSettings().denylistedModels ?? []).map((x) => x));
 		const filtered = all.filter((m) => !denied.has(m.label));
 		const models = provider ? filtered.filter((m) => m.provider === provider) : filtered;
-		return { models, total: models.length };
+		const wantsCursor = !provider || provider.toLowerCase() === CURSOR_PROVIDER_ID;
+		const cursor = wantsCursor ? getCursorCatalogStatus() : undefined;
+		// Empty Cursor list is almost always a load/isolation/auth issue — surface it.
+		const error =
+			provider.toLowerCase() === CURSOR_PROVIDER_ID && models.length === 0
+				? (cursor?.issues[0] ?? "No Cursor models available")
+				: undefined;
+		return { models, total: models.length, ...(cursor ? { cursor } : {}), ...(error ? { error } : {}) };
 	});
 
 	// Liveness probe — the frontend polls this to clear the "reconnecting" banner.
@@ -1763,7 +1776,10 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const allProviderIds = new Set<string>();
 		for (const m of mr.getModels()) allProviderIds.add(m.provider);
 		for (const pid of Object.keys(authEntries)) allProviderIds.add(pid);
+		// Always list Cursor so a failed catalog load is visible in the picker.
+		allProviderIds.add(CURSOR_PROVIDER_ID);
 
+		const cursorStatus = getCursorCatalogStatus();
 		const result: Array<{
 			id: string;
 			provider: string;
@@ -1771,6 +1787,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			source?: string;
 			keyPreview?: string;
 			authType?: string;
+			error?: string;
 		}> = [];
 
 		for (const pid of [...allProviderIds].sort()) {
@@ -1801,6 +1818,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				source: (status as any).source ?? undefined,
 				keyPreview,
 				authType,
+				...(pid === CURSOR_PROVIDER_ID && (!cursorStatus.loaded || cursorStatus.issues.length > 0)
+					? { error: cursorStatus.issues[0] }
+					: {}),
 			});
 		}
 
@@ -1832,6 +1852,18 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			const st = loadSettings();
 			st.providerKeys = { ...(st.providerKeys ?? {}), [provider]: key };
 			saveSettings(st);
+			// Re-discover Cursor models now that a real key exists.
+			if (provider === CURSOR_PROVIDER_ID) {
+				try {
+					await loadCursorProviderInto(await getModelRuntime());
+				} catch (e) {
+					return reply.code(500).send({
+						error: (e as Error).message,
+						cursor: getCursorCatalogStatus(),
+					});
+				}
+				return { ok: true, cursor: getCursorCatalogStatus() };
+			}
 			return { ok: true };
 		} catch (e) {
 			return reply.code(500).send({ error: (e as Error).message });
@@ -2186,4 +2218,9 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()
 	// Structured handshake for the Electron parent — do NOT change this format.
 	console.log(`MELON_READY ${JSON.stringify({ port: boundPort })}`);
 	console.error(`melon-server on http://127.0.0.1:${boundPort}`);
+	const shutdown = () => {
+		void app.close().finally(() => process.exit(0));
+	};
+	process.once("SIGINT", shutdown);
+	process.once("SIGTERM", shutdown);
 }

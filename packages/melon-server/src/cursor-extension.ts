@@ -46,6 +46,38 @@ function cursorSdkResolvers(): NodeJS.Require[] {
 export const CURSOR_PROVIDER_ID = "cursor";
 let cachedCursorSessionIsolationAvailable: boolean | undefined;
 
+/** Last Cursor catalog load outcome — exposed to GET /models for DBG. */
+export type CursorCatalogStatus = {
+	loaded: boolean;
+	isolationAvailable: boolean;
+	extensionPath: string | null;
+	modelCount: number;
+	/** Human-readable issues (missing key, discovery failure, patch missing, …). */
+	issues: string[];
+};
+
+let cursorCatalogStatus: CursorCatalogStatus = {
+	loaded: false,
+	isolationAvailable: false,
+	extensionPath: null,
+	modelCount: 0,
+	issues: ["Cursor catalog not loaded yet"],
+};
+
+export function getCursorCatalogStatus(): CursorCatalogStatus {
+	return { ...cursorCatalogStatus, issues: [...cursorCatalogStatus.issues] };
+}
+
+function setCursorCatalogStatus(next: CursorCatalogStatus): void {
+	cursorCatalogStatus = {
+		...next,
+		issues: next.issues.map((m) => rewriteCursorError(m)),
+	};
+	for (const issue of cursorCatalogStatus.issues) {
+		console.warn("[melon] cursor:", issue);
+	}
+}
+
 /** Bundled pi-cursor-sdk package dir, or null when not installed. */
 export function cursorExtensionPath(): string | null {
 	for (const req of cursorSdkResolvers()) {
@@ -117,7 +149,15 @@ function loadCursorProviderPieces(): CursorProviderPieces | null {
 			streamCursorLazy: lazy.streamCursorLazy,
 			CURSOR_API_KEY_CONFIG_VALUE: apiKey.CURSOR_API_KEY_CONFIG_VALUE,
 		};
-	} catch {
+	} catch (e) {
+		const message = e instanceof Error ? e.message : String(e);
+		setCursorCatalogStatus({
+			loaded: false,
+			isolationAvailable: cursorSessionIsolationAvailable(),
+			extensionPath: extPath,
+			modelCount: 0,
+			issues: [`Failed to load Cursor SDK modules: ${message}`],
+		});
 		return null;
 	}
 }
@@ -129,20 +169,58 @@ function loadCursorProviderPieces(): CursorProviderPieces | null {
  * keeps ModelRuntime from registering an unused bridge.
  */
 export async function loadCursorProviderInto(runtime: ModelRuntime): Promise<void> {
+	const extPath = cursorExtensionPath();
+	const isolation = cursorSessionIsolationAvailable();
+
 	// Other providers remain available when the Cursor patch is absent. Cursor
 	// itself stays out of the catalog rather than silently running cross-wired.
-	if (!cursorSessionIsolationAvailable()) return;
-	const pieces = loadCursorProviderPieces();
-	if (!pieces) return;
+	if (!isolation) {
+		setCursorCatalogStatus({
+			loaded: false,
+			isolationAvailable: false,
+			extensionPath: extPath,
+			modelCount: 0,
+			issues: [
+				extPath
+					? "Cursor unavailable: per-card isolation patch missing on pi-cursor-sdk. Reinstall desktop dependencies and restart Melon."
+					: "Cursor unavailable: pi-cursor-sdk is not installed in this Melon build.",
+			],
+		});
+		return;
+	}
 
-	let fallbackMessage: string | undefined;
-	const models = await pieces.discoverModels({
-		onFallback: (issue) => {
-			fallbackMessage = issue.message;
-		},
-	});
-	if (fallbackMessage) {
-		console.warn("[melon] cursor model catalog fallback:", fallbackMessage);
+	const pieces = loadCursorProviderPieces();
+	if (!pieces) {
+		if (!cursorCatalogStatus.issues.length || cursorCatalogStatus.issues[0] === "Cursor catalog not loaded yet") {
+			setCursorCatalogStatus({
+				loaded: false,
+				isolationAvailable: true,
+				extensionPath: extPath,
+				modelCount: 0,
+				issues: ["Cursor SDK pieces failed to load (model-discovery / provider-lazy / api-key)."],
+			});
+		}
+		return;
+	}
+
+	const issues: string[] = [];
+	let models: unknown[] = [];
+	try {
+		models = await pieces.discoverModels({
+			onFallback: (issue) => {
+				issues.push(issue.message);
+			},
+		});
+	} catch (e) {
+		const message = e instanceof Error ? e.message : String(e);
+		setCursorCatalogStatus({
+			loaded: false,
+			isolationAvailable: true,
+			extensionPath: extPath,
+			modelCount: 0,
+			issues: [`Cursor model discovery threw: ${message}`],
+		});
+		return;
 	}
 
 	try {
@@ -155,10 +233,30 @@ export async function loadCursorProviderInto(runtime: ModelRuntime): Promise<voi
 			streamSimple: pieces.streamCursorLazy as never,
 		});
 	} catch (e) {
-		console.error(`[melon] failed to register provider "${CURSOR_PROVIDER_ID}":`, (e as Error)?.message ?? e);
+		const message = e instanceof Error ? e.message : String(e);
+		setCursorCatalogStatus({
+			loaded: false,
+			isolationAvailable: true,
+			extensionPath: extPath,
+			modelCount: 0,
+			issues: [`Failed to register Cursor provider: ${message}`],
+		});
 		return;
 	}
-	await runtime.refresh({ allowNetwork: false });
+
+	try {
+		await runtime.refresh({ allowNetwork: false });
+	} catch (e) {
+		issues.push(`Cursor provider refresh failed: ${e instanceof Error ? e.message : String(e)}`);
+	}
+
+	setCursorCatalogStatus({
+		loaded: true,
+		isolationAvailable: true,
+		extensionPath: extPath,
+		modelCount: models.length,
+		issues,
+	});
 }
 
 /**
@@ -170,6 +268,7 @@ export function rewriteCursorError(message: string): string {
 	if (!/cursor/i.test(message)) return message;
 	return message
 		.replace(/\/login \(Use an API key -> Cursor\)/gi, "Melon's provider settings (Cursor → add key)")
+		.replace(/\bso \/login and model selection/gi, "so Melon's provider settings and model selection")
 		.replace(/run \/cursor-refresh-models to refresh/gi, "start a new chat card to refresh")
 		.replace(/\/cursor-refresh-models/g, "a new chat card");
 }
