@@ -4,7 +4,7 @@
 
   # Melon
 
-> **AI thinking, without losing the context.**
+> **Thinking with AI, without losing the context.**
 
 Most of my work with AI starts as one question.
 
