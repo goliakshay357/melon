@@ -6,15 +6,13 @@
 
 > **Thinking with AI, without losing the context.**
 
-Most of my work with AI starts as one question.
+Most of my work with AI starts as one question. Then it branches.
 
-Then it branches.
+A side question becomes a research thread. That thread leads somewhere else.
+- I open another chat.
+- I save something.
+- I come back later.
 
-A side question becomes a research thread.
-That thread leads somewhere else.
-I open another chat.
-I save something.
-I come back later.
 Now the useful context is spread across conversations, tabs, notes, and my own head.
 
 The problem isn't generating more answers.
