@@ -59,21 +59,19 @@ The canvas is just the surface.
 
 ## Why the branching?
 
-Because not every thought deserves to pollute the main thread.
+- Because not every thought deserves to pollute the main thread.
 
-Sometimes I want to go down a rabbit hole for 20 minutes.
+- Sometimes I want to go down a rabbit hole for 20 minutes.
 
-Sometimes I want to try another approach.
+- Sometimes I want to try another approach.
 
-Sometimes I just want to understand one thing.
+- Sometimes I just want to understand one thing.
 
 I should be able to do that, bring back what matters, and move on.
 
 ---
 
 ## And the models?
-
-They are part of the same problem.
 
 Not every branch needs the best model.
 
