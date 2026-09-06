@@ -1,4 +1,4 @@
-import { memo as ReactMemo, useCallback, useEffect, useRef, useState } from 'react';
+import { memo as ReactMemo, useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
     Handle,
@@ -8,14 +8,72 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { Bug, ChevronDown, Copy, Minimize2, MoreHorizontal, Pencil, Plus, X } from 'lucide-react';
+import { BookMarked, Bug, ChevronDown, Copy, Minimize2, MoreHorizontal, Pencil, Plus, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { PromptComposer } from '@/components/prompt-composer';
 import { QuestionPanel } from '@/components/question-panel';
 import { ToolRunBlock } from '@/components/tool-run-block';
 import { DEFAULT_CARD_SIZE, type TraceEvent } from '@/types/session-card';
+import {
+    mentionExists,
+    mentionPaths,
+    queueExistenceCheck,
+    splitMentionSpans,
+    subscribeExistence,
+} from '@/lib/mentions';
 import { cn } from '@/lib/utils';
+
+/**
+ * User message text with @-mentions: sky when the file exists, red when it
+ * doesn't, hover shows the absolute path, click opens it on the canvas.
+ */
+function UserTextWithMentions({ text }: { text: string }) {
+    const cwd = useCanvasStore((s) => s.worktreePath ?? s.folder);
+    const folder = useCanvasStore((s) => s.folder);
+    const [, bump] = useReducer((x: number) => x + 1, 0);
+    useEffect(() => subscribeExistence(bump), [bump]);
+    useEffect(() => {
+        queueExistenceCheck(cwd, mentionPaths(text), folder !== cwd ? folder : null);
+    }, [cwd, folder, text]);
+    const spans = splitMentionSpans(text);
+    return (
+        <>
+            {spans.map((s, i) =>
+                s.mention ? (
+                    <span
+                        key={i}
+                        role="button"
+                        tabIndex={0}
+                        className={cn(
+                            'cursor-pointer rounded-sm font-medium',
+                            mentionExists(cwd, s.mention) === true
+                                ? 'text-sky-600 hover:underline dark:text-sky-400'
+                                : mentionExists(cwd, s.mention) === false
+                                  ? 'text-red-500 hover:underline'
+                                  : 'underline decoration-dotted underline-offset-2',
+                        )}
+                        title={cwd ? `${cwd}/${s.mention}` : s.mention}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            void useCanvasStore.getState().openFileOnCanvas(s.mention as string);
+                        }}
+                        onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                                e.stopPropagation();
+                                void useCanvasStore.getState().openFileOnCanvas(s.mention as string);
+                            }
+                        }}
+                    >
+                        {s.text}
+                    </span>
+                ) : (
+                    <span key={i}>{s.text}</span>
+                ),
+            )}
+        </>
+    );
+}
 
 export type ChatCardNodeType = Node<{ cardId: string }, 'chatCard'>;
 
@@ -71,11 +129,26 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     streaming: boolean;
     totalMessages: number;
 }) {
+    if (m.role === 'system') {
+        const bad = m.text.startsWith('✗');
+        return (
+            <div className="flex justify-center">
+                <span
+                    className={cn(
+                        'max-w-[92%] rounded-md px-2 py-0.5 text-center text-[10px]',
+                        bad ? 'bg-red-500/10 text-red-500' : 'bg-secondary/60 text-muted-foreground',
+                    )}
+                >
+                    {m.text}
+                </span>
+            </div>
+        );
+    }
     if (m.role === 'user') {
         return (
             <div className="flex justify-end">
                 <div className="max-w-[92%] overflow-hidden rounded-xl bg-primary/10 px-3 py-1.5 text-xs leading-relaxed text-primary">
-                    {m.text}
+                    <UserTextWithMentions text={m.text} />
                 </div>
             </div>
         );
@@ -839,6 +912,18 @@ function ChatCardNodeInner({
                     >
                         <Bug className="size-3.5" />
                         DBG
+                    </button>
+                    <button
+                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                        disabled={serverOffline}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            if (serverOffline) return;
+                            void useCanvasStore.getState().createHandoff(id);
+                        }}
+                        title={serverOffline ? 'Reconnecting to server…' : 'Distill this conversation into a handoff note'}
+                    >
+                        <BookMarked className="size-4" />
                     </button>
                     <button
                         className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"

@@ -25,9 +25,15 @@ export default defineConfig({
             "/folders": "http://127.0.0.1:8788",
             "/skills": "http://127.0.0.1:8788",
             "/viz": "http://127.0.0.1:8788",
+            "/notes": "http://127.0.0.1:8788",
+            "/files": "http://127.0.0.1:8788",
+            "/file": "http://127.0.0.1:8788",
         },
     },
     base: './',
+    define: {
+        __MELON_BUILD__: JSON.stringify(new Date().toISOString()),
+    },
     plugins: [react()],
     optimizeDeps: {
         // New deps mid-session otherwise 504 "Outdated Optimize Dep" until restart.

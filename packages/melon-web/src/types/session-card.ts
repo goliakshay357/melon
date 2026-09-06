@@ -29,7 +29,7 @@ export interface ToolRun {
 }
 
 export interface ChatMessage {
-	role: "user" | "assistant";
+	role: "user" | "assistant" | "system";
 	text: string;
 	/** Model reasoning stream (thinking models only). */
 	thinking?: string;
@@ -55,15 +55,79 @@ export interface PendingExtensionUi {
 	placeholder?: string;
 }
 
+/** Delivery ledger entry mirrored from the artifact's frontmatter `wires`. */
+export interface NoteWireView {
+	cardId: string;
+	mode: "seed" | "inject";
+	revision: number;
+	status: "delivered" | "queued" | "failed";
+	deliveredAt?: string;
+	/** Artifact body drifted since this delivery — offer "send update". */
+	stale?: boolean;
+}
+
+/**
+ * Canvas-side state of a note node (kind: "note"). The artifact FILE at
+ * `<folder>/.melon/notes/handoff/<artifactId>.md` is the source of truth;
+ * `body` here is a display copy hydrated from it and saved back with PUT.
+ */
+export interface NoteState {
+	/** null until generation succeeds (generating/error states). */
+	artifactId: string | null;
+	noteKind: "handoff" | "merge";
+	state: "generating" | "ready" | "error";
+	error?: string;
+	body: string;
+	/** true once the display copy was hydrated from disk / generation. */
+	bodyLoaded: boolean;
+	/** Bumped only when the body is replaced from the server (remounts the editor). */
+	bodyVersion?: number;
+	/** Unsaved local edits (debounced PUT in flight or queued). */
+	dirty?: boolean;
+	/** Live generation progress line ("distilling with …", failures, …). */
+	statusLine?: string;
+	/** Optional focus instruction the artifact was generated with. */
+	focus?: string;
+	/** Artifact file path (absolute, as reported by the server). */
+	path?: string;
+	revision: number;
+	/** Model the artifact was distilled with (frontmatter generatedBy.model). */
+	model?: string;
+	/** Concurrency token from the last GET/PUT (server file mtime, ms). */
+	mtimeMs: number;
+	sourceCardId?: string;
+	/** Merge retry inputs: the source cards captured at merge creation. */
+	mergeSources?: Array<{ cardId?: string; title: string }>;
+	wires: NoteWireView[];
+}
+
 export interface SessionCard {
 	id: string;
-	/** chat = AI conversation · document = Notion-like markdown editor */
-	kind?: "chat" | "document";
+	/** chat = AI conversation · document = markdown editor · note = file-backed artifact node */
+	kind?: "chat" | "document" | "note";
+	/** Note artifact state (kind: "note" only). */
+	note?: NoteState;
 	/** Raw markdown content for document cards. */
 	documentContent?: string;
+	/**
+	 * File-backed manual document (.melon/notes/manual/<name>.md). When set,
+	 * the FILE is the source of truth and edits autosave to it via PUT /file.
+	 */
+	documentFile?: string;
+	/** Root the file lives under (agentCwd at creation — agent can read it). */
+	documentCwd?: string;
+	/** Bumped when the document body is adopted from disk (remounts editor). */
+	documentVersion?: number;
+	/** Concurrency token for manual saves (server file mtime, ms). */
+	documentMtimeMs?: number;
 	title: string;
 	position: { x: number; y: number };
 	parentId: string | null;
+	/**
+	 * Merge notes: edges from EVERY source card (parentId stays null so the
+	 * single-parent fork edge logic is not triggered for note cards).
+	 */
+	parentIds?: string[];
 	forkedFromEntryId?: string;
 	status: CardStatus;
 	messages: ChatMessage[];

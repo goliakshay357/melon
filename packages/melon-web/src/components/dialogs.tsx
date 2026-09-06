@@ -31,7 +31,17 @@ type Request =
           description?: string;
           options: Array<{ label: string; value: string; description?: string }>;
           resolve: (v: string | null) => void;
-      };
+      }
+    | {
+          kind: 'diff';
+          title: string;
+          description?: string;
+          oldText: string;
+          newText: string;
+          confirmLabel: string;
+          resolve: (v: boolean) => void;
+      }
+;
 
 let push: ((r: Request) => void) | null = null;
 
@@ -77,6 +87,26 @@ export function askChoice(opts: {
     });
 }
 
+/**
+ * Side-by-side proposal review (regenerate / AI refine). Resolves true only
+ * when the user accepts the proposed text.
+ */
+export function showDiff(opts: {
+    title: string;
+    description?: string;
+    oldText: string;
+    newText: string;
+    confirmLabel: string;
+}): Promise<boolean> {
+    return new Promise((resolve) => {
+        if (!push) {
+            resolve(false);
+            return;
+        }
+        push({ kind: 'diff', ...opts, resolve });
+    });
+}
+
 /** True = private copy, false = edit original, null = cancelled. */
 export async function chooseCanvasIsolation(): Promise<boolean | null> {
     const choice = await askChoice({
@@ -109,6 +139,7 @@ export function DialogHost() {
     const [req, setReq] = useState<Request | null>(null);
     const [value, setValue] = useState('');
 
+
     useEffect(() => {
         push = (r: Request) => {
             setValue(r.kind === 'text' ? (r.initial ?? '') : '');
@@ -139,7 +170,9 @@ export function DialogHost() {
             <RadixDialog.Portal>
                 <RadixDialog.Overlay className="fixed inset-0 z-[1000] bg-black/60" />
                 <RadixDialog.Content
-                    className="fixed left-1/2 top-1/2 z-[1001] w-[420px] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border bg-card p-5 shadow-2xl focus:outline-none"
+                    className={`fixed left-1/2 top-1/2 z-[1001] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border bg-card p-5 shadow-2xl focus:outline-none ${
+                        req?.kind === 'diff' ? 'w-[860px] max-w-[92vw]' : 'w-[420px]'
+                    }`}
                     onKeyDown={(e) => e.stopPropagation()}
                 >
                     <RadixDialog.Title className="text-sm font-semibold text-card-foreground">
@@ -221,6 +254,44 @@ export function DialogHost() {
                             </button>
                         </div>
                     )}
+                    {req?.kind === 'diff' && (
+                        <>
+                            {req.description && (
+                                <RadixDialog.Description className="mt-2 text-xs leading-relaxed text-muted-foreground">
+                                    {req.description}
+                                </RadixDialog.Description>
+                            )}
+                            <div className="mt-3 grid h-[55vh] grid-cols-2 gap-2">
+                                <div className="flex min-h-0 flex-col">
+                                    <span className="mb-1 text-[11px] font-medium text-muted-foreground">Current</span>
+                                    <pre className="nowheel min-h-0 flex-1 overflow-auto rounded-lg border border-border bg-background p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-muted-foreground">
+                                        {req.oldText}
+                                    </pre>
+                                </div>
+                                <div className="flex min-h-0 flex-col">
+                                    <span className="mb-1 text-[11px] font-medium text-card-foreground">Proposed</span>
+                                    <pre className="nowheel min-h-0 flex-1 overflow-auto rounded-lg border border-ring bg-background p-2 text-[11px] leading-relaxed whitespace-pre-wrap text-card-foreground">
+                                        {req.newText}
+                                    </pre>
+                                </div>
+                            </div>
+                            <div className="mt-4 flex justify-end gap-2">
+                                <button
+                                    className="rounded-lg px-3 py-1.5 text-xs text-muted-foreground hover:bg-secondary"
+                                    onClick={() => close(false)}
+                                >
+                                    Discard
+                                </button>
+                                <button
+                                    className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:bg-primary/90"
+                                    onClick={() => close(true)}
+                                >
+                                    {req.confirmLabel}
+                                </button>
+                            </div>
+                        </>
+                    )}
+
                 </RadixDialog.Content>
             </RadixDialog.Portal>
         </RadixDialog.Root>

@@ -54,11 +54,25 @@ const bareTaskListRule = $inputRule(
 		}),
 );
 
-function EditorInner({ cardId, initialContent }: { cardId: string; initialContent: string }) {
+interface DocumentEditorProps {
+	cardId: string;
+	initialContent: string;
+	/**
+	 * Markdown update sink. Defaults to `updateCard(cardId, { documentContent })`
+	 * (document cards). Note cards pass their own store path.
+	 */
+	onMarkdownUpdate?: (md: string) => void;
+}
+
+function EditorInner({ cardId, initialContent, onMarkdownUpdate }: DocumentEditorProps) {
 	const boxRef = useRef<HTMLDivElement>(null);
 	// Freeze the seed markdown for this editor instance. Later keystrokes live
 	// in Milkdown/ProseMirror history — re-feeding store content would wipe undo.
 	const seedRef = useRef(initialContent);
+	// The listener registers once at editor creation — route updates through a
+	// ref so a changed callback identity never goes stale.
+	const onUpdateRef = useRef(onMarkdownUpdate);
+	onUpdateRef.current = onMarkdownUpdate;
 
 	const focusEditor = () => {
 		setTimeout(() => {
@@ -75,7 +89,8 @@ function EditorInner({ cardId, initialContent }: { cardId: string; initialConten
 				ctx.set(
 					listenerCtx,
 					new ListenerManager().markdownUpdated((_ctx, md) => {
-						useCanvasStore.getState().updateCard(cardId, { documentContent: md });
+						if (onUpdateRef.current) onUpdateRef.current(md);
+						else useCanvasStore.getState().updateCard(cardId, { documentContent: md });
 					}),
 				);
 			})
@@ -111,7 +126,7 @@ function EditorInner({ cardId, initialContent }: { cardId: string; initialConten
 	);
 }
 
-function DocumentEditorInner({ cardId, initialContent }: { cardId: string; initialContent: string }) {
+function DocumentEditorInner({ cardId, initialContent, onMarkdownUpdate }: DocumentEditorProps) {
 	const theme = useActiveTheme();
 	return (
 		<div
@@ -120,7 +135,7 @@ function DocumentEditorInner({ cardId, initialContent }: { cardId: string; initi
 			data-appearance={theme.appearance}
 		>
 			<MilkdownProvider>
-				<EditorInner cardId={cardId} initialContent={initialContent} />
+				<EditorInner cardId={cardId} initialContent={initialContent} onMarkdownUpdate={onMarkdownUpdate} />
 			</MilkdownProvider>
 		</div>
 	);

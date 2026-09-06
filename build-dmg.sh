@@ -12,6 +12,23 @@ echo "── 2. build melon-server ──"
 cd "$ROOT/packages/melon-server"
 npm run build
 
+echo "── 2b. build pi-coding-agent + sync into desktop shell ──"
+# The desktop bundles its own npm-installed copy of pi-coding-agent. A local
+# DMG build must ship the WORKSPACE build (unreleased exports included), so
+# refresh that copy's dist + package.json from the tree. Runtime deps
+# (pi-ai, …) stay as installed — the version pin in step 4 covers them.
+cd "$ROOT/packages/coding-agent"
+npm run build
+DESK_AGENT="$ROOT/desktop/node_modules/@earendil-works/pi-coding-agent"
+if [ ! -d "$DESK_AGENT" ]; then
+  echo "  ✗ $DESK_AGENT missing — run: cd desktop && npm install"
+  exit 1
+fi
+rm -rf "$DESK_AGENT/dist"
+cp -r dist "$DESK_AGENT/dist"
+cp package.json "$DESK_AGENT/package.json"
+echo "  synced workspace pi-coding-agent $(node -p "require('./package.json').version") → desktop"
+
 # NOTE: server runtime deps must be declared in desktop/package.json.
 # electron-builder packages node_modules ONLY from the app root manifest
 # (desktop/node_modules) — nested server/node_modules are always excluded

@@ -1,5 +1,7 @@
 import { nanoid } from "nanoid";
 import { create } from "zustand";
+import { askText, showDiff } from "@/components/dialogs";
+import { expandDiagramCommand, expandMentions, parseInput } from "@/lib/input-parser";
 import {
 	clampIntoView,
 	findOpenSpot,
@@ -12,6 +14,7 @@ import {
 import {
 	type ChatMessage,
 	DEFAULT_CARD_SIZE,
+	type NoteState,
 	newCardId,
 	type PendingExtensionUi,
 	type SessionCard,
@@ -524,7 +527,7 @@ interface CanvasState {
 		position: { x: number; y: number },
 		parentId?: string | null,
 		forcedId?: string,
-		kind?: "chat" | "document",
+		kind?: "chat" | "document" | "note",
 		/** Omit to spawn at the viewport-aware default size. */
 		size?: SpawnSize,
 	) => string;
@@ -580,6 +583,43 @@ interface CanvasState {
 	deleteCards: (ids: string[]) => void;
 	sendMessage: (cardId: string, text: string, opts?: { cwd?: string; sessionFile?: string }) => Promise<boolean>;
 	resumeSession: (sessionFile: string) => Promise<string | null>;
+	/** Distill a card's session into a handoff note artifact spawned beside it. */
+	createHandoff: (sourceCardId: string) => Promise<void>;
+	/** Retry generation on a note card stuck in the error state. */
+	retryHandoff: (noteCardId: string) => Promise<void>;
+	/** Sync a note card with its artifact file (mount / canvas switch). */
+	hydrateNote: (cardId: string, opts?: { force?: boolean }) => Promise<void>;
+	/** Local note body edit — store-first, debounced PUT behind it. */
+	setNoteBody: (cardId: string, body: string) => void;
+	/** Flush pending note edits (PUT body+title). force skips the mtime token. */
+	saveNoteEdits: (cardId: string, opts?: { force?: boolean }) => Promise<void>;
+	/** Spawn a chat card beside the note and seed it with the artifact body. */
+	wireNoteToNewCard: (noteCardId: string) => Promise<void>;
+	/** Inject (or seed) the note's current body into an existing card. */
+	wireNoteToExisting: (noteCardId: string, targetCardId: string) => Promise<void>;
+	/** Re-deliver the current body to every stale wired target. */
+	sendAllNoteUpdates: (noteCardId: string) => Promise<void>;
+	/** Regenerate from pinned provenance → diff → accept bumps the revision. */
+	regenerateNote: (noteCardId: string, opts?: { includeNewer?: boolean }) => Promise<void>;
+	/** AI refine: instruction → proposal → diff → accept writes via PUT. */
+	refineNote: (noteCardId: string, instruction: string) => Promise<void>;
+	/** Merge 2+ selected cards: distill-each + synthesis → merge note. */
+	createMerge: (sourceCardIds: string[]) => Promise<void>;
+	/** One-shot viewport centering request for a card id (consumed by canvas). */
+	focusCardId: string | null;
+	requestFocusCard: (id: string | null) => void;
+	/** Open a @-mentioned path on the canvas (note node or document card). */
+	openFileOnCanvas: (relPath: string) => Promise<void>;
+	/** The agent mutated a file — refresh document/note cards bound to it. */
+	refreshFileCards: (absPath: string) => Promise<void>;
+	/** Write pending manual edits now (blur). No-op when nothing is pending. */
+	flushManualSave: (cardId: string) => Promise<void>;
+	/** Flush every pending manual + note edit (before an agent turn). */
+	flushPendingManualSaves: () => Promise<void>;
+	/** Create a file-backed manual document card ("New document"). */
+	createManualDocument: (position: { x: number; y: number }) => Promise<string | null>;
+	/** Local manual body edit — store-first, debounced PUT /file behind it. */
+	setDocumentBody: (cardId: string, body: string) => void;
 }
 
 function loadLastLocation(): { folder: string | null; canvasId: string | null } {
@@ -604,6 +644,340 @@ let switchingCanvas = false;
  * intentional; the server 409 empty-overwrite guard must not resurrect cards.
  */
 const intentionalEmptyCanvases = new Set<string>();
+
+// ── Note artifacts (handoff) ──
+const noteSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Debounce timers for file-backed manual document saves. */
+const manualSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+/** Live generation job streams (jobId → SSE). */
+const jobStreams = new Map<string, EventSource>();
+/** Source cards with a handoff generation in flight (double-click guard). */
+const generatingNotes = new Set<string>();
+
+function patchNote(cardId: string, patch: Partial<NoteState>) {
+	const cur = findCard(cardId);
+	if (!cur?.note) return;
+	useCanvasStore.getState().updateCard(cardId, { note: { ...cur.note, ...patch } });
+}
+
+/**
+ * Start a handoff generation job. The artifact file (slug of the title) is
+ * created on the server BEFORE any AI work; progress and the streamed body
+ * land on the note card live. Pass artifactId to re-run into an existing shell.
+ */
+async function startHandoffJob(
+	noteCardId: string,
+	params: {
+		cwd: string;
+		sourceCardId?: string;
+		sourceTitle?: string;
+		model?: string;
+		focus?: string;
+		artifactId?: string;
+	},
+): Promise<void> {
+	try {
+		const res = await fetch("/notes/generate/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				cwd: params.cwd,
+				sourceCardId: params.sourceCardId,
+				sourceTitle: params.sourceTitle,
+				sessionFile: params.sourceCardId ? findCard(params.sourceCardId)?.sessionFile : undefined,
+				canvasId: useCanvasStore.getState().canvasId,
+				model: params.model,
+				focus: params.focus || undefined,
+				...(params.artifactId ? { artifactId: params.artifactId } : {}),
+			}),
+		});
+		if (!res.ok) {
+			const d = (await res.json().catch(() => ({}))) as { error?: string };
+			throw new Error(d.error ?? `HTTP ${res.status}`);
+		}
+		const d = (await res.json()) as { id: string; jobId: string; model: string };
+		patchNote(noteCardId, {
+			artifactId: d.id,
+			state: "generating",
+			statusLine: "starting…",
+			body: "",
+			bodyLoaded: true,
+			revision: 1,
+			model: d.model,
+			error: undefined,
+		});
+		subscribeNoteJob(noteCardId, d.jobId);
+	} catch (e) {
+		patchNote(noteCardId, { state: "error", error: e instanceof Error ? e.message : String(e) });
+	}
+}
+
+/**
+ * /handoff [message] — spawn the note beside the source card and start the
+ * generation job. The message names the artifact AND steers the focus;
+ * empty message = default handoff (card title, no focus).
+ */
+async function slashHandoff(cardId: string, message: string): Promise<boolean> {
+	const state = useCanvasStore.getState();
+	const src = findCard(cardId);
+	if (!src || state.serverOffline || !state.folder) return false;
+	if (src.kind === "note" || src.kind === "document") {
+		patchCardInStore(cardId, (c) => ({
+			...c,
+			messages: [...c.messages, { role: "system", text: "handoffs work on chat cards only" }],
+		}));
+		return true;
+	}
+	const name = (message || src.title).trim();
+	const focus = message.trim() || undefined;
+	const size = currentSpawnSize();
+	const pos = findOpenSpot(useCanvasStore.getState().cards, cardId, size.width, size.height);
+	const noteCardId = newCardId();
+	useCanvasStore.getState().addCard(pos, cardId, noteCardId, "note", size);
+	useCanvasStore.getState().updateCard(noteCardId, {
+		title: name.slice(0, 44),
+		note: {
+			artifactId: null,
+			noteKind: "handoff",
+			state: "generating",
+			body: "",
+			bodyLoaded: true,
+			revision: 0,
+			mtimeMs: 0,
+			model: src.model,
+			focus,
+			sourceCardId: cardId,
+			wires: [],
+		},
+	});
+	patchCardInStore(cardId, (c) => ({
+		...c,
+		messages: [...c.messages, { role: "system", text: `✓ handoff started — ${name}.md (generating on the canvas)` }],
+	}));
+	await startHandoffJob(noteCardId, {
+		cwd: state.folder,
+		sourceCardId: cardId,
+		sourceTitle: name,
+		model: src.model,
+		focus,
+	});
+	return true;
+}
+
+/** Start a merge job (distill-each + synthesis, streamed live). */
+async function startMergeJob(
+	noteCardId: string,
+	params: {
+		cwd: string;
+		title: string;
+		sources: Array<{ cardId?: string; title: string }>;
+		model: string;
+	},
+): Promise<void> {
+	try {
+		const res = await fetch("/notes/merge/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				cwd: params.cwd,
+				title: params.title,
+				sources: params.sources,
+				canvasId: useCanvasStore.getState().canvasId,
+				model: params.model,
+			}),
+		});
+		if (!res.ok) {
+			const d = (await res.json().catch(() => ({}))) as { error?: string };
+			throw new Error(d.error ?? `HTTP ${res.status}`);
+		}
+		const d = (await res.json()) as { id: string; jobId: string; model: string };
+		patchNote(noteCardId, {
+			artifactId: d.id,
+			state: "generating",
+			statusLine: "starting…",
+			body: "",
+			bodyLoaded: true,
+			revision: 1,
+			model: d.model,
+			error: undefined,
+		});
+		subscribeNoteJob(noteCardId, d.jobId);
+	} catch (e) {
+		patchNote(noteCardId, { state: "error", error: e instanceof Error ? e.message : String(e) });
+	}
+}
+
+/** Write a manual document's current content; notify streaming siblings. */
+async function flushManualSaveNow(cardId: string): Promise<void> {
+	const cur = findCard(cardId);
+	if (!cur?.documentFile) return;
+	const roots = [cur.documentCwd, useCanvasStore.getState().folder ?? ""].filter(
+		(r, i, arr) => r && arr.indexOf(r) === i,
+	) as string[];
+	let saved = false;
+	for (const root of roots) {
+		try {
+			const r = await fetch("/file", {
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ cwd: root, path: cur.documentFile, content: cur.documentContent ?? "" }),
+			});
+			if (!r.ok) continue;
+			const d = (await r.json()) as { mtimeMs: number };
+			patchCardInStore(cardId, (c) => ({ ...c, documentMtimeMs: d.mtimeMs, dirty: false, error: undefined }));
+			saved = true;
+			break;
+		} catch {
+			/* try next root */
+		}
+	}
+	if (!saved) {
+		useCanvasStore.setState({ canvasNotice: `Could not save ${cur.documentFile}.` });
+		return;
+	}
+	// The user changed the file behind any LIVE, STREAMING agent on this
+	// canvas — nudge it so it never argues about whose edit is whose.
+	for (const c of useCanvasStore.getState().cards) {
+		if ((c.kind ?? "chat") !== "chat" || c.id === cardId) continue;
+		if (!attached.has(c.id) || c.status !== "streaming") continue;
+		void fetch(`/sessions/${c.id}/notify-file`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ path: `${cur.documentCwd ?? ""}/${cur.documentFile}` }),
+		}).catch(() => {});
+	}
+}
+
+/**
+ * Subscribe to a generation job: statuses land in the note's statusLine, body
+ * deltas stream into the visible document, done/error finalize the card.
+ */
+function subscribeNoteJob(noteCardId: string, jobId: string) {
+	jobStreams.get(jobId)?.close();
+	const es = new EventSource(`/notes/jobs/${jobId}/events`);
+	jobStreams.set(jobId, es);
+	es.onmessage = (ev) => {
+		const data = JSON.parse(ev.data as string) as
+			| { type: "status"; message: string }
+			| { type: "delta"; text: string }
+			| {
+					type: "done";
+					artifact: {
+						id: string;
+						title: string;
+						revision: number;
+						body: string;
+						mtimeMs: number;
+						path?: string;
+						generatedBy?: { model: string };
+					};
+			  }
+			| { type: "error"; message: string };
+		if (data.type === "status") {
+			patchNote(noteCardId, { statusLine: data.message });
+		} else if (data.type === "delta") {
+			const cur = findCard(noteCardId)?.note;
+			if (!cur) return;
+			// Streamed body grows live under the status line (read-only view).
+			patchNote(noteCardId, { body: cur.body + data.text });
+		} else if (data.type === "done") {
+			const cur = findCard(noteCardId)?.note;
+			patchNote(noteCardId, {
+				state: "ready",
+				statusLine: undefined,
+				body: data.artifact.body,
+				bodyLoaded: true,
+				bodyVersion: (cur?.bodyVersion ?? 0) + 1,
+				revision: data.artifact.revision,
+				mtimeMs: data.artifact.mtimeMs,
+				model: data.artifact.generatedBy?.model ?? cur?.model,
+				path: data.artifact.path ?? cur?.path,
+				error: undefined,
+			});
+			useCanvasStore.getState().updateCard(noteCardId, {
+				title: (data.artifact.title || findCard(noteCardId)?.title || "").slice(0, 44),
+			});
+			es.close();
+			jobStreams.delete(jobId);
+		} else {
+			patchNote(noteCardId, { state: "error", statusLine: undefined, error: data.message });
+			es.close();
+			jobStreams.delete(jobId);
+		}
+	};
+	es.onerror = () => {
+		// Server gone — leave the state; the user can retry from the card.
+		const cur = findCard(noteCardId)?.note;
+		if (cur?.state === "generating") {
+			patchNote(noteCardId, { state: "error", statusLine: undefined, error: "connection lost during generation" });
+		}
+		es.close();
+		jobStreams.delete(jobId);
+	};
+}
+
+/**
+ * Shared note delivery (seed / inject / update) — the server picks the mode
+ * from the target's state. Returns the mode, or null on no-op/failure.
+ */
+async function deliverNoteTo(noteCardId: string, targetCardId: string): Promise<"seed" | "inject" | null> {
+	const state = useCanvasStore.getState();
+	const note = findCard(noteCardId)?.note;
+	if (!note?.artifactId || !state.folder) return null;
+	try {
+		const res = await fetch(`/notes/${note.artifactId}/wire`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				cwd: state.folder,
+				sessionCwd: state.agentCwd() ?? state.folder,
+				targetCardId,
+				sourceCardId: noteCardId,
+				canvasId: state.canvasId,
+				sessionFile: findCard(targetCardId)?.sessionFile,
+			}),
+		});
+		if (!res.ok) {
+			const d = (await res.json().catch(() => ({}))) as { error?: string };
+			if (res.status === 409 && d.error === "already delivered, unchanged") {
+				pushLog(targetCardId, `• note ${note.artifactId} already delivered, unchanged`);
+				return null;
+			}
+			throw new Error(d.error ?? `HTTP ${res.status}`);
+		}
+		const d = (await res.json()) as {
+			mode: "seed" | "inject";
+			sessionId?: string;
+			sessionFile?: string;
+			message: string;
+			wire: NoteState["wires"][number];
+		};
+		// The server owns the target runtime now — skip the client attach step.
+		attached.add(targetCardId);
+		const target = findCard(targetCardId);
+		useCanvasStore.getState().updateCard(targetCardId, {
+			sessionId: d.sessionId,
+			sessionFile: d.sessionFile,
+			...(target && !target.messages.some((m) => m.text === d.message)
+				? { messages: [...target.messages, { role: "user" as const, text: d.message }] }
+				: {}),
+		});
+		const freshNote = findCard(noteCardId)?.note;
+		if (freshNote) {
+			// Ledger is append-only server-side; the mirror keeps the newest per card.
+			patchNote(noteCardId, {
+				wires: [...freshNote.wires.filter((w) => w.cardId !== targetCardId), d.wire],
+			});
+		}
+		pushLog(targetCardId, `✓ ${d.mode === "seed" ? "seeded" : "injected"} from note ${note.artifactId}`);
+		return d.mode;
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		useCanvasStore.getState().setCardError(targetCardId, `Handoff delivery failed: ${msg}`);
+		pushLog(targetCardId, `✗ delivery failed: ${msg}`);
+		return null;
+	}
+}
 
 /** Close every live EventSource and clear attach state (server process is gone). */
 function tearDownAllStreams(logLine: string) {
@@ -654,6 +1028,193 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	canvasNotice: null,
 	dismissCanvasNotice() {
 		set({ canvasNotice: null });
+	},
+	/** One-shot "center this card" request, consumed by the canvas effect. */
+	focusCardId: null,
+	async refreshFileCards(absPath) {
+		for (const c of get().cards) {
+			// Document card bound to this file?
+			const docFile = c.documentFile;
+			if (docFile && (absPath.endsWith(`/${docFile}`) || absPath === docFile)) {
+				try {
+					const docCwd = c.documentCwd;
+					const root = docCwd && absPath.startsWith(`${docCwd}/`) ? docCwd : (get().folder ?? "");
+					const res = await fetch(`/file?cwd=${encodeURIComponent(root)}&path=${encodeURIComponent(docFile)}`);
+					if (!res.ok) continue;
+					const d = (await res.json()) as { content: string; mtimeMs?: number };
+					patchCardInStore(c.id, (card) => ({
+						...card,
+						documentContent: d.content,
+						documentMtimeMs: d.mtimeMs,
+						documentVersion: (card.documentVersion ?? 0) + 1,
+					}));
+					pushLog(c.id, "✓ agent edit reflected (live)");
+				} catch {
+					/* keep current content */
+				}
+				continue;
+			}
+			// Note node bound to this artifact? (hydrateNote skips when the user
+			// has unsaved edits — their typing wins over the agent's version.)
+			if (c.kind === "note" && c.note?.artifactId && c.note.path) {
+				const notePath = c.note.path;
+				if (absPath === notePath || absPath.endsWith(`/${notePath}`)) {
+					await get().hydrateNote(c.id);
+				}
+			}
+		}
+	},
+	requestFocusCard(id) {
+		set({ focusCardId: id });
+	},
+	/**
+	 * Open a @-mentioned path on the canvas: note artifacts surface (and
+	 * center) their note node; other files open in a document card.
+	 */
+	async openFileOnCanvas(relPath) {
+		const folder = get().folder;
+		if (!folder || get().serverOffline) return;
+		if (/^\.melon\/notes\/handoff\/[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(relPath)) {
+			let artifactId: string | null = null;
+			try {
+				const res = await fetch(
+					`/notes/resolve?cwd=${encodeURIComponent(folder)}&path=${encodeURIComponent(relPath)}`,
+				);
+				if (res.ok) artifactId = ((await res.json()) as { id: string }).id;
+			} catch {
+				/* fall through */
+			}
+			if (!artifactId) {
+				set({ canvasNotice: `Could not open ${relPath}.` });
+				return;
+			}
+			const existing = get().cards.find((c) => c.kind === "note" && c.note?.artifactId === artifactId);
+			if (existing) {
+				get().requestFocusCard(existing.id);
+				return;
+			}
+			const size = currentSpawnSize();
+			const last = get().cards[get().cards.length - 1];
+			const pos = last ? findOpenSpot(get().cards, last.id, size.width, size.height) : { x: 120, y: 120 };
+			const noteCardId = newCardId();
+			get().addCard(pos, null, noteCardId, "note", size);
+			get().updateCard(noteCardId, {
+				title: "Note",
+				note: {
+					artifactId,
+					noteKind: "handoff",
+					state: "ready",
+					body: "",
+					bodyLoaded: false,
+					revision: 0,
+					mtimeMs: 0,
+					wires: [],
+				},
+			});
+			await get().hydrateNote(noteCardId);
+			get().requestFocusCard(noteCardId);
+			return;
+		}
+		try {
+			const res = await fetch(`/file?cwd=${encodeURIComponent(folder)}&path=${encodeURIComponent(relPath)}`);
+			if (!res.ok) {
+				set({ canvasNotice: `Could not open ${relPath}.` });
+				return;
+			}
+			const d = (await res.json()) as { content: string; mtimeMs?: number };
+			const size = currentSpawnSize();
+			const last = get().cards[get().cards.length - 1];
+			const pos = last ? findOpenSpot(get().cards, last.id, size.width, size.height) : { x: 120, y: 120 };
+			// Manual documents: center the existing card instead of duplicating.
+			const manualMatch = relPath.match(/^\.melon\/notes\/manual\/([A-Za-z0-9][A-Za-z0-9._-]*\.md)$/);
+			if (manualMatch) {
+				const existing = get().cards.find((c) => c.documentFile === relPath);
+				if (existing) {
+					get().requestFocusCard(existing.id);
+					return;
+				}
+			}
+			const cardId = newCardId();
+			get().addCard(pos, null, cardId, "document", size);
+			get().updateCard(cardId, {
+				title: (relPath.split("/").pop() ?? "File").replace(/\.md$/, "").slice(0, 44),
+				documentContent: d.content,
+				...(manualMatch ? { documentFile: relPath, documentMtimeMs: d.mtimeMs } : {}),
+			});
+			get().requestFocusCard(cardId);
+		} catch {
+			set({ canvasNotice: `Could not open ${relPath}.` });
+		}
+	},
+
+	async createManualDocument(position) {
+		const folder = get().folder;
+		if (!folder || get().serverOffline) return null;
+		const name = (await askText({ title: "Name this document", initial: "Untitled" }))?.trim();
+		if (!name) return null;
+		// Documents live under the AGENT's working directory so the agent can
+		// read them (worktree canvases: the worktree, not the real folder).
+		const docCwd = get().agentCwd() ?? folder;
+		try {
+			const res = await fetch("/notes/manual/create", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ cwd: docCwd, title: name }),
+			});
+			if (!res.ok) {
+				set({ canvasNotice: "Could not create the document." });
+				return null;
+			}
+			const d = (await res.json()) as { relPath: string; title: string };
+			const content = `# ${d.title}\n\n`;
+			const size = currentSpawnSize();
+			const pos = spawnPosition(position, size);
+			const cardId = newCardId();
+			get().addCard(pos, null, cardId, "document", size);
+			get().updateCard(cardId, {
+				title: d.title.slice(0, 44),
+				documentContent: content,
+				documentFile: d.relPath,
+				documentCwd: docCwd,
+				documentVersion: 1,
+			});
+			return cardId;
+		} catch {
+			set({ canvasNotice: "Could not create the document." });
+			return null;
+		}
+	},
+
+	setDocumentBody(cardId, body) {
+		const card = findCard(cardId);
+		if (!card?.documentFile) return;
+		patchCardInStore(cardId, (c) => ({ ...c, documentContent: body }));
+		const prev = manualSaveTimers.get(cardId);
+		if (prev) clearTimeout(prev);
+		manualSaveTimers.set(
+			cardId,
+			setTimeout(() => {
+				manualSaveTimers.delete(cardId);
+				void flushManualSaveNow(cardId);
+			}, 800),
+		);
+	},
+
+	/** Blur flush: write pending manual edits NOW (no-op when nothing pending). */
+	async flushManualSave(cardId) {
+		const pending = manualSaveTimers.get(cardId);
+		if (!pending) return;
+		clearTimeout(pending);
+		manualSaveTimers.delete(cardId);
+		await flushManualSaveNow(cardId);
+	},
+
+	/** Flush every pending manual + note edit (before an agent turn starts). */
+	async flushPendingManualSaves() {
+		for (const id of [...manualSaveTimers.keys()]) await get().flushManualSave(id);
+		for (const c of get().cards) {
+			if (c.kind === "note" && c.note?.dirty) await get().saveNoteEdits(c.id);
+		}
 	},
 	async continueLocalAfterMissingWorktree() {
 		const folder = get().folder;
@@ -1279,6 +1840,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
 	async startConversation(text, position, options) {
 		const prompt = text.trim();
+		if (prompt.startsWith("/")) {
+			set({ canvasNotice: "Slash commands work inside a chat card — start a conversation first." });
+			return false;
+		}
 		const folder = get().folder;
 		if (
 			startingConversation ||
@@ -1461,7 +2026,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		set({ scrollAction: a });
 	},
 
-	addCard(position, parentId = null, forcedId?: string, kind: "chat" | "document" = "chat", size?: SpawnSize) {
+	addCard(
+		position,
+		parentId = null,
+		forcedId?: string,
+		kind: "chat" | "document" | "note" = "chat",
+		size?: SpawnSize,
+	) {
 		pushUndo(get().cards);
 		const parent = parentId ? get().cards.find((c) => c.id === parentId) : undefined;
 		const cardSize = size ?? currentSpawnSize();
@@ -1903,6 +2474,322 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		return cardId;
 	},
 
+	async createHandoff(sourceCardId) {
+		// Button path = zero questions: same as "/handoff" with no message.
+		const src = findCard(sourceCardId);
+		if (!src || get().serverOffline || generatingNotes.has(sourceCardId)) return;
+		generatingNotes.add(sourceCardId);
+		try {
+			await slashHandoff(sourceCardId, "");
+		} finally {
+			generatingNotes.delete(sourceCardId);
+		}
+	},
+
+	async retryHandoff(noteCardId) {
+		const card = findCard(noteCardId);
+		const note = card?.note;
+		if (!card || !note?.artifactId || note.state !== "error" || get().serverOffline || !get().folder) return;
+		if (note.noteKind === "merge") {
+			// Merge retry: re-run synthesis into the same shell via a fresh job
+			// is driven by the merge sources captured on the card's sources.
+			await startMergeJob(noteCardId, {
+				cwd: get().folder!,
+				title: card.title,
+				sources: (note.mergeSources ?? []).map((src) => ({ cardId: src.cardId ?? undefined, title: src.title })),
+				model: note.model ?? "",
+			});
+			return;
+		}
+		patchNote(noteCardId, { state: "generating", statusLine: "starting…", error: undefined });
+		await startHandoffJob(noteCardId, {
+			cwd: get().folder!,
+			artifactId: note.artifactId,
+			sourceTitle: card.title,
+			model: note.model,
+			focus: note.focus,
+		});
+	},
+
+	// Adopt the artifact file state unless the card has unsaved edits (or the
+	// caller forces). mtimeMs mismatch = disk is newer than our display copy.
+	async hydrateNote(cardId, opts) {
+		const note = findCard(cardId)?.note;
+		if (!note?.artifactId || (note.dirty && opts?.force !== true)) return;
+		try {
+			const res = await fetch(`/notes/${note.artifactId}?cwd=${encodeURIComponent(get().folder ?? "")}`);
+			if (!res.ok) return;
+			const d = (await res.json()) as {
+				title: string;
+				kind: NoteState["noteKind"];
+				body: string;
+				revision: number;
+				mtimeMs: number;
+				generatedBy?: { model: string };
+				path?: string;
+				wires: NoteState["wires"];
+			};
+			if (d.mtimeMs === note.mtimeMs && note.bodyLoaded) return;
+			patchNote(cardId, {
+				noteKind: d.kind,
+				model: d.generatedBy?.model ?? note.model,
+				path: d.path ?? note.path,
+				body: d.body,
+				bodyLoaded: true,
+				bodyVersion: (note.bodyVersion ?? 0) + 1,
+				revision: d.revision,
+				mtimeMs: d.mtimeMs,
+				wires: d.wires ?? [],
+				dirty: false,
+				error: undefined,
+			});
+			useCanvasStore.getState().updateCard(cardId, { title: d.title.slice(0, 44) });
+		} catch {
+			/* keep local copy */
+		}
+	},
+
+	setNoteBody(cardId, body) {
+		const note = findCard(cardId)?.note;
+		if (!note || !note.bodyLoaded) return;
+		patchNote(cardId, { body, dirty: true });
+		const prev = noteSaveTimers.get(cardId);
+		if (prev) clearTimeout(prev);
+		noteSaveTimers.set(
+			cardId,
+			setTimeout(() => {
+				noteSaveTimers.delete(cardId);
+				void get().saveNoteEdits(cardId);
+			}, 800),
+		);
+	},
+
+	async saveNoteEdits(cardId, opts) {
+		const cur = findCard(cardId);
+		const note = cur?.note;
+		if (!note?.artifactId || !get().folder) return;
+		const pending = noteSaveTimers.get(cardId);
+		if (pending) {
+			clearTimeout(pending);
+			noteSaveTimers.delete(cardId);
+		}
+		try {
+			const res = await fetch(`/notes/${note.artifactId}`, {
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					cwd: get().folder,
+					body: note.body,
+					title: cur?.title,
+					// Optimistic concurrency — omitted only when forcing (Keep mine).
+					...(opts?.force ? {} : { mtimeMs: note.mtimeMs }),
+				}),
+			});
+			if (res.status === 409) {
+				patchNote(cardId, { error: "changed on disk — reload to adopt the file, or keep mine" });
+				return;
+			}
+			if (!res.ok) {
+				patchNote(cardId, { error: `save failed (HTTP ${res.status})` });
+				return;
+			}
+			const d = (await res.json()) as { mtimeMs: number; path?: string };
+			patchNote(cardId, { mtimeMs: d.mtimeMs, path: d.path ?? undefined, dirty: false, error: undefined });
+		} catch {
+			patchNote(cardId, { error: "save failed (network)" });
+		}
+	},
+
+	async wireNoteToNewCard(noteCardId) {
+		const noteCard = findCard(noteCardId);
+		const note = noteCard?.note;
+		if (!noteCard || !note?.artifactId || get().serverOffline) return;
+		// The delivered body must equal the file — flush pending edits first.
+		if (note.dirty) await get().saveNoteEdits(noteCardId);
+		const fresh = findCard(noteCardId)?.note;
+		if (!fresh?.artifactId) return;
+		const size = currentSpawnSize();
+		const pos = findOpenSpot(get().cards, noteCardId, size.width, size.height);
+		const childId = newCardId();
+		get().addCard(pos, noteCardId, childId, "chat", size);
+		get().updateCard(childId, { title: `↳ ${noteCard.title.replace(/^ho · /, "")}`.slice(0, 44) });
+		await deliverNoteTo(noteCardId, childId);
+	},
+
+	async wireNoteToExisting(noteCardId, targetCardId) {
+		const note = findCard(noteCardId)?.note;
+		if (!note?.artifactId || get().serverOffline) return;
+		if (note.dirty) await get().saveNoteEdits(noteCardId);
+		await deliverNoteTo(noteCardId, targetCardId);
+	},
+
+	async sendAllNoteUpdates(noteCardId) {
+		const note = findCard(noteCardId)?.note;
+		if (!note || get().serverOffline) return;
+		for (const w of note.wires.filter((w) => w.stale)) {
+			await deliverNoteTo(noteCardId, w.cardId);
+		}
+	},
+
+	async regenerateNote(noteCardId, opts) {
+		const state = get();
+		const note = findCard(noteCardId)?.note;
+		if (!note?.artifactId || state.serverOffline || !state.folder) return;
+		if (note.dirty) await state.saveNoteEdits(noteCardId);
+		const cur = findCard(noteCardId)?.note;
+		if (!cur?.artifactId) return;
+		try {
+			const res = await fetch(`/notes/${cur.artifactId}/regenerate`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ cwd: state.folder, includeNewer: opts?.includeNewer === true }),
+			});
+			if (!res.ok) {
+				const d = (await res.json().catch(() => ({}))) as { error?: string };
+				throw new Error(d.error ?? `HTTP ${res.status}`);
+			}
+			const d = (await res.json()) as { proposal: string };
+			const accepted = await showDiff({
+				title: "Accept regenerated draft?",
+				description: opts?.includeNewer
+					? "Distilled with everything up to now — the provenance pin moves to the current tip."
+					: "Distilled at the pinned source point.",
+				oldText: cur.body,
+				newText: d.proposal,
+				confirmLabel: "Accept — new revision",
+			});
+			if (!accepted) return;
+			const fresh = findCard(noteCardId)?.note;
+			if (!fresh?.artifactId) return;
+			const res2 = await fetch(`/notes/${fresh.artifactId}/revision`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ cwd: get().folder, body: d.proposal }),
+			});
+			if (!res2.ok) {
+				const d2 = (await res2.json().catch(() => ({}))) as { error?: string };
+				throw new Error(d2.error ?? `HTTP ${res2.status}`);
+			}
+			const done = (await res2.json()) as { revision: number; mtimeMs: number };
+			patchNote(noteCardId, {
+				body: d.proposal,
+				bodyVersion: (fresh.bodyVersion ?? 0) + 1,
+				revision: done.revision,
+				mtimeMs: done.mtimeMs,
+				dirty: false,
+				error: undefined,
+				// New revision = every delivered copy is now behind.
+				wires: fresh.wires.map((w) => ({ ...w, stale: true })),
+			});
+		} catch (e) {
+			patchNote(noteCardId, { error: e instanceof Error ? e.message : String(e) });
+		}
+	},
+
+	async refineNote(noteCardId, instruction) {
+		const state = get();
+		const note = findCard(noteCardId)?.note;
+		if (!note?.artifactId || state.serverOffline || !state.folder) return;
+		if (note.dirty) await state.saveNoteEdits(noteCardId);
+		const cur = findCard(noteCardId)?.note;
+		if (!cur?.artifactId) return;
+		try {
+			const res = await fetch(`/notes/${cur.artifactId}/refine`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ cwd: state.folder, instruction }),
+			});
+			if (!res.ok) {
+				const d = (await res.json().catch(() => ({}))) as { error?: string };
+				throw new Error(d.error ?? `HTTP ${res.status}`);
+			}
+			const d = (await res.json()) as { proposal: string };
+			const accepted = await showDiff({
+				title: "Accept AI edit?",
+				description: `"${instruction.slice(0, 140)}"`,
+				oldText: cur.body,
+				newText: d.proposal,
+				confirmLabel: "Accept",
+			});
+			if (!accepted) return;
+			patchNote(noteCardId, {
+				body: d.proposal,
+				bodyVersion: (cur.bodyVersion ?? 0) + 1,
+				dirty: true,
+				wires: cur.wires.map((w) => ({ ...w, stale: true })),
+			});
+			// Accept = PUT with the refine marker (history line, edited flag).
+			const fresh = findCard(noteCardId)?.note;
+			if (!fresh?.artifactId) return;
+			const res2 = await fetch(`/notes/${fresh.artifactId}`, {
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					cwd: get().folder,
+					body: d.proposal,
+					title: findCard(noteCardId)?.title,
+					mtimeMs: fresh.mtimeMs,
+					via: { instruction },
+				}),
+			});
+			if (res2.status === 409) {
+				patchNote(noteCardId, { error: "changed on disk — reload to adopt the file, or keep mine" });
+				return;
+			}
+			if (!res2.ok) {
+				patchNote(noteCardId, { error: `save failed (HTTP ${res2.status})` });
+				return;
+			}
+			const d2 = (await res2.json()) as { mtimeMs: number };
+			patchNote(noteCardId, { mtimeMs: d2.mtimeMs, dirty: false, error: undefined });
+		} catch (e) {
+			patchNote(noteCardId, { error: e instanceof Error ? e.message : String(e) });
+		}
+	},
+
+	async createMerge(sourceCardIds) {
+		const state = get();
+		if (state.serverOffline || !state.folder) return;
+		const ids = sourceCardIds.filter((id) => {
+			const c = findCard(id);
+			return c && c.kind !== "note";
+		});
+		if (ids.length < 2) return;
+		// Zero questions, same as handoffs: default name, first card's model.
+		const name = `Merge: ${ids.map((id) => findCard(id)?.title ?? id).join(" + ")}`.slice(0, 80);
+		const model = findCard(ids[0])?.model ?? "";
+		const size = currentSpawnSize();
+		const pos = findOpenSpot(get().cards, ids[0], size.width, size.height);
+		const noteCardId = newCardId();
+		get().addCard(pos, null, noteCardId, "note", size);
+		get().updateCard(noteCardId, {
+			title: name.slice(0, 44),
+			parentIds: ids,
+			note: {
+				artifactId: null,
+				noteKind: "merge",
+				state: "generating",
+				body: "",
+				bodyLoaded: true,
+				revision: 0,
+				mtimeMs: 0,
+				model,
+				mergeSources: ids.map((id) => ({ cardId: id, title: findCard(id)?.title ?? id })),
+				wires: [],
+			},
+		});
+		try {
+			await startMergeJob(noteCardId, {
+				cwd: state.folder ?? "",
+				title: name,
+				sources: ids.map((id) => ({ cardId: id, title: findCard(id)?.title ?? id })),
+				model,
+			});
+		} catch (e) {
+			patchNote(noteCardId, { state: "error", error: e instanceof Error ? e.message : String(e) });
+		}
+	},
+
 	// Force-apply batched stream patches (tab close / visibility loss).
 	flushPending() {
 		for (const [cardId, st] of streams.entries()) {
@@ -1954,6 +2841,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const card = findCard(cardId);
 		if (!card || !text.trim()) return false;
 		if (get().serverOffline) return false;
+		// THE PARSER RUNS FIRST, on Enter — it routes commands and collects
+		// @file mentions before anything reaches the model.
+		const parsed = parseInput(text);
+		if (parsed.command?.name === "handoff") {
+			return slashHandoff(cardId, parsed.command.args);
+		}
+		// The turn is about to start — file edits must be on disk first.
+		await get().flushPendingManualSaves();
 		const sessionFile = opts?.sessionFile ?? card.sessionFile;
 		const cwd = opts?.cwd ?? get().agentCwd() ?? get().folder;
 		if (!sessionFile && !cwd) {
@@ -2068,6 +2963,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 							isError: boolean;
 							output: string;
 							durationMs?: number;
+							/** Abs path when this tool mutated a file (drives live doc refresh). */
+							path?: string;
 					  }
 					| { type: "raw"; text: string }
 					| { type: "turn_end"; stopReason?: string; error?: string }
@@ -2083,6 +2980,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					| { type: "thinking_level"; level: string; thinkingLevels?: string[] }
 					| { type: "queue"; followUp: string[] }
 					| { type: "user_message"; text: string }
+					| { type: "note_injected"; artifactId: string; revision: number; mode: string; text: string }
 					| {
 							type: "extension_ui";
 							id: string;
@@ -2222,6 +3120,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						},
 						true,
 					);
+					// The AGENT just mutated a file — if a document/note card is
+					// bound to it, pull the new content in immediately.
+					if (data.path && !data.isError) {
+						void useCanvasStore.getState().refreshFileCards(data.path);
+					}
 					patchEvent(cardId, __toolEvId, {
 						durMs: data.durationMs,
 						detail: data.output.slice(0, 2000),
@@ -2360,6 +3263,18 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					useCanvasStore.getState().updateCard(cardId, {
 						messages: [...cur.messages, { role: "user", text: um.text }],
 					});
+				} else if ((data as { type: string }).type === "note_injected") {
+					// A handoff note was delivered into this card (wire from a note
+					// node, possibly from another window). Render it as a user-role
+					// block; the model sees it as a custom context message.
+					const ni = data as { text: string; revision: number };
+					const cur = findCard(cardId);
+					if (!cur) return;
+					if (cur.messages[cur.messages.length - 1]?.text === ni.text) return;
+					useCanvasStore.getState().updateCard(cardId, {
+						messages: [...cur.messages, { role: "user", text: ni.text }],
+					});
+					pushLog(cardId, `✓ handoff note injected (r${ni.revision})`);
 				} else if (data.type === "context_usage") {
 					useCanvasStore.getState().updateCard(cardId, {
 						contextUsage: {
@@ -2470,6 +3385,14 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}
 
 		// ── 3. send ──
+		// /diagram expands into a directive for the MODEL; @mentions expand into
+		// real file contents. The chat display keeps the user's own words.
+		const commandExpanded =
+			parsed.command?.name === "diagram" ? expandDiagramCommand(text, parsed.command.args) : text;
+		const outgoing = (await expandMentions(commandExpanded, parsed.mentions, [
+			cwd,
+			get().folder !== cwd ? get().folder : null,
+		])) as string;
 		const promptEventId = pushEvent(cardId, {
 			kind: "prompt",
 			name: text.slice(0, 60),
@@ -2481,7 +3404,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
-					text,
+					text: outgoing,
 					viz: card.vizMode === true,
 					readonly: card.permission === "readonly",
 				}),

@@ -13,6 +13,7 @@ import {
 } from '@xyflow/react';
 import { ChatCardNode, type ChatCardNodeType } from './chat-card-node';
 import { DocumentCardNode, type DocumentCardNodeType } from './document-card-node';
+import { NoteCardNode, type NoteCardNodeType } from './note-card-node';
 import { ForkEdge } from './fork-edge';
 import { EmptyCanvasHero } from './empty-canvas-hero';
 import { Toolbar } from './toolbar';
@@ -27,7 +28,7 @@ import { SettingsPage } from '@/settings/settings-page';
 import { isTypingTarget } from '@/lib/utils';
 import { DEFAULT_CARD_SIZE } from '@/types/session-card';
 
-type AppNode = ChatCardNodeType | DocumentCardNodeType;
+type AppNode = ChatCardNodeType | DocumentCardNodeType | NoteCardNodeType;
 
 export function Canvas() {
     const cards = useCanvasStore((s) => s.cards);
@@ -45,7 +46,7 @@ export function Canvas() {
 
     const [nodes, setNodes] = useState<AppNode[]>([]);
     const theme = useActiveTheme();
-    const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
+    const [menu, setMenu] = useState<{ x: number; y: number; mergeIds?: string[] } | null>(null);
     const shiftPressed = useKeyPress('Shift');
     const { screenToFlowPosition, fitView } = useReactFlow();
     const wrapperRef = useRef<HTMLDivElement>(null);
@@ -61,7 +62,10 @@ export function Canvas() {
         useCanvasStore.getState().startHealthPoll();
     }, []);
 
-    const nodeTypes = useMemo(() => ({ chatCard: ChatCardNode, documentCard: DocumentCardNode }), []);
+    const nodeTypes = useMemo(
+        () => ({ chatCard: ChatCardNode, documentCard: DocumentCardNode, noteCard: NoteCardNode }),
+        [],
+    );
     const edgeTypes = useMemo(() => ({ fork: ForkEdge }), []);
 
 	// Autosave workspace (debounced).
@@ -155,7 +159,11 @@ export function Canvas() {
                     }
                     return {
                         id: c.id,
-                        type: (c.kind === 'document' ? 'documentCard' : 'chatCard') as AppNode['type'],
+                        type: (c.kind === 'note'
+                            ? 'noteCard'
+                            : c.kind === 'document'
+                              ? 'documentCard'
+                              : 'chatCard') as AppNode['type'],
                         position: c.position,
                         data: { cardId: c.id },
                         style: { width, height },
@@ -172,6 +180,29 @@ export function Canvas() {
             return next;
         });
     }, [cards]);
+
+    // One-shot "center this card" request (from @-mention open / attach).
+    const focusCardId = useCanvasStore((s) => s.focusCardId);
+    useEffect(() => {
+        if (!focusCardId) return;
+        useCanvasStore.getState().requestFocusCard(null);
+        const card = cards.find((c) => c.id === focusCardId);
+        if (!card) return;
+        const rect: WorldRect = {
+            left: card.position.x,
+            top: card.position.y,
+            right: card.position.x + (card.size?.width ?? DEFAULT_CARD_SIZE.width),
+            bottom: card.position.y + (card.size?.height ?? DEFAULT_CARD_SIZE.height),
+        };
+        const vp = useCanvasStore.getState().viewport ?? { x: 0, y: 0, zoom: 1 };
+        const screen = {
+            left: sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH,
+            top: 0,
+            width: window.innerWidth,
+            height: window.innerHeight,
+        };
+        void rfSetViewport(focusViewport(rect, vp, screen), { duration: 300 });
+    }, [focusCardId, cards, sidebarCollapsed, rfSetViewport]);
 
     // Reveal a newly added card when it lands (partially) outside the view.
     // Only single-card adds trigger this — canvas restores hydrate many at once
@@ -202,10 +233,11 @@ export function Canvas() {
         void rfSetViewport(focusViewport(rect, vp, screen), { duration: 300 });
     }, [cards, activeView, sidebarCollapsed, rfSetViewport]);
 
-    // Fork lineage → edges. Single source of truth: card.parentId.
+    // Fork lineage + note sources → edges. Chat cards use parentId (fork /
+    // spawn lineage); note cards additionally use parentIds (merge sources).
     const edges = useMemo<Edge[]>(
-        () =>
-            cards
+        () => [
+            ...cards
                 .filter((c) => c.parentId)
                 .map((c) => {
                     const parent = cards.find((x) => x.id === c.parentId);
@@ -227,6 +259,24 @@ export function Canvas() {
                         },
                     };
                 }),
+            ...cards.flatMap((c) =>
+                (c.parentIds ?? []).map((srcId) => {
+                    const parent = cards.find((x) => x.id === srcId);
+                    return {
+                        id: `${srcId}->${c.id}`,
+                        source: srcId,
+                        target: c.id,
+                        type: 'fork',
+                        data: {
+                            srcBox: parent
+                                ? { x: parent.position.x, y: parent.position.y, w: parent.size?.width ?? DEFAULT_CARD_SIZE.width, h: parent.size?.height ?? DEFAULT_CARD_SIZE.height }
+                                : null,
+                            tgtBox: { x: c.position.x, y: c.position.y, w: c.size?.width ?? DEFAULT_CARD_SIZE.width, h: c.size?.height ?? DEFAULT_CARD_SIZE.height },
+                        },
+                    } satisfies Edge;
+                }),
+            ),
+        ],
         [cards],
     );
 
@@ -314,6 +364,14 @@ export function Canvas() {
                     e.preventDefault();
                     setMenu({ x: e.clientX, y: e.clientY });
                 }}
+                onSelectionContextMenu={(e) => {
+                    e.preventDefault();
+                    const selectedIds = new Set(nodes.filter((n) => n.selected).map((n) => n.id));
+                    const selectedCards = cards.filter((c) => c.kind !== 'note' && selectedIds.has(c.id));
+                    if (selectedCards.length >= 2) {
+                        setMenu({ x: e.clientX, y: e.clientY, mergeIds: selectedCards.map((c) => c.id) });
+                    }
+                }}
                 onPaneClick={closeMenu}
                 onMoveStart={closeMenu}
                 onMoveEnd={onMoveEnd}
@@ -349,6 +407,17 @@ export function Canvas() {
                     className="fixed z-20 w-44 rounded-lg border border-border bg-card py-1 text-xs shadow-md"
                     style={{ left: menu.x, top: menu.y }}
                 >
+                    {menu.mergeIds && menu.mergeIds.length >= 2 && (
+                        <button
+                            className="block w-full px-3 py-1.5 text-left text-card-foreground hover:bg-secondary"
+                            onClick={() => {
+                                void useCanvasStore.getState().createMerge(menu.mergeIds!);
+                                setMenu(null);
+                            }}
+                        >
+                            ⇄ Merge {menu.mergeIds.length} cards into handoff
+                        </button>
+                    )}
                     <button
                         className="block w-full px-3 py-1.5 text-left text-card-foreground hover:bg-secondary"
                         onClick={newCardHere}
@@ -359,7 +428,7 @@ export function Canvas() {
                         className="block w-full px-3 py-1.5 text-left text-card-foreground hover:bg-secondary"
                         onClick={() => {
                             if (!menu) return;
-                            addCard(screenToFlowPosition(menu), null, undefined, 'document');
+                            void useCanvasStore.getState().createManualDocument(screenToFlowPosition(menu));
                             setMenu(null);
                         }}
                     >

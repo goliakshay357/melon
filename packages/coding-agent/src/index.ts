@@ -167,6 +167,14 @@ export {
 } from "./core/extensions/index.ts";
 // Footer data provider (git branch + extension statuses - data not otherwise available to extensions)
 export type { ReadonlyFooterDataProvider } from "./core/footer-data-provider.ts";
+// Handoff artifact distillation (TUI /handoff example + melon notes)
+export {
+	branchToHandoffMessages,
+	HANDOFF_ARTIFACT_SYSTEM_PROMPT,
+	MERGE_ARTIFACT_SYSTEM_PROMPT,
+	REFINE_ARTIFACT_SYSTEM_PROMPT,
+	serializeBranchForHandoff,
+} from "./core/handoff.ts";
 export { convertToLlm } from "./core/messages.ts";
 export { ModelRegistry } from "./core/model-registry.ts";
 export {

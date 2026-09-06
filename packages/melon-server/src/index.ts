@@ -13,17 +13,31 @@
 //   POST /sessions/:cardId/abort
 
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	renameSync,
+	statSync,
+	writeFileSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { type Message, uuidv7 } from "@earendil-works/pi-ai";
 import {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
 	getAgentDir,
+	HANDOFF_ARTIFACT_SYSTEM_PROMPT,
+	MERGE_ARTIFACT_SYSTEM_PROMPT,
 	ModelRuntime,
+	REFINE_ARTIFACT_SYSTEM_PROMPT,
 	SessionManager,
+	serializeBranchForHandoff,
 } from "@earendil-works/pi-coding-agent";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
@@ -49,7 +63,29 @@ import {
 } from "./cursor-extension.ts";
 import { runInBoundCursorSession, stripCursorResumeEntriesFromSessionFile } from "./cursor-session-binding.ts";
 import { CardExtensionUiBridge } from "./extension-ui.ts";
+import { fileExists, noteFiles, readTextFile, resolveInside, searchFiles } from "./files.ts";
 import { fuzzyScore } from "./fuzzy.ts";
+import { createDeltaPump, createNoteJob, emitNoteJob, getNoteJob } from "./note-jobs.ts";
+import {
+	createManual,
+	hashBody,
+	isValidNoteId,
+	listNotes,
+	listTrashedNotes,
+	loadNote,
+	type NoteDoc,
+	newNoteId,
+	notePath,
+	parseNote,
+	renameNoteFile,
+	restoreNote,
+	saveNote,
+	slugifyTitle,
+	snapshotRevision,
+	trashNote,
+	uniqueHandoffFileName,
+	wireIsStale,
+} from "./notes.ts";
 import {
 	abortCurrentCursorTurn,
 	beginCursorTurn,
@@ -230,13 +266,21 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		"",
 		"Inline rendering in Melon chat (always apply):",
 		"- Melon renders assistant messages as rich content, NOT plain text. Fenced blocks turn into LIVE interactive viewers inside the chat card:",
-		"- Small self-contained HTML scenes (few KB): emit a ```viz-html``` fence containing ONE complete HTML document. It renders in a \u2248380px-wide frame (auto-height up to 700px). Design for \u2264380px width, no horizontal overflow.",
+		"- Small self-contained HTML scenes (up to ~60KB): emit a ```viz-html``` fence containing ONE complete HTML document. It renders in a \u2248380px-wide frame (auto-height up to 700px). Design for \u2264380px width, no horizontal overflow.",
 		"- Files on disk (archify deliver output, or any complete HTML artifact you wrote via a tool): emit a ```viz-file``` fence whose body is EXACTLY one line: the absolute file path, a pipe (|), then the session working directory. Example: ```/abs/path/to/artifact.html|/abs/session/cwd```. Melon fetches that file and renders it inline in the chat card. NEVER paste large HTML inline, and NEVER just link the file in prose \u2014 the fence is the embedding mechanism.",
 		"- NEVER claim the chat is text-only or that you cannot embed. When you produce an HTML artifact, the ```viz-file``` fence embeds it.",
 		'- When the user asks for a diagram, visual, figure, or to "show" how something works, include a ```viz-html``` scene in that reply (do not wait to be told the fence name).',
-		"- Default those scenes to simple HTML + CSS (inline SVG ok). Few KB. No three.js, WebGL, or CDN-heavy libraries unless the user asks for 3D / orbit / interactive WebGL, or you have loaded the visualization skill for this turn.",
+		"- Diagrams (flowcharts, architecture, sequence, state machines, ER, org charts, trees, timelines, swimlanes, charts, sankey, journeys, ...): the `diagram-design` skill is in your available skills \u2014 read its SKILL.md and follow its MELON CHAT MODE section before drawing. It defines the frame and theme contract so the diagram fits this chat and follows the app's light/dark theme. When the user types /diagram, this is mandatory.",
+		"- Non-diagram scenes: simple HTML + CSS (inline SVG ok). No three.js, WebGL, or CDN-heavy libraries unless the user asks for 3D / orbit / interactive WebGL, or you have loaded the visualization skill for this turn.",
 		"- Do not force a viz block on ordinary Q&A that did not ask for a visual.",
 	].join("\n");
+
+	/**
+	 * Skills that are part of the product surface — always in the catalog for
+	 * every card, regardless of the per-card toggle (the picker shows them as
+	 * always-on).
+	 */
+	const ALWAYS_ON_SKILLS = ["diagram-design"];
 
 	async function createRuntimeFor(
 		sessionManager: any,
@@ -252,9 +296,10 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			sessionManager: any;
 			sessionStartEvent?: unknown;
 		}) => {
-			// Restrict the skill CATALOG to only the card's enabled skills, so the
-			// model's system prompt doesn't list (and self-invoke) everything.
-			const enabledSet = new Set(enabledSkills);
+			// Restrict the skill CATALOG to the card's enabled skills plus the
+			// always-on ones, so the model's system prompt doesn't list (and
+			// self-invoke) everything else.
+			const enabledSet = new Set([...ALWAYS_ON_SKILLS, ...enabledSkills]);
 			const skillsOverride = (result: any) => ({
 				...result,
 				skills: (result.skills ?? []).filter((sk: any) => enabledSet.has(sk.name)),
@@ -428,7 +473,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		let deltaCount = 0;
 		const toolTimers = new Map<string, number>();
 		/** Pre-mutation file snapshots so write/edit cards can show a real diff. */
-		const mutationSnaps = new Map<string, { before: string; args: unknown; toolName: string }>();
+		const mutationSnaps = new Map<string, { before: string; args: unknown; toolName: string; abs?: string }>();
 		// Live context-window fill: broadcast on a 2s throttle while the turn
 		// streams, and force a final one on agent_end.
 		let ctxLast = 0;
@@ -585,6 +630,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 									before: readFileSnapshot(abs),
 									args: event.args,
 									toolName: event.toolName,
+									abs,
 								});
 							}
 						} catch {
@@ -642,6 +688,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 						callId: event.toolCallId,
 						isError: event.isError,
 						output,
+						// Abs path of the mutated file — lets document/note cards
+						// refresh themselves when the AGENT edits their file.
+						...(snap && !event.isError && snap.abs ? { path: snap.abs } : {}),
 					});
 					broadcastCtx();
 				}
@@ -1441,6 +1490,1239 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { ok: true };
 	});
 
+	// Rename a manual: file follows the name; a leading H1 is rewritten too.
+	app.post("/notes/manual/rename", async (req, reply) => {
+		const body = req.body as any;
+		let dir: string;
+		try {
+			dir = assertCwd(body?.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const relPath = String(body?.path ?? "");
+		if (!/^\.melon\/notes\/manual\/[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(relPath)) {
+			return reply.code(400).send({ error: "invalid manual path" });
+		}
+		const newTitle = String(body?.title ?? "")
+			.trim()
+			.slice(0, 80);
+		if (!newTitle) return reply.code(400).send({ error: "title required" });
+		const current = resolveInside(dir, relPath);
+		if (!current || !existsSync(current)) return reply.code(404).send({ error: "manual not found" });
+		const dirAbs = dirname(current);
+		const base = slugifyTitle(newTitle);
+		let name = `${base}.md`;
+		let n = 2;
+		while (existsSync(join(dirAbs, name)) && join(dirAbs, name) !== current) {
+			name = `${base}-${n}.md`;
+			n++;
+		}
+		if (join(dirAbs, name) !== current) renameSync(current, join(dirAbs, name));
+		// Keep the first H1 in sync so title search follows renames.
+		const content = readFileSync(join(dirAbs, name), "utf8");
+		const updated = /^#\s+.*\n/.test(content)
+			? content.replace(/^#\s+.*\n/, `# ${newTitle}\n`)
+			: `# ${newTitle}\n\n${content}`;
+		writeFileSync(join(dirAbs, name), updated);
+		const rel = `.melon/notes/manual/${name}`;
+		console.log(`[notes] renamed manual ${relPath} -> ${rel}`);
+		return { ok: true, relPath: rel, content: updated, mtimeMs: statSync(join(dirAbs, name)).mtimeMs };
+	});
+
+	// ── @-mention files: fuzzy search, existence batch, guarded read ──
+	app.get("/files", async (req, reply) => {
+		const q = req.query as any;
+		let dir: string;
+		try {
+			dir = assertCwd(q.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const limit = Math.min(Math.max(Number(q.limit ?? 20) || 20, 1), 50);
+		const filesT0 = Date.now();
+		const hits = searchFiles(dir, String(q.q ?? ""), limit * 2);
+		// Worktree canvases: note files live under the canvas FOLDER — merge
+		// them in so @ sees .melon even when the session cwd is a worktree.
+		const also = typeof q.alsoCwd === "string" && q.alsoCwd ? assertCwd(q.alsoCwd) : undefined;
+		if (also && also !== dir) {
+			const seen = new Set(hits.map((h) => h.path));
+			for (const n of noteFiles(also)) {
+				if (seen.has(n.path)) continue;
+				const score = q.q ? (fuzzyScore(String(q.q), `${n.path} ${n.title ?? ""}`) ?? Infinity) : 0;
+				if (score === Infinity) continue;
+				hits.push({ path: n.path, abs: n.abs, score: score - 5, title: n.title });
+			}
+			hits.sort((a, b) => a.score - b.score || a.path.localeCompare(b.path));
+		}
+		const out = hits.slice(0, limit);
+		console.log(
+			`[files] q="${String(q.q ?? "")}" cwd=${dir} -> ${out.length} hits (${Date.now() - filesT0}ms) top: ${out
+				.slice(0, 5)
+				.map((h) => h.title ?? h.path)
+				.join(" | ")}`,
+		);
+		return { files: out };
+	});
+
+	app.post("/files/exists", async (req, reply) => {
+		const body = req.body as any;
+		let dir: string;
+		try {
+			dir = assertCwd(body?.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const paths = Array.isArray(body?.paths)
+			? (body.paths as unknown[]).filter((x): x is string => typeof x === "string").slice(0, 100)
+			: [];
+		const also = typeof body?.alsoCwd === "string" && body.alsoCwd ? assertCwd(body.alsoCwd) : undefined;
+		return {
+			existing: paths.filter((p) => fileExists(dir, p) || (also !== undefined && fileExists(also, p))),
+		};
+	});
+
+	// Read one file for open-on-canvas (bounded, folder-contained).
+	app.get("/file", async (req, reply) => {
+		const q = req.query as any;
+		let dir: string;
+		try {
+			dir = assertCwd(q.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const hit = readTextFile(dir, String(q.path ?? ""));
+		if (!hit) return reply.code(404).send({ error: "file not found or unreadable" });
+		let mtimeMs: number | undefined;
+		try {
+			mtimeMs = statSync(hit.abs).mtimeMs;
+		} catch {
+			/* optional */
+		}
+		return { abs: hit.abs, content: hit.content, mtimeMs };
+	});
+
+	// Save a manual document (only .melon/notes/manual/*.md are writable).
+	app.put("/file", async (req, reply) => {
+		const body = req.body as any;
+		let dir: string;
+		try {
+			dir = assertCwd(body?.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const relPath = String(body?.path ?? "");
+		if (!/^\.melon\/notes\/manual\/[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(relPath)) {
+			return reply.code(400).send({ error: "only .melon/notes/manual/*.md documents are writable" });
+		}
+		const content = typeof body?.content === "string" ? body.content : null;
+		if (content === null) return reply.code(400).send({ error: "content required" });
+		const abs = resolveInside(dir, relPath);
+		if (!abs) return reply.code(400).send({ error: "invalid path" });
+		mkdirSync(dirname(abs), { recursive: true });
+		writeFileSync(abs, content);
+		return { ok: true, mtimeMs: statSync(abs).mtimeMs };
+	});
+
+	// Create a manual document ("New document" cards are file-backed).
+	app.post("/notes/manual/create", async (req, reply) => {
+		const body = req.body as any;
+		let dir: string;
+		try {
+			dir = assertCwd(body?.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const title =
+			String(body?.title ?? "Untitled")
+				.trim()
+				.slice(0, 80) || "Untitled";
+		const created = createManual(dir, title);
+		console.log(`[notes] created manual ${created.relPath}`);
+		return created;
+	});
+
+	// ── Notes (handoff artifacts): <folder>/.melon/notes/handoff/<id>.md ──
+	// The file is the source of truth; canvas note nodes reference it by id.
+
+	/** One LLM call → text. Throws httpError with a user-facing message. */
+	async function completeNoteText(systemPrompt: string, prompt: string, modelString: string): Promise<string> {
+		const [provider, modelId] = splitModel(modelString);
+		const model = (await getModelRuntime()).getModel(provider, modelId);
+		if (!model) throw httpError(400, `unknown model: ${modelString}`);
+		try {
+			const response = await (await getModelRuntime()).complete(
+				model,
+				{
+					systemPrompt,
+					messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
+				},
+				{ cacheRetention: "none", sessionId: uuidv7() },
+			);
+			if (response.stopReason === "error") {
+				throw httpError(502, `generation failed: ${response.errorMessage ?? "unknown error"}`);
+			}
+			const text = response.content
+				.filter((c): c is { type: "text"; text: string } => c.type === "text")
+				.map((c) => c.text)
+				.join("\n")
+				.trim();
+			if (!text) throw httpError(502, "generation produced no text");
+			return text;
+		} catch (e) {
+			if ((e as { statusCode?: number }).statusCode) throw e;
+			throw httpError(502, `generation failed: ${(e as Error).message}`);
+		}
+	}
+
+	/** The user's personal-notes section is pre-created so edits have a home. */
+	function ensureNotesMine(text: string): string {
+		return /^## Handoff notes \(mine\)/m.test(text) ? text : `${text}\n\n## Handoff notes (mine)\n`;
+	}
+
+	/** Resolve the distillation source: live card first, else a session file. */
+	function resolveNoteSource(body: any): { sm: SessionManager; sessionFile: string; leafId: string } {
+		const sourceCard = body?.sourceCardId ? registry.get(body.sourceCardId) : undefined;
+		if (sourceCard) {
+			const sm: SessionManager = sourceCard.runtime.session.sessionManager;
+			const sessionFile = sm.getSessionFile() ?? "";
+			if (!sessionFile || !existsSync(sessionFile)) {
+				throw httpError(422, "source card has no flushed session yet — send a message first");
+			}
+			const leafId = sm.getLeafEntry()?.id;
+			if (!leafId) throw httpError(422, "nothing to distill — session is empty");
+			return { sm, sessionFile, leafId };
+		}
+		if (typeof body?.sessionFile === "string" && body.sessionFile.trim()) {
+			const file = expandHome(body.sessionFile);
+			if (!existsSync(file)) throw httpError(400, `session file not found: ${file}`);
+			const sm = SessionManager.open(file);
+			const leafId =
+				typeof body?.leafEntryId === "string" &&
+				sm.getBranch(body.leafEntryId).some((e) => e.id === body.leafEntryId)
+					? body.leafEntryId
+					: sm.getLeafEntry()?.id;
+			if (!leafId) throw httpError(422, "nothing to distill — session is empty");
+			return { sm, sessionFile: sm.getSessionFile() ?? file, leafId };
+		}
+		throw httpError(400, "sourceCardId or sessionFile required");
+	}
+
+	function wantedModelFor(body: any, sourceCardId?: string): string {
+		const sourceCard = sourceCardId ? registry.get(sourceCardId) : undefined;
+		return (
+			(typeof body?.model === "string" && body.model.trim()) ||
+			(sourceCard ? modelToString(sourceCard.runtime.session.model) : "") ||
+			getDefaultModel(config.defaultModel)
+		);
+	}
+
+	/** Distill one session branch into a handoff artifact via one LLM call. */
+	app.post("/notes/generate", async (req, reply) => {
+		const body = req.body as any;
+		let dir: string;
+		try {
+			dir = assertCwd(body?.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+
+		let resolved: { sm: SessionManager; sessionFile: string; leafId: string };
+		try {
+			resolved = resolveNoteSource(body);
+		} catch (e) {
+			return reply.code((e as { statusCode?: number }).statusCode ?? 400).send({ error: (e as Error).message });
+		}
+		const { sm, sessionFile, leafId } = resolved;
+
+		const conversationText = serializeBranchForHandoff(sm.getBranch(leafId));
+		if (!conversationText.trim()) return reply.code(422).send({ error: "no conversation to distill" });
+
+		const wantedModel = wantedModelFor(body, body?.sourceCardId);
+		let generated: string;
+		try {
+			generated = await completeNoteText(
+				HANDOFF_ARTIFACT_SYSTEM_PROMPT,
+				`## Session transcript\n\n${conversationText}`,
+				wantedModel,
+			);
+		} catch (e) {
+			return reply.code((e as { statusCode?: number }).statusCode ?? 502).send({ error: (e as Error).message });
+		}
+		generated = ensureNotesMine(generated);
+
+		const now = new Date().toISOString();
+		const doc: NoteDoc = {
+			id: newNoteId(),
+			kind: "handoff",
+			title:
+				String(body?.sourceTitle ?? "Handoff")
+					.trim()
+					.slice(0, 80) || "Handoff",
+			revision: 1,
+			created: now,
+			updated: now,
+			edited: false,
+			sources: [
+				{
+					cardTitle: typeof body?.sourceTitle === "string" ? body.sourceTitle : undefined,
+					cardId: typeof body?.sourceCardId === "string" ? body.sourceCardId : undefined,
+					canvasId: typeof body?.canvasId === "string" ? body.canvasId : undefined,
+					sessionFile,
+					sessionId: sm.getSessionId(),
+					leafEntryId: leafId,
+					cwd: sm.getCwd(),
+				},
+			],
+			generatedBy: {
+				model: wantedModel,
+				thinkingLevel: typeof body?.thinkingLevel === "string" ? body.thinkingLevel : "default",
+				promptVersion: "handoff-1",
+			},
+			history: [`r1 generated from 1 source (${now})`],
+			wires: [],
+			body: generated,
+			mtimeMs: 0,
+		};
+		doc.filePath = uniqueHandoffFileName(dir, doc.title);
+		const mtimeMs = saveNote(dir, doc);
+		console.log(`[notes] generated ${doc.id} -> ${doc.filePath}`);
+		return {
+			id: doc.id,
+			kind: doc.kind,
+			title: doc.title,
+			revision: doc.revision,
+			created: doc.created,
+			updated: doc.updated,
+			edited: doc.edited,
+			body: doc.body,
+			path: doc.filePath,
+			mtimeMs,
+			generatedBy: doc.generatedBy,
+			source: doc.sources[0],
+		};
+	});
+
+	app.get("/notes", async (req) => {
+		const dir = expandHome((req.query as any)?.cwd ?? "");
+		return { notes: listNotes(dir) };
+	});
+
+	app.get("/notes/:id", async (req, reply) => {
+		const dir = expandHome((req.query as any)?.cwd ?? "");
+		const id = (req.params as any).id;
+		if (!isValidNoteId(id)) return reply.code(400).send({ error: "invalid note id" });
+		const doc = loadNote(dir, id);
+		if (!doc) return reply.code(404).send({ error: "note not found" });
+		return {
+			...doc,
+			bodyHash: hashBody(doc.body),
+			path: doc.filePath ?? notePath(dir, id),
+			// Per-wire content drift — chips render stale + "send update".
+			wires: doc.wires.map((w) => ({ ...w, stale: wireIsStale(doc, w) })),
+		};
+	});
+
+	// User edits: body and/or title. mtimeMs is the optimistic concurrency
+	// token — on mismatch the server returns 409 with the current file state.
+	// `via: { instruction }` marks the edit as an accepted AI refine.
+	app.put("/notes/:id", async (req, reply) => {
+		const body = req.body as any;
+		const dir = expandHome(body?.cwd ?? "");
+		const id = (req.params as any).id;
+		if (!isValidNoteId(id)) return reply.code(400).send({ error: "invalid note id" });
+		const doc = loadNote(dir, id);
+		if (!doc) return reply.code(404).send({ error: "note not found" });
+		if (typeof body?.mtimeMs === "number" && body.mtimeMs > 0 && Math.abs(body.mtimeMs - doc.mtimeMs) > 1) {
+			return reply.code(409).send({ error: "note changed on disk", note: { ...doc, path: doc.filePath } });
+		}
+		const now = new Date().toISOString();
+		let changed = false;
+		if (typeof body?.title === "string" && body.title.trim() && body.title.trim() !== doc.title) {
+			doc.title = body.title.trim().slice(0, 80);
+			// Title is the name: the filename follows it (id stays stable).
+			renameNoteFile(dir, doc, doc.title);
+			changed = true;
+		}
+		if (typeof body?.body === "string" && body.body !== doc.body) {
+			doc.body = body.body;
+			doc.edited = true;
+			const instruction = typeof body?.via?.instruction === "string" ? body.via.instruction.trim() : "";
+			doc.history.push(
+				instruction
+					? `r${doc.revision} edited via AI refine: "${instruction.slice(0, 120)}" (${now})`
+					: `r${doc.revision} edited by user (${now})`,
+			);
+			changed = true;
+		}
+		let mtimeMs = doc.mtimeMs;
+		if (changed) {
+			doc.updated = now;
+			mtimeMs = saveNote(dir, doc);
+		}
+		return {
+			ok: true,
+			mtimeMs,
+			title: doc.title,
+			revision: doc.revision,
+			updated: doc.updated,
+			...(doc.filePath ? { path: doc.filePath } : {}),
+		};
+	});
+
+	app.delete("/notes/:id", async (req, reply) => {
+		const dir = expandHome((req.query as any)?.cwd ?? "");
+		const id = (req.params as any).id;
+		if (!isValidNoteId(id)) return reply.code(400).send({ error: "invalid note id" });
+		const doc = loadNote(dir, id);
+		if (!doc) return reply.code(404).send({ error: "note not found" });
+		trashNote(dir, id);
+		return { ok: true, wiredCardIds: [...new Set(doc.wires.map((w) => w.cardId))] };
+	});
+
+	// Deliver a note into a card. Mode is decided server-side: seed for a
+	// fresh card (message appended, NO turn triggered — it flushes with the
+	// first assistant reply), inject for a card that already has a
+	// conversation (LLM-visible custom_message; queued via nextTurn when the
+	// card is mid-turn). Re-delivering identical content is a 409 no-op; any
+	// body drift delivers as an update.
+	app.post("/notes/:id/wire", async (req, reply) => {
+		const body = req.body as any;
+		let dir: string;
+		try {
+			dir = assertCwd(body?.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const id = (req.params as any).id;
+		if (!isValidNoteId(id)) return reply.code(400).send({ error: "invalid note id" });
+		const doc = loadNote(dir, id);
+		if (!doc) return reply.code(404).send({ error: "note not found" });
+		const targetCardId = String(body?.targetCardId ?? "");
+		if (!targetCardId) return reply.code(400).send({ error: "targetCardId required" });
+
+		const bodyHash = hashBody(doc.body);
+		const lastWire = [...doc.wires].reverse().find((w) => w.cardId === targetCardId);
+		if (lastWire && lastWire.status === "delivered" && lastWire.bodyHash === bodyHash) {
+			return reply.code(409).send({ error: "already delivered, unchanged", wire: lastWire });
+		}
+
+		// Reuse a live runtime, else attach one (resume when the card has a file).
+		const existing = registry.get(targetCardId);
+		let runtime: any;
+		if (existing) {
+			runtime = existing.runtime;
+		} else {
+			const sessionCwd = typeof body?.sessionCwd === "string" && body.sessionCwd.trim() ? body.sessionCwd : dir;
+			const skills = Array.isArray(body?.skills)
+				? (body.skills as unknown[]).filter((x): x is string => typeof x === "string")
+				: [];
+			const sessionFile = typeof body?.sessionFile === "string" && body.sessionFile ? body.sessionFile : undefined;
+			runtime = await attachSession(
+				targetCardId,
+				sessionFile ? SessionManager.open(sessionFile) : SessionManager.create(sessionCwd),
+				body?.model,
+				skills,
+				"create",
+				typeof body?.thinkingLevel === "string" ? body.thinkingLevel : undefined,
+			);
+		}
+		const envelope = `[Context handoff from card "${
+			doc.sources[0]?.cardTitle ?? doc.title
+		}" — reference material for future turns, not a request.\nArtifact ${doc.id} r${doc.revision} — file: ${
+			doc.filePath ?? notePath(dir, doc.id)
+		}]`;
+		const messageText = `${envelope}\n\n${doc.body}`;
+		const hasMessages = runtime.session.sessionManager.getEntries().some((e: any) => e.type === "message");
+		let mode: "seed" | "inject";
+		if (hasMessages) {
+			// Inject: LLM-visible, rendered distinctly, content lands in the file
+			// immediately when idle, or rides the next turn when mid-flight.
+			mode = "inject";
+			const custom = {
+				customType: "melon.handoff",
+				content: [{ type: "text", text: messageText }],
+				display: true,
+				details: { artifactId: doc.id, revision: doc.revision },
+			};
+			if (existing?.busy) {
+				await runtime.session.sendCustomMessage(custom, { deliverAs: "nextTurn" });
+			} else {
+				await runtime.session.sendCustomMessage(custom, {});
+			}
+		} else {
+			mode = "seed";
+			runtime.session.sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: messageText }],
+				timestamp: Date.now(),
+			} as Message);
+		}
+		// Any connected client renders the delivered content immediately.
+		registry.broadcast(targetCardId, {
+			type: "note_injected",
+			artifactId: doc.id,
+			revision: doc.revision,
+			mode,
+			text: messageText,
+		});
+
+		const now = new Date().toISOString();
+		const wire = {
+			cardId: targetCardId,
+			...(typeof body?.canvasId === "string" ? { canvasId: body.canvasId } : {}),
+			mode,
+			revision: doc.revision,
+			bodyHash,
+			status: "delivered" as const,
+			deliveredAt: now,
+		};
+		doc.wires.push(wire);
+		saveNote(dir, doc);
+		console.log(`[notes] ${mode === "seed" ? "seeded" : "injected"} ${doc.id} r${doc.revision} → ${targetCardId}`);
+		return {
+			ok: true,
+			mode,
+			sessionId: runtime.session.sessionId,
+			sessionFile: runtime.session.sessionFile,
+			message: messageText,
+			wire,
+		};
+	});
+
+	// ── Merge: distill-each + one synthesis call → a merge artifact ──
+	app.post("/notes/merge/generate", async (req, reply) => {
+		const body = req.body as any;
+		let dir: string;
+		try {
+			dir = assertCwd(body?.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		// Sources: explicit descriptors ({cardId?} for live cards, {sessionFile?}
+		// for cold sessions), or the shorthand sourceCardIds array.
+		const rawSources: Array<{ cardId?: string; sessionFile?: string; title?: string }> = Array.isArray(body?.sources)
+			? (body.sources as any[]).map((s) => ({
+					cardId: typeof s?.cardId === "string" ? s.cardId : undefined,
+					sessionFile: typeof s?.sessionFile === "string" ? s.sessionFile : undefined,
+					title: typeof s?.title === "string" ? s.title : undefined,
+				}))
+			: (Array.isArray(body?.sourceCardIds) ? body.sourceCardIds : [])
+					.filter((x: unknown): x is string => typeof x === "string")
+					.map((cardId: string) => ({ cardId }));
+		if (rawSources.length < 2) return reply.code(400).send({ error: "at least two sources required" });
+
+		// Distill-each: reuse an existing handoff artifact for a source when one
+		// exists; otherwise distill fresh and SAVE it (file only — no canvas node).
+		const distillations: Array<{ title: string; body: string; source: NoteDoc["sources"][number] }> = [];
+		try {
+			for (const src of rawSources) {
+				const reuseSessionFile = src.sessionFile;
+				const reusable = listNotes(dir)
+					.map((n) => loadNote(dir, n.id))
+					.find(
+						(n) =>
+							n &&
+							n.kind === "handoff" &&
+							((src.cardId && n.sources.some((s) => s.cardId === src.cardId)) ||
+								(reuseSessionFile && n.sources.some((s) => s.sessionFile === expandHome(reuseSessionFile)))),
+					);
+				if (reusable) {
+					distillations.push({
+						title: reusable.title,
+						body: reusable.body,
+						source: { ...reusable.sources[0], cardId: src.cardId, handoffId: reusable.id },
+					});
+					continue;
+				}
+				const resolved = resolveNoteSource({
+					...(src.cardId ? { sourceCardId: src.cardId } : {}),
+					...(src.sessionFile ? { sessionFile: src.sessionFile } : {}),
+				});
+				const conversationText = serializeBranchForHandoff(resolved.sm.getBranch(resolved.leafId));
+				if (!conversationText.trim()) {
+					throw httpError(422, `source has no conversation to distill`);
+				}
+				const cardTitle =
+					src.title ?? (src.cardId ? body?.sourceTitles?.[src.cardId] : undefined) ?? src.cardId ?? "source";
+				const text = ensureNotesMine(
+					await completeNoteText(
+						HANDOFF_ARTIFACT_SYSTEM_PROMPT,
+						`## Session transcript\n\n${conversationText}`,
+						wantedModelFor(body, src.cardId),
+					),
+				);
+				const now = new Date().toISOString();
+				const perSource: NoteDoc = {
+					id: newNoteId(),
+					kind: "handoff",
+					title: String(cardTitle).trim().slice(0, 80) || "Handoff",
+					revision: 1,
+					created: now,
+					updated: now,
+					edited: false,
+					sources: [
+						{
+							cardTitle: typeof cardTitle === "string" ? cardTitle : undefined,
+							cardId: src.cardId,
+							canvasId: typeof body?.canvasId === "string" ? body.canvasId : undefined,
+							sessionFile: resolved.sessionFile,
+							sessionId: resolved.sm.getSessionId(),
+							leafEntryId: resolved.leafId,
+							cwd: resolved.sm.getCwd(),
+						},
+					],
+					generatedBy: {
+						model: wantedModelFor(body, src.cardId),
+						thinkingLevel: "default",
+						promptVersion: "handoff-1",
+					},
+					history: [`r1 generated as merge source (${now})`],
+					wires: [],
+					body: text,
+					mtimeMs: 0,
+				};
+				perSource.filePath = uniqueHandoffFileName(dir, perSource.title);
+				saveNote(dir, perSource);
+				distillations.push({
+					title: perSource.title,
+					body: perSource.body,
+					source: { ...perSource.sources[0], handoffId: perSource.id },
+				});
+			}
+		} catch (e) {
+			return reply.code((e as { statusCode?: number }).statusCode ?? 502).send({ error: (e as Error).message });
+		}
+
+		const sourcesBlock = distillations
+			.map((d) => `## Source: "${d.title}" (artifact ${d.source.handoffId})\n\n${d.body}`)
+			.join("\n\n---\n\n");
+		const wantedModel = wantedModelFor(body);
+		let merged: string;
+		try {
+			merged = ensureNotesMine(
+				await completeNoteText(
+					MERGE_ARTIFACT_SYSTEM_PROMPT,
+					`## Source handoff artifacts\n\n${sourcesBlock}`,
+					wantedModel,
+				),
+			);
+		} catch (e) {
+			return reply.code((e as { statusCode?: number }).statusCode ?? 502).send({ error: (e as Error).message });
+		}
+
+		const now = new Date().toISOString();
+		const doc: NoteDoc = {
+			id: newNoteId(),
+			kind: "merge",
+			title:
+				String(body?.title ?? `Merge of ${distillations.length}`)
+					.trim()
+					.slice(0, 80) || "Merge",
+			revision: 1,
+			created: now,
+			updated: now,
+			edited: false,
+			sources: distillations.map((d) => d.source),
+			generatedBy: {
+				model: wantedModel,
+				thinkingLevel: typeof body?.thinkingLevel === "string" ? body.thinkingLevel : "default",
+				promptVersion: "merge-1",
+			},
+			history: [`r1 generated from ${distillations.length} sources (${now})`],
+			wires: [],
+			body: merged,
+			mtimeMs: 0,
+		};
+		doc.filePath = uniqueHandoffFileName(dir, doc.title);
+		const mtimeMs = saveNote(dir, doc);
+		console.log(`[notes] merged ${doc.id} -> ${doc.filePath}`);
+		return {
+			id: doc.id,
+			kind: doc.kind,
+			title: doc.title,
+			revision: doc.revision,
+			body: doc.body,
+			path: doc.filePath,
+			mtimeMs,
+			generatedBy: doc.generatedBy,
+			sources: doc.sources,
+		};
+	});
+
+	// Regenerate: propose a new body from the pinned provenance. Writes nothing
+	// — the client diffs it and accepts via POST /notes/:id/revision.
+	app.post("/notes/:id/regenerate", async (req, reply) => {
+		const body = req.body as any;
+		const dir = expandHome(body?.cwd ?? "");
+		const id = (req.params as any).id;
+		if (!isValidNoteId(id)) return reply.code(400).send({ error: "invalid note id" });
+		const doc = loadNote(dir, id);
+		if (!doc) return reply.code(404).send({ error: "note not found" });
+		const includeNewer = body?.includeNewer === true;
+		const wantedModel = wantedModelFor(body);
+
+		try {
+			if (doc.kind === "merge") {
+				// Re-synthesize from per-source artifacts (cheap, no raw re-read);
+				// includeNewer re-distills each source from its session first.
+				const parts: string[] = [];
+				for (const s of doc.sources) {
+					let title = s.cardTitle ?? "source";
+					let text: string | undefined;
+					if (s.handoffId && !includeNewer) {
+						const src = loadNote(dir, s.handoffId);
+						if (src) {
+							title = src.title;
+							text = src.body;
+						}
+					}
+					if (!text) {
+						const resolved = resolveNoteSource({ sessionFile: s.sessionFile });
+						const conversationText = serializeBranchForHandoff(resolved.sm.getBranch(resolved.leafId));
+						if (!conversationText.trim()) throw httpError(422, `source session has no conversation`);
+						text = ensureNotesMine(
+							await completeNoteText(
+								HANDOFF_ARTIFACT_SYSTEM_PROMPT,
+								`## Session transcript\n\n${conversationText}`,
+								wantedModel,
+							),
+						);
+					}
+					parts.push(`## Source: "${title}" (artifact ${s.handoffId ?? "n/a"})\n\n${text}`);
+				}
+				const proposal = ensureNotesMine(
+					await completeNoteText(
+						MERGE_ARTIFACT_SYSTEM_PROMPT,
+						`## Source handoff artifacts\n\n${parts.join("\n\n---\n\n")}`,
+						wantedModel,
+					),
+				);
+				return { ok: true, proposal };
+			}
+
+			const src = doc.sources[0];
+			if (!src?.sessionFile) return reply.code(422).send({ error: "artifact has no session provenance" });
+			const resolved = resolveNoteSource({
+				sessionFile: src.sessionFile,
+				...(includeNewer ? {} : { leafEntryId: src.leafEntryId }),
+			});
+			const conversationText = serializeBranchForHandoff(resolved.sm.getBranch(resolved.leafId));
+			if (!conversationText.trim()) return reply.code(422).send({ error: "no conversation to distill" });
+			const proposal = ensureNotesMine(
+				await completeNoteText(
+					HANDOFF_ARTIFACT_SYSTEM_PROMPT,
+					`## Session transcript\n\n${conversationText}`,
+					wantedModel,
+				),
+			);
+			return { ok: true, proposal };
+		} catch (e) {
+			return reply.code((e as { statusCode?: number }).statusCode ?? 502).send({ error: (e as Error).message });
+		}
+	});
+
+	// Accept a regenerated body: snapshot the current revision to history/,
+	// bump the revision, write. Delivered wires go stale via hash mismatch.
+	app.post("/notes/:id/revision", async (req, reply) => {
+		const body = req.body as any;
+		const dir = expandHome(body?.cwd ?? "");
+		const id = (req.params as any).id;
+		if (!isValidNoteId(id)) return reply.code(400).send({ error: "invalid note id" });
+		const doc = loadNote(dir, id);
+		if (!doc) return reply.code(404).send({ error: "note not found" });
+		const newBody = typeof body?.body === "string" ? body.body : "";
+		if (!newBody.trim()) return reply.code(400).send({ error: "body required" });
+		snapshotRevision(dir, doc);
+		const now = new Date().toISOString();
+		doc.revision += 1;
+		doc.body = newBody;
+		doc.edited = false;
+		doc.updated = now;
+		doc.history.push(`r${doc.revision} regenerated (${now})`);
+		const mtimeMs = saveNote(dir, doc);
+		return { ok: true, revision: doc.revision, mtimeMs, bodyHash: hashBody(doc.body) };
+	});
+
+	// AI refine: propose an edited body from the current one + instruction.
+	// Merge artifacts ground on their per-source distillations. Writes nothing.
+	app.post("/notes/:id/refine", async (req, reply) => {
+		const body = req.body as any;
+		const dir = expandHome(body?.cwd ?? "");
+		const id = (req.params as any).id;
+		if (!isValidNoteId(id)) return reply.code(400).send({ error: "invalid note id" });
+		const doc = loadNote(dir, id);
+		if (!doc) return reply.code(404).send({ error: "note not found" });
+		const instruction = String(body?.instruction ?? "").trim();
+		if (!instruction) return reply.code(400).send({ error: "instruction required" });
+		const wantedModel = wantedModelFor(body);
+
+		try {
+			let grounding = "";
+			if (doc.kind === "merge") {
+				const parts: string[] = [];
+				for (const s of doc.sources) {
+					if (!s.handoffId) continue;
+					const src = loadNote(dir, s.handoffId);
+					if (src) parts.push(`## Source: "${src.title}"\n\n${src.body}`);
+				}
+				if (parts.length > 0)
+					grounding = `\n\n## Grounding (per-source distillations)\n\n${parts.join("\n\n---\n\n")}`;
+			}
+			const proposal = ensureNotesMine(
+				await completeNoteText(
+					REFINE_ARTIFACT_SYSTEM_PROMPT,
+					`## Current artifact\n\n${doc.body}${grounding}\n\n## Instruction\n\n${instruction}`,
+					wantedModel,
+				),
+			);
+			return { ok: true, proposal };
+		} catch (e) {
+			return reply.code((e as { statusCode?: number }).statusCode ?? 502).send({ error: (e as Error).message });
+		}
+	});
+
+	// ── Generation jobs: shell file exists at start; live status + streamed body ──
+
+	const HANDOFF_SKELETON =
+		"## Goal\n\n## Findings\n\n## Decisions\n\n## Gotchas\n\n## Open questions\n\n## Evidence (do not re-derive)\n\n## Handoff notes (mine)\n";
+	const MERGE_SKELETON =
+		"## Shared goal\n\n## Decisions\n\n## Conflicts to resolve\n\n## Open questions\n\n## Evidence (do not re-derive)\n\n## Next steps\n\n## Handoff notes (mine)\n";
+
+	/** One streaming LLM call; deltas are pumped into the job's event log. */
+	async function streamNoteText(
+		job: ReturnType<typeof createNoteJob>,
+		systemPrompt: string,
+		prompt: string,
+		modelString: string,
+	): Promise<string> {
+		const [provider, modelId] = splitModel(modelString);
+		const model = (await getModelRuntime()).getModel(provider, modelId);
+		if (!model) throw httpError(400, `unknown model: ${modelString}`);
+		const pump = createDeltaPump(job);
+		try {
+			const stream = (await getModelRuntime()).stream(
+				model,
+				{
+					systemPrompt,
+					messages: [{ role: "user", content: [{ type: "text", text: prompt }], timestamp: Date.now() }],
+				},
+				{ cacheRetention: "none", sessionId: uuidv7() },
+			);
+			void (async () => {
+				try {
+					for await (const ev of stream) {
+						if (ev.type === "text_delta") pump.push(ev.delta);
+					}
+				} catch {
+					/* result() surfaces the failure */
+				}
+			})();
+			const response = await stream.result();
+			pump.flush();
+			if (response.stopReason === "error") {
+				throw httpError(502, `generation failed: ${response.errorMessage ?? "unknown error"}`);
+			}
+			const text = response.content
+				.filter((c): c is { type: "text"; text: string } => c.type === "text")
+				.map((c) => c.text)
+				.join("\n")
+				.trim();
+			if (!text) throw httpError(502, "generation produced no text");
+			return text;
+		} catch (e) {
+			pump.flush();
+			if ((e as { statusCode?: number }).statusCode) throw e;
+			throw httpError(502, `generation failed: ${(e as Error).message}`);
+		}
+	}
+
+	/**
+	 * Start a handoff job. The artifact FILE is created immediately (the name
+	 * exists before the AI does anything); pass artifactId to re-run generation
+	 * into an existing shell (retry after failure).
+	 */
+	app.post("/notes/generate/start", async (req, reply) => {
+		const body = req.body as any;
+		let dir: string;
+		try {
+			dir = assertCwd(body?.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		let doc: NoteDoc;
+		let leafId: string | undefined;
+		if (typeof body?.artifactId === "string" && body.artifactId) {
+			if (!isValidNoteId(body.artifactId)) return reply.code(400).send({ error: "invalid note id" });
+			const loaded = loadNote(dir, body.artifactId);
+			if (!loaded) return reply.code(404).send({ error: "note not found" });
+			doc = loaded;
+			doc.body = HANDOFF_SKELETON;
+			doc.edited = false;
+			leafId = doc.sources[0]?.leafEntryId;
+		} else {
+			let resolved: { sm: SessionManager; sessionFile: string; leafId: string };
+			try {
+				resolved = resolveNoteSource(body);
+			} catch (e) {
+				return reply.code((e as { statusCode?: number }).statusCode ?? 400).send({ error: (e as Error).message });
+			}
+			leafId = resolved.leafId;
+			const now = new Date().toISOString();
+			doc = {
+				id: newNoteId(),
+				kind: "handoff",
+				title:
+					String(body?.sourceTitle ?? "Handoff")
+						.trim()
+						.slice(0, 80) || "Handoff",
+				revision: 1,
+				created: now,
+				updated: now,
+				edited: false,
+				sources: [
+					{
+						cardTitle: typeof body?.sourceTitle === "string" ? body.sourceTitle : undefined,
+						cardId: typeof body?.sourceCardId === "string" ? body.sourceCardId : undefined,
+						canvasId: typeof body?.canvasId === "string" ? body.canvasId : undefined,
+						sessionFile: resolved.sessionFile,
+						sessionId: resolved.sm.getSessionId(),
+						leafEntryId: resolved.leafId,
+						cwd: resolved.sm.getCwd(),
+					},
+				],
+				generatedBy: {
+					model: wantedModelFor(body, body?.sourceCardId),
+					thinkingLevel: typeof body?.thinkingLevel === "string" ? body.thinkingLevel : "default",
+					promptVersion: "handoff-1",
+				},
+				history: [`r1 generation started (${now})`],
+				wires: [],
+				body: HANDOFF_SKELETON,
+				mtimeMs: 0,
+			};
+			doc.filePath = uniqueHandoffFileName(dir, doc.title);
+		}
+		const mtimeMs = saveNote(dir, doc);
+		const job = createNoteJob();
+		const sessionFile = doc.sources[0]?.sessionFile ?? "";
+		const pinnedLeaf = leafId ?? doc.sources[0]?.leafEntryId;
+		const model = doc.generatedBy.model;
+		const focus = typeof body?.focus === "string" ? body.focus.trim().slice(0, 300) : "";
+		if (focus && !doc.history.some((h) => h.includes("focus:"))) {
+			doc.history.push(`r1 focus: "${focus}" (${new Date().toISOString()})`);
+			saveNote(dir, doc);
+		}
+		const runDoc = doc;
+		void (async () => {
+			try {
+				emitNoteJob(job, { type: "status", message: "reading session transcript" });
+				if (!sessionFile || !existsSync(sessionFile)) throw httpError(422, "source session is gone");
+				const sm = SessionManager.open(sessionFile);
+				const leaf = pinnedLeaf && sm.getBranch(pinnedLeaf).length > 0 ? pinnedLeaf : sm.getLeafEntry()?.id;
+				const conversationText = serializeBranchForHandoff(sm.getBranch(leaf ?? ""));
+				if (!conversationText.trim()) throw httpError(422, "no conversation to distill");
+				emitNoteJob(job, {
+					type: "status",
+					message: focus ? `distilling with ${model} (focus: ${focus.slice(0, 60)})` : `distilling with ${model}`,
+				});
+				const focusBlock = focus
+					? `\n\n## Focus\n\n${focus}\n\nGive special attention to the focus above; compress everything else. Keep ALL the fixed section headers in place.`
+					: "";
+				const text = ensureNotesMine(
+					await streamNoteText(
+						job,
+						HANDOFF_ARTIFACT_SYSTEM_PROMPT,
+						`## Session transcript\n\n${conversationText}${focusBlock}`,
+						model,
+					),
+				);
+				emitNoteJob(job, { type: "status", message: "writing artifact" });
+				runDoc.body = text;
+				runDoc.updated = new Date().toISOString();
+				runDoc.edited = false;
+				const finalMtime = saveNote(dir, runDoc);
+				emitNoteJob(job, {
+					type: "done",
+					artifact: {
+						id: runDoc.id,
+						title: runDoc.title,
+						revision: runDoc.revision,
+						body: runDoc.body,
+						path: runDoc.filePath,
+						mtimeMs: finalMtime,
+						generatedBy: runDoc.generatedBy,
+					},
+				});
+			} catch (e) {
+				emitNoteJob(job, { type: "error", message: (e as Error).message });
+			}
+		})();
+		return {
+			id: doc.id,
+			title: doc.title,
+			path: doc.filePath,
+			mtimeMs,
+			model: doc.generatedBy.model,
+			jobId: job.id,
+		};
+	});
+
+	// Live generation events (status / body deltas / done / error). Buffered —
+	// a reconnecting client replays the whole story.
+	app.get("/notes/jobs/:jobId/events", (req, reply) => {
+		const job = getNoteJob((req.params as any).jobId);
+		if (!job) return reply.code(404).send({ error: "unknown job" });
+		reply.raw.writeHead(200, {
+			"content-type": "text/event-stream",
+			"cache-control": "no-cache",
+			connection: "keep-alive",
+			"access-control-allow-origin": (req.headers.origin as string) ?? "*",
+		});
+		reply.raw.flushHeaders();
+		for (const ev of job.events) reply.raw.write(`data: ${JSON.stringify(ev)}\n\n`);
+		if (job.done) {
+			reply.raw.end();
+			return;
+		}
+		const send = (event: Parameters<typeof emitNoteJob>[1]) => {
+			try {
+				reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+				if (event.type === "done" || event.type === "error") reply.raw.end();
+			} catch {
+				/* client gone */
+			}
+		};
+		job.clients.add(send);
+		req.raw.on("close", () => job.clients.delete(send));
+	});
+
+	// ── Merge job: same shape as handoff jobs (distill-each + synthesis) ──
+	app.post("/notes/merge/start", async (req, reply) => {
+		const body = req.body as any;
+		let dir: string;
+		try {
+			dir = assertCwd(body?.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const rawSources: Array<{ cardId?: string; sessionFile?: string; title?: string }> = Array.isArray(body?.sources)
+			? (body.sources as any[]).map((src) => ({
+					cardId: typeof src?.cardId === "string" ? src.cardId : undefined,
+					sessionFile: typeof src?.sessionFile === "string" ? src.sessionFile : undefined,
+					title: typeof src?.title === "string" ? src.title : undefined,
+				}))
+			: [];
+		if (rawSources.length < 2) return reply.code(400).send({ error: "at least two sources required" });
+		const title =
+			String(body?.title ?? "Merge")
+				.trim()
+				.slice(0, 80) || "Merge";
+		const now = new Date().toISOString();
+		const doc: NoteDoc = {
+			id: newNoteId(),
+			kind: "merge",
+			title,
+			revision: 1,
+			created: now,
+			updated: now,
+			edited: false,
+			sources: [],
+			generatedBy: {
+				model: wantedModelFor(body),
+				thinkingLevel: typeof body?.thinkingLevel === "string" ? body.thinkingLevel : "default",
+				promptVersion: "merge-1",
+			},
+			history: [`r1 merge started from ${rawSources.length} sources (${now})`],
+			wires: [],
+			body: MERGE_SKELETON,
+			mtimeMs: 0,
+		};
+		doc.filePath = uniqueHandoffFileName(dir, doc.title);
+		const mtimeMs = saveNote(dir, doc);
+		const job = createNoteJob();
+		const model = doc.generatedBy.model;
+		const runDoc = doc;
+		void (async () => {
+			try {
+				const distillations: Array<{ title: string; body: string; source: NoteDoc["sources"][number] }> = [];
+				let index = 0;
+				for (const src of rawSources) {
+					index++;
+					const reuseSessionFile = src.sessionFile;
+					const reusable = listNotes(dir)
+						.map((n) => loadNote(dir, n.id))
+						.find(
+							(n) =>
+								n &&
+								n.kind === "handoff" &&
+								((src.cardId && n.sources.some((s) => s.cardId === src.cardId)) ||
+									(reuseSessionFile && n.sources.some((s) => s.sessionFile === expandHome(reuseSessionFile)))),
+						);
+					if (reusable) {
+						emitNoteJob(job, {
+							type: "status",
+							message: `source ${index}/${rawSources.length}: reusing "${reusable.title}"`,
+						});
+						distillations.push({
+							title: reusable.title,
+							body: reusable.body,
+							source: { ...reusable.sources[0], cardId: src.cardId, handoffId: reusable.id },
+						});
+						continue;
+					}
+					emitNoteJob(job, { type: "status", message: `distilling source ${index}/${rawSources.length}` });
+					const resolved = resolveNoteSource({
+						...(src.cardId ? { sourceCardId: src.cardId } : {}),
+						...(src.sessionFile ? { sessionFile: src.sessionFile } : {}),
+					});
+					const conversationText = serializeBranchForHandoff(resolved.sm.getBranch(resolved.leafId));
+					if (!conversationText.trim()) throw httpError(422, "a source has no conversation to distill");
+					const cardTitle =
+						src.title ?? (src.cardId ? body?.sourceTitles?.[src.cardId] : undefined) ?? src.cardId ?? "source";
+					const text = ensureNotesMine(
+						await streamNoteText(
+							job,
+							HANDOFF_ARTIFACT_SYSTEM_PROMPT,
+							`## Session transcript\n\n${conversationText}`,
+							model,
+						),
+					);
+					const perNow = new Date().toISOString();
+					const perSource: NoteDoc = {
+						id: newNoteId(),
+						kind: "handoff",
+						title: String(cardTitle).trim().slice(0, 80) || "Handoff",
+						revision: 1,
+						created: perNow,
+						updated: perNow,
+						edited: false,
+						sources: [
+							{
+								cardTitle: typeof cardTitle === "string" ? cardTitle : undefined,
+								cardId: src.cardId,
+								canvasId: typeof body?.canvasId === "string" ? body.canvasId : undefined,
+								sessionFile: resolved.sessionFile,
+								sessionId: resolved.sm.getSessionId(),
+								leafEntryId: resolved.leafId,
+								cwd: resolved.sm.getCwd(),
+							},
+						],
+						generatedBy: { model, thinkingLevel: "default", promptVersion: "handoff-1" },
+						history: [`r1 generated as merge source (${perNow})`],
+						wires: [],
+						body: text,
+						mtimeMs: 0,
+					};
+					perSource.filePath = uniqueHandoffFileName(dir, perSource.title);
+					saveNote(dir, perSource);
+					distillations.push({
+						title: perSource.title,
+						body: perSource.body,
+						source: { ...perSource.sources[0], handoffId: perSource.id },
+					});
+				}
+				runDoc.sources = distillations.map((d) => d.source);
+				emitNoteJob(job, { type: "status", message: `synthesizing with ${model}` });
+				const sourcesBlock = distillations
+					.map((d) => `## Source: "${d.title}" (artifact ${d.source.handoffId})\n\n${d.body}`)
+					.join("\n\n---\n\n");
+				const merged = ensureNotesMine(
+					await streamNoteText(
+						job,
+						MERGE_ARTIFACT_SYSTEM_PROMPT,
+						`## Source handoff artifacts\n\n${sourcesBlock}`,
+						model,
+					),
+				);
+				emitNoteJob(job, { type: "status", message: "writing artifact" });
+				runDoc.body = merged;
+				runDoc.updated = new Date().toISOString();
+				runDoc.edited = false;
+				const finalMtime = saveNote(dir, runDoc);
+				emitNoteJob(job, {
+					type: "done",
+					artifact: {
+						id: runDoc.id,
+						title: runDoc.title,
+						revision: runDoc.revision,
+						body: runDoc.body,
+						path: runDoc.filePath,
+						mtimeMs: finalMtime,
+						generatedBy: runDoc.generatedBy,
+						sources: runDoc.sources,
+					},
+				});
+			} catch (e) {
+				emitNoteJob(job, { type: "error", message: (e as Error).message });
+			}
+		})();
+		return {
+			id: doc.id,
+			title: doc.title,
+			path: doc.filePath,
+			mtimeMs,
+			model: doc.generatedBy.model,
+			jobId: job.id,
+		};
+	});
+
+	// Resolve a note FILE path to its stable identity (for @-mention clicks —
+	// filenames are slugs and may change; the frontmatter id never does).
+	app.get("/notes/resolve", async (req, reply) => {
+		const q = req.query as any;
+		const dir = expandHome(q.cwd ?? "");
+		const relPath = String(q.path ?? "");
+		const hit = readTextFile(dir, relPath);
+		if (!hit) return reply.code(404).send({ error: "note not found" });
+		try {
+			const doc = parseNote(hit.content);
+			return { id: doc.id, kind: doc.kind, title: doc.title };
+		} catch {
+			return reply.code(404).send({ error: "not a note artifact" });
+		}
+	});
+
+	// Re-surface a trashed artifact (artifact browser trash section).
+	app.post("/notes/:id/restore", async (req, reply) => {
+		const body = req.body as any;
+		const dir = expandHome(body?.cwd ?? "");
+		const id = (req.params as any).id;
+		if (!isValidNoteId(id)) return reply.code(400).send({ error: "invalid note id" });
+		if (!restoreNote(dir, id)) return reply.code(404).send({ error: "not in trash" });
+		const doc = loadNote(dir, id);
+		return { ok: true, note: doc ? { ...doc, path: notePath(dir, id) } : null };
+	});
+
+	app.get("/notes-trash", async (req) => {
+		const dir = expandHome((req.query as any)?.cwd ?? "");
+		return { notes: listTrashedNotes(dir) };
+	});
+
+	// Reveal the artifact file in the OS file manager (desktop shell).
+	app.post("/notes/:id/reveal", async (req, reply) => {
+		const body = req.body as any;
+		const dir = expandHome(body?.cwd ?? "");
+		const id = (req.params as any).id;
+		if (!isValidNoteId(id)) return reply.code(400).send({ error: "invalid note id" });
+		const path = notePath(dir, id);
+		if (!existsSync(path)) return reply.code(404).send({ error: "note not found" });
+		const { execFile } = await import("node:child_process");
+		const cmd =
+			process.platform === "darwin"
+				? ["open", "-R", path]
+				: process.platform === "win32"
+					? ["explorer", "/select,", path]
+					: ["xdg-open", dir];
+		try {
+			await new Promise<void>((res, rej) =>
+				execFile(cmd[0] as string, cmd.slice(1), { timeout: 15_000 }, (err) => (err ? rej(err) : res())),
+			);
+		} catch (e) {
+			return reply.code(500).send({ error: (e as Error).message });
+		}
+		return { ok: true };
+	});
+
 	// Folder navigator: list subdirectories of a path for the in-app picker.
 	app.get("/browse", async (req, reply) => {
 		const q = req.query as any;
@@ -1969,6 +3251,16 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			const messages: any[] = [];
 			const pendingToolArgs = new Map<string, Record<string, unknown>>();
 			for (const e of ctx) {
+				// Injected handoff notes are LLM-visible custom messages — render
+				// them in the transcript so hydration after reload keeps them.
+				if (e.type === "custom_message") {
+					const cm = e as any;
+					if (cm.display !== false) {
+						const text = clean(textOf(cm.content));
+						if (text) messages.push({ role: "user", text, injected: cm.customType === "melon.handoff" });
+					}
+					continue;
+				}
 				if (e.type !== "message") continue;
 				const m: any = e.message;
 				if (m.role === "user") {
@@ -2160,6 +3452,35 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		registry.broadcast((req.params as any).cardId, { type: "queue", followUp: [] });
 		console.log(`[${(req.params as any).cardId}] queue:clear (${dropped.length} items)`);
 		reply.send({ ok: true, followUp: dropped });
+	});
+
+	// A user edit landed on a manual/note file that a LIVE agent may hold a
+	// stale copy of. Queue a one-line context marker (no turn is triggered).
+	app.post("/sessions/:cardId/notify-file", async (req, reply) => {
+		const s = registry.get((req.params as any).cardId);
+		if (!s) return { ok: true, notified: false };
+		const path = String((req.body as any)?.path ?? "").trim();
+		if (!path) return reply.code(400).send({ error: "path required" });
+		const custom = {
+			customType: "melon.file_changed",
+			content: [
+				{
+					type: "text",
+					text: `[context update] The file ${path} was just edited by the user on disk. Any earlier contents you read are outdated — re-read it before relying on them.`,
+				},
+			],
+			display: false,
+		};
+		try {
+			if (s.busy) {
+				await s.runtime.session.sendCustomMessage(custom, { deliverAs: "nextTurn" });
+			} else {
+				await s.runtime.session.sendCustomMessage(custom, {});
+			}
+		} catch (e) {
+			return reply.code(500).send({ error: (e as Error).message });
+		}
+		return { ok: true, notified: true };
 	});
 
 	app.post("/sessions/:cardId/abort", async (req, reply) => {

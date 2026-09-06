@@ -1,4 +1,4 @@
-import { memo as ReactMemo, useRef, useState } from 'react';
+import { memo as ReactMemo, useCallback, useEffect, useRef, useState } from 'react';
 import { Handle, Node, NodeProps, Position, NodeResizer } from '@xyflow/react';
 import { Plus, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
@@ -16,7 +16,94 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
     const seedRef = useRef<string | null>(null);
     if (card && seedRef.current === null) seedRef.current = card.documentContent ?? '';
 
+    // File-backed manuals: adopt disk state on mount (external editors, second
+    // window) — a changed file bumps documentVersion, remounting the editor.
+    useEffect(() => {
+        if (!card?.documentFile) return;
+        let alive = true;
+        void (async () => {
+            try {
+                const read = async (root: string) => {
+                    const r = await fetch(
+                        `/file?cwd=${encodeURIComponent(root)}&path=${encodeURIComponent(card.documentFile as string)}`,
+                    );
+                    return r.ok ? ((await r.json()) as { content: string; mtimeMs?: number }) : null;
+                };
+                const roots = [card.documentCwd, useCanvasStore.getState().folder ?? ''].filter(Boolean) as string[];
+                let d: { content: string; mtimeMs?: number } | null = null;
+                for (const root of roots) {
+                    d = await read(root);
+                    if (d) {
+                        if (root !== card.documentCwd) {
+                            useCanvasStore.getState().updateCard(id, { documentCwd: root });
+                        }
+                        break;
+                    }
+                }
+                if (!alive || !d) return;
+                if (d.mtimeMs !== undefined && d.mtimeMs === card.documentMtimeMs) return;
+                useCanvasStore.getState().updateCard(id, {
+                    documentContent: d.content,
+                    documentMtimeMs: d.mtimeMs,
+                    documentVersion: (card.documentVersion ?? 0) + 1,
+                });
+            } catch {
+                /* keep local copy */
+            }
+        })();
+        return () => {
+            alive = false;
+        };
+        // Mount-only: the store owns state afterwards.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    const onMarkdownUpdate = useCallback(
+        (md: string) => useCanvasStore.getState().setDocumentBody(id, md),
+        [id],
+    );
+
     if (!card) return null;
+
+    // Rename: card title follows the user — and for file-backed manuals the
+    // FILE follows too (slug filename + leading H1 rewritten server-side).
+    const commitTitle = (raw: string) => {
+        const t = raw.trim();
+        if (!t || t === card.title) return;
+        if (!card.documentFile) {
+            useCanvasStore.getState().updateCard(id, { title: t.slice(0, 44) });
+            return;
+        }
+        void (async () => {
+            try {
+                const renameIn = (root: string) =>
+                    fetch("/notes/manual/rename", {
+                        method: "POST",
+                        headers: { "content-type": "application/json" },
+                        body: JSON.stringify({ cwd: root, path: card.documentFile, title: t }),
+                    });
+                let res = await renameIn(card.documentCwd ?? useCanvasStore.getState().folder ?? "");
+                if (res.status === 404 && card.documentCwd && card.documentCwd !== useCanvasStore.getState().folder) {
+                    res = await renameIn(useCanvasStore.getState().folder ?? "");
+                }
+                if (!res.ok) {
+                    useCanvasStore.getState().updateCard(id, { title: t.slice(0, 44) });
+                    return;
+                }
+                const d = (await res.json()) as { relPath: string; content: string; mtimeMs: number };
+                useCanvasStore.getState().updateCard(id, {
+                    title: t.slice(0, 44),
+                    documentFile: d.relPath,
+                    documentContent: d.content,
+                    documentMtimeMs: d.mtimeMs,
+                    documentCwd: card.documentCwd ?? useCanvasStore.getState().folder ?? undefined,
+                    documentVersion: (card.documentVersion ?? 0) + 1,
+                });
+            } catch {
+                useCanvasStore.getState().updateCard(id, { title: t.slice(0, 44) });
+            }
+        })();
+    };
 
     // Branch a linked card from this document → the mind-map arrow starts here.
     const addLinkedCard = () => {
@@ -29,18 +116,18 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
                 <input
                     autoFocus
                     defaultValue={card.title}
+                    title={card.documentFile ? `File name — renaming this renames ${card.documentFile}` : 'Card name'}
                     className="nodrag min-w-0 flex-1 rounded border border-ring bg-background px-1.5 py-0.5 text-sm font-medium text-card-foreground outline-none"
                     onBlur={(e) => {
                         setEditingTitle(false);
-                        const t = e.target.value.trim();
-                        if (t && t !== card.title) useCanvasStore.getState().updateCard(id, { title: t.slice(0, 44) });
+                        void commitTitle(e.target.value);
                     }}
                     onKeyDown={(e) => {
                         e.stopPropagation();
                         if (e.key === 'Enter') {
-                            const t = (e.target as HTMLInputElement).value.trim();
+                            const t = (e.target as HTMLInputElement).value;
                             setEditingTitle(false);
-                            if (t && t !== card.title) useCanvasStore.getState().updateCard(id, { title: t.slice(0, 44) });
+                            void commitTitle(t);
                         } else if (e.key === 'Escape') setEditingTitle(false);
                     }}
                     onClick={(e) => e.stopPropagation()}
@@ -106,8 +193,21 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
             <Handle type="source" position={Position.Left} className="!opacity-0" />
             <Handle type="source" position={Position.Right} className="!opacity-0" />
             {header}
-            <div className="nodrag min-h-0 flex-1">
-                <DocumentEditor cardId={id} initialContent={seedRef.current ?? ''} />
+            <div
+                className="nodrag min-h-0 flex-1"
+                onBlur={(e) => {
+                    // Focus left the document — flush pending edits to disk.
+                    if (!e.currentTarget.contains(e.relatedTarget as HTMLElement | null)) {
+                        void useCanvasStore.getState().flushManualSave(id);
+                    }
+                }}
+            >
+                <DocumentEditor
+                    key={`${card.documentFile ?? 'canvas'}:${card.documentVersion ?? 0}`}
+                    cardId={id}
+                    initialContent={seedRef.current ?? ''}
+                    onMarkdownUpdate={card.documentFile ? onMarkdownUpdate : undefined}
+                />
             </div>
         </div>
     );
