@@ -9,6 +9,9 @@ interface SkillInfo {
     description?: string;
 }
 
+/** Skills the product always runs — shown locked in the picker, not toggleable. */
+const BUILT_IN_SKILLS = new Set(['diagram-design']);
+
 /**
  * Per-card skills toggle. Lists available skills (GET /skills) with search,
  * each a checkbox; active skills are injected into the card's prompts.
@@ -130,24 +133,36 @@ export function SkillsPicker({
                         <p className="px-2 py-1 text-[11px] text-muted-foreground">no matches</p>
                     )}
                     {filtered.map((sk) => {
-                        const active = value.includes(sk.id);
+                        const builtIn = BUILT_IN_SKILLS.has(sk.id);
+                        const active = builtIn || value.includes(sk.id);
                         return (
                             <label
                                 key={sk.id}
                                 className={cn(
-                                    'flex cursor-pointer items-start gap-2 px-2 py-1 transition-colors hover:bg-secondary',
+                                    'flex items-start gap-2 px-2 py-1 transition-colors',
+                                    builtIn ? 'cursor-default' : 'cursor-pointer hover:bg-secondary',
                                     active && 'bg-primary/10',
                                 )}
                             >
                                 <input
                                     type="checkbox"
                                     checked={active}
-                                    onChange={() => toggle(sk.id)}
+                                    disabled={builtIn}
+                                    onChange={() => {
+                                        if (!builtIn) toggle(sk.id);
+                                    }}
                                     className="mt-0.5 size-3 cursor-pointer accent-[#bd93f9]"
                                 />
                                 <span className="min-w-0">
-                                    <span className="block truncate text-[11px] text-card-foreground">
-                                        {sk.name}
+                                    <span className="flex items-center gap-1.5">
+                                        <span className="block truncate text-[11px] text-card-foreground">
+                                            {sk.name}
+                                        </span>
+                                        {builtIn && (
+                                            <span className="shrink-0 rounded bg-secondary px-1 py-px text-[8px] font-medium uppercase tracking-wide text-muted-foreground">
+                                                always on
+                                            </span>
+                                        )}
                                     </span>
                                     {sk.description && (
                                         <span className="block truncate text-[9px] text-muted-foreground">

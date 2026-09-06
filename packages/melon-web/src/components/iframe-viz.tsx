@@ -103,20 +103,40 @@ export const IframeViz = memo(function IframeViz({
         [],
     );
 
+    // Theme contract for viz docs: CSS variables derived from the active app
+    // theme. Diagram-design diagrams consume them (var(--viz-bg, #fallback))
+    // so ONE document follows the light/dark toggle across all 7 themes; the
+    // injected hexes are only fallbacks for standalone viewing. Recomputing
+    // srcDoc on theme change reloads the iframe re-skinned.
+    const themeVars = useMemo(() => {
+        const t = theme.tokens;
+        const fg = t.vizForeground;
+        const bg = t.vizBackground;
+        return (
+            `<style>:root{--viz-bg:${bg};--viz-fg:${fg};` +
+            `--viz-muted:color-mix(in srgb,${fg} 72%,${bg});` +
+            `--viz-faint:color-mix(in srgb,${fg} 55%,${bg});` +
+            `--viz-hairline:color-mix(in srgb,${fg} 10%,transparent);` +
+            `--viz-paper-2:color-mix(in srgb,${fg} 4%,${bg});` +
+            `--viz-success:${t.success};--viz-warning:${t.warning};--viz-danger:${t.danger};--viz-info:${t.info}</style>`
+        );
+    }, [theme]);
+
     const srcDoc = useMemo(() => {
         const doc = path ? fetchedDoc : code;
         if (doc == null) return null; // still loading (or error card shown below)
-        const dark = `<style>html,body{margin:0;background:${theme.tokens.vizBackground};color:${theme.tokens.vizForeground};overflow:hidden}</style>`;
+        const dark = `<style>html,body{margin:0;background:var(--viz-bg,${theme.tokens.vizBackground});color:var(--viz-fg,${theme.tokens.vizForeground});overflow:hidden}</style>`;
         if (!/<html|<body/i.test(doc)) {
-            return `<!doctype html><html><head>${dark}${reporter}</head><body>${doc}</body></html>`;
+            return `<!doctype html><html><head>${themeVars}${dark}${reporter}</head><body>${doc}</body></html>`;
         }
-        // Full document (archify): replace <head> to inject our reporter so the
-        // height handshake still works. Keep the doc's own <html> attrs (theme etc).
+        // Full document (archify, diagram-design): inject the vars + reporter
+        // so the height handshake and theme contract still work. The doc keeps
+        // its own <html> attrs and styling; its var() references now resolve.
         if (doc.includes('<head>')) {
-            return doc.replace('<head>', `<head>${reporter}`);
+            return doc.replace('<head>', `<head>${themeVars}${reporter}`);
         }
-        return `${dark}${reporter}${doc}`;
-    }, [path, fetchedDoc, code, theme, reporter]);
+        return `${themeVars}${dark}${reporter}${doc}`;
+    }, [path, fetchedDoc, code, theme, themeVars, reporter]);
 
     // While loading a file-mode viz, reserve a stable frame so the chat
     // doesn't collapse/jump when the document arrives.
