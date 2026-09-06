@@ -6,25 +6,8 @@
 
 > **Thinking with AI, without losing the context.**
 
-## Problem
-Most of my work with AI starts as one question. Then it branches.
+Melon is a cross-platform desktop app for working with AI on an infinite canvas. Every branch is its own conversation with its own context, so side questions and rabbit holes never pollute the main thread.
 
-A side question becomes a research thread. That thread leads somewhere else.
-- I open another chat.
-- I save something.
-- I come back later.
-
-Now the useful context is spread across conversations, tabs, notes, and my own head.
-
-The problem isn't generating more answers.
-
-**It's keeping the context of the thinking together.**
-
----
-
-## Solution
-
-An infinite canvas where I can lay out my thinking with AI.
 
 ```text
                          ┌─────────────┐
@@ -45,28 +28,19 @@ An infinite canvas where I can lay out my thinking with AI.
                               ▼
                          Main context
 ```
-
-Each piece of thinking can have its own context.
-
-I can branch without destroying the original conversation, go deep into something temporary, come back, connect ideas, and keep the useful parts.
-
-The canvas is just the surface.
-
 **The real thing I'm trying to manage is context.**
 
----
+# Why Melon
+Most work with AI starts as one question. Then it branches: a side question becomes a research thread, that thread leads somewhere else, and the useful context ends up spread across conversations, tabs, and notes.
 
-## Why the branching?
+The hard part isn't generating more answers. It's keeping the context of the thinking together.
 
-- Because not every thought deserves to pollute the main thread.
+Features
+- Infinite canvas - lay out an entire problem in one place: the conversations, notes, and outputs that belong to it.
+- Branching - start a branch without destroying the original conversation. Go down a rabbit hole, try another approach, bring back what matters, move on.
+- Per-branch models - use a frontier model to set direction and cheaper models for exploration. The model changes with the context you're working on.
+- Connected context - keep the useful parts of every branch attached to the problem they came from.
 
-- Sometimes I want to go down a rabbit hole for 20 minutes.
-
-- Sometimes I want to try another approach.
-
-- Sometimes I just want to understand one thing.
-
-I should be able to do that, bring back what matters, and move on.
 
 ---
 
@@ -80,12 +54,6 @@ So the model can change **with the context I'm working on**.
 
 ---
 
-## The idea
+# Status
 
-I'm exploring a different primitive for working with AI:
-
-> **Not a chat history. A map of context.**
-
-One place for the questions, conversations, research, ideas, branches, and outputs that belong to the same problem.
-
-Still very much a work in progress.
+Melon is in active development. Usable today, incomplete, expect rough edges.
