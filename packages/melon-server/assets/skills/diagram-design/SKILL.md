@@ -37,6 +37,15 @@ The embarrassing failure is a small cluster of boxes parked in one corner of a b
 - Every box carries real content: a name and, where the type uses them, a sublabel. An EMPTY or placeholder box is an automatic fail — if a grid cell has no node, remove the cell.
 - Boxes alone are not a diagram. If nothing connects, groups, or ranks, reconsider the type (§3) — a list of components is prose or a table, not a picture.
 
+### Label budget — text must fit its box
+
+Overflowing labels are a failed render. Before placing any text, count characters:
+
+- Mono text width ≈ `0.6 × font-size × char count`. Sans text width ≈ `0.55 × font-size × char count`.
+- A line fits only if that width ≤ box width − 16 (padding). If it doesn't: SHORTEN the label (drop items from "a · b · c" lists, cut to the essential word). Never let text cross a box edge, never shrink below 11px to squeeze.
+- Tag chips: chip width ≈ `0.6 × 7px × chars + 12`, drawn fully inside the box at (x+8, y+6). A 9-char tag like "MULTIMODAL" needs a ~50px chip — if the box can't hold it, shorten the tag (e.g. "MULTI").
+- Column layouts: compute the WIDEST line per column first, then set the column's box width to that + 16. Let content drive box size, not the other way around.
+
 ### Frame contract — the block renders at ≈370 CSS px wide
 
 - Height is auto-reported and clamped to 200–700px; content taller than 700px is CLIPPED. Aim for a final rendered height of 300–680px.
@@ -76,17 +85,19 @@ Melon runs dark app themes, but diagrams must not follow them. A diagram is an e
 
 ### Flow in Melon
 
-1. Pick the type per §3 (you decide; the user rarely names one) and load its type reference from `references/`.
-2. Skip §0, skip the confirm-pause in §3, skip the file-copy step in §10, skip the file output in §12.
-3. Compose the document directly, run the §9 taste gate mentally, emit the fenced block tagged `viz-html`.
-4. After the fence, one short line: the type chosen and anything the §7 budget forced out. If the conversation gives no subject at all, ask one short question instead of drawing.
+1. Consciously pick the type per §3. Confidence gate: if you're ~95% sure it's the right fit, draw it. If you're genuinely torn between two types, ask ONE short question in plain words — name your best guess and the alternative, wait for the answer, then draw. Never ask about palette, size, or cuts — those are yours.
+2. Load the chosen type reference from `references/`.
+3. Skip §0, skip the file-copy step in §10, skip the file output in §12.
+4. Compose the document directly, run the §9 taste gate mentally, emit the fenced block tagged `viz-html`.
+5. After the fence, one short line: the type chosen and anything the §7 budget forced out. If the conversation gives no subject at all, ask one short question instead of drawing.
 
 ### Pre-flight — verify ALL of these before emitting
 
 1. `<body>` contains exactly one element: the `<svg>`. Title and eyebrow live inside it as `<text>`.
 2. Content fills ≥90% of the viewBox; no empty or placeholder boxes.
-3. Palette is the light skin from the color contract — paper `#f5f5f5` even on a dark app theme.
-4. The deliverable is one fenced block tagged `viz-html` in the reply; zero files written.
+3. Every text line fits inside its box (chars × 0.6 × font-size ≤ box width − 16). No overlaps.
+4. Palette is the light skin from the color contract — paper `#f5f5f5` even on a dark app theme.
+5. The deliverable is one fenced block tagged `viz-html` in the reply; zero files written.
 
 ---
 
