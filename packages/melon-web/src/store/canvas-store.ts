@@ -3405,6 +3405,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
 					text: outgoing,
+					// Command expansions (/diagram) append a model-facing directive —
+					// queue chips, cancel-to-draft, and the transcript show the
+					// user's own words instead.
+					...(outgoing !== text ? { display: text } : {}),
 					viz: card.vizMode === true,
 					readonly: card.permission === "readonly",
 				}),

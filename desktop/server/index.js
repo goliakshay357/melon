@@ -30,7 +30,7 @@ import { fileExists, noteFiles, readTextFile, resolveInside, searchFiles } from 
 import { fuzzyScore } from "./fuzzy.js";
 import { createDeltaPump, createNoteJob, emitNoteJob, getNoteJob } from "./note-jobs.js";
 import { createManual, hashBody, isValidNoteId, listNotes, listTrashedNotes, loadNote, newNoteId, notePath, parseNote, renameNoteFile, restoreNote, saveNote, slugifyTitle, snapshotRevision, trashNote, uniqueHandoffFileName, wireIsStale, } from "./notes.js";
-import { abortCurrentCursorTurn, beginCursorTurn, isCurrentCursorTurn, isCursorSession, isCursorTurnAborted, SessionRegistry, } from "./session-registry.js";
+import { abortCurrentCursorTurn, beginCursorTurn, isCurrentCursorTurn, isCursorSession, isCursorTurnAborted, queueDisplays, SessionRegistry, } from "./session-registry.js";
 import { clearProviderDenylist, denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel, } from "./settings.js";
 import { deleteSkill, loadSkills, materializeSkills, readSkill, saveSkill } from "./skills.js";
 import { isMutationTool, mutationDiffOutput, readFileSnapshot, resolveToolPath } from "./tool-diff.js";
@@ -136,17 +136,18 @@ export async function buildApp(deps = {}) {
         const run = async () => {
             while (s.promptQueue.length > 0) {
                 const next = s.promptQueue.shift();
-                console.log(`[${cardId}] queue:drain "${next.slice(0, 40)}" (remaining=${JSON.stringify(s.promptQueue)})`);
-                registry.broadcast(cardId, { type: "queue", followUp: [...s.promptQueue] });
+                console.log(`[${cardId}] queue:drain "${next.text.slice(0, 40)}" (remaining=${JSON.stringify(queueDisplays(s.promptQueue))})`);
+                registry.broadcast(cardId, { type: "queue", followUp: queueDisplays(s.promptQueue) });
                 // The client never optimistically renders queued messages — this
-                // event is the moment the text actually reaches the model.
-                registry.broadcast(cardId, { type: "user_message", text: next });
+                // event is the moment the text actually reaches the model. The
+                // user bubble shows the DISPLAY text (model directives stay hidden).
+                registry.broadcast(cardId, { type: "user_message", text: next.display ?? next.text });
                 const cursorTurnId = beginCursorTurn(s);
                 lastCursorTurnId = cursorTurnId ?? lastCursorTurnId;
                 if (cursorTurnId === undefined)
                     s.busy = true;
                 try {
-                    await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => s.runtime.session.prompt(next, { streamingBehavior: "followUp" }));
+                    await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => s.runtime.session.prompt(next.text, { streamingBehavior: "followUp" }));
                     if (cursorTurnId !== undefined && isCursorTurnAborted(s, cursorTurnId))
                         return;
                 }
@@ -198,7 +199,7 @@ export async function buildApp(deps = {}) {
         "- Files on disk (archify deliver output, or any complete NON-diagram HTML artifact you wrote via a tool): emit a ```viz-file``` fence whose body is EXACTLY one line: the absolute file path, a pipe (|), then the session working directory. Example: ```/abs/path/to/artifact.html|/abs/session/cwd```. Melon fetches that file and renders it inline in the chat card. NEVER paste large HTML inline, and NEVER just link the file in prose \u2014 the fence is the embedding mechanism. This path is NEVER for diagrams \u2014 diagrams always go in a ```viz-html``` fence.",
         "- NEVER claim the chat is text-only or that you cannot embed. When you produce an HTML artifact, the ```viz-file``` fence embeds it.",
         '- When the user asks for a diagram, visual, figure, or to "show" how something works, include a ```viz-html``` scene in that reply (do not wait to be told the fence name).',
-        "- Diagrams (flowcharts, architecture, sequence, state machines, ER, org charts, trees, timelines, swimlanes, charts, sankey, journeys, ...): the `diagram-design` skill is in your available skills \u2014 read its SKILL.md and follow its MELON CHAT MODE section before drawing. HARD RULE: the finished diagram is a fenced block tagged ```viz-html``` IN YOUR REPLY TEXT. NEVER write the diagram to a file, never save a .html artifact, never use a ```viz-file``` fence for it \u2014 this rule beats any file-based workflow in the skill body or anywhere else. The skill defines the frame contract (\u2248370px wide, height 200\u2013700px, clipped past that) and the palette: diagrams ALWAYS render the light editorial skin (paper #f5f5f5, ink #2d3142, coral accents) \u2014 never a dark palette, regardless of the app theme. When the user types /diagram, all of this is mandatory.",
+        "- Diagrams (flowcharts, architecture, sequence, state machines, ER, org charts, trees, timelines, swimlanes, charts, sankey, journeys, ...): the `diagram-design` skill is in your available skills \u2014 read its SKILL.md and follow its MELON CHAT MODE section before drawing. HARD RULE: the finished diagram is a fenced block tagged ```viz-html``` IN YOUR REPLY TEXT. NEVER write the diagram to a file, never save a .html artifact, never use a ```viz-file``` fence for it \u2014 this rule beats any file-based workflow in the skill body or anywhere else. The skill defines the frame contract (\u2248370px wide, height 200\u2013700px, clipped past that) and the palette: diagrams ALWAYS render the light editorial skin (paper #f5f5f5, ink #2d3142, coral accents) \u2014 never a dark palette, regardless of the app theme. Labels must fit their boxes \u2014 overflowing text is a failed render. If genuinely unsure which type fits, ask one short question (with your best guess) before drawing. When the user types /diagram, all of this is mandatory.",
         "- Non-diagram scenes: simple HTML + CSS (inline SVG ok). No three.js, WebGL, or CDN-heavy libraries unless the user asks for 3D / orbit / interactive WebGL, or you have loaded the visualization skill for this turn.",
         "- Do not force a viz block on ordinary Q&A that did not ask for a visual.",
     ].join("\n");
@@ -3135,9 +3136,10 @@ export async function buildApp(deps = {}) {
         // (agent_end -> drainPromptQueue) executes queued items one at a time.
         if (s.busy) {
             const text = String(req.body?.text ?? "");
-            s.promptQueue.push(text);
-            console.log(`[${cardId}] queue:push "${text.slice(0, 40)}" (queue=${JSON.stringify(s.promptQueue)})`);
-            registry.broadcast(cardId, { type: "queue", followUp: [...s.promptQueue] });
+            const display = String(req.body?.display ?? "") || undefined;
+            s.promptQueue.push({ text, display });
+            console.log(`[${cardId}] queue:push "${(display ?? text).slice(0, 40)}" (queue=${JSON.stringify(queueDisplays(s.promptQueue))})`);
+            registry.broadcast(cardId, { type: "queue", followUp: queueDisplays(s.promptQueue) });
             reply.send({ ok: true, queued: true });
             return;
         }
@@ -3180,10 +3182,11 @@ export async function buildApp(deps = {}) {
         const s = registry.get(req.params.cardId);
         if (!s)
             return reply.code(404).send({ error: "unknown card" });
-        reply.send({ followUp: [...s.promptQueue] });
+        reply.send({ followUp: queueDisplays(s.promptQueue) });
     });
-    // Items are identified by TEXT, not index: the queue mutates as items
-    // drain, so a stale index could remove the wrong entry.
+    // Items are identified by their DISPLAY text, not index: the queue mutates
+    // as items drain, so a stale index could remove the wrong entry. Display is
+    // what the client holds (chips / drafts).
     app.post("/sessions/:cardId/queue/remove", async (req, reply) => {
         const s = registry.get(req.params.cardId);
         if (!s)
@@ -3191,25 +3194,25 @@ export async function buildApp(deps = {}) {
         const text = String(req.body?.text ?? "");
         if (!text)
             return reply.code(400).send({ error: "text required" });
-        const index = s.promptQueue.indexOf(text);
+        const index = s.promptQueue.findIndex((q) => (q.display ?? q.text) === text);
         if (index === -1) {
             // Already drained — it is executing (or done) now. 409 + current
             // list lets the client resync instead of erroring.
-            console.log(`[${req.params.cardId}] queue:remove MISS "${text.slice(0, 40)}" (queue=${JSON.stringify(s.promptQueue)})`);
-            return reply.code(409).send({ error: "queued message not found", followUp: [...s.promptQueue] });
+            console.log(`[${req.params.cardId}] queue:remove MISS "${text.slice(0, 40)}" (queue=${JSON.stringify(queueDisplays(s.promptQueue))})`);
+            return reply.code(409).send({ error: "queued message not found", followUp: queueDisplays(s.promptQueue) });
         }
         s.promptQueue.splice(index, 1);
-        registry.broadcast(req.params.cardId, { type: "queue", followUp: [...s.promptQueue] });
+        registry.broadcast(req.params.cardId, { type: "queue", followUp: queueDisplays(s.promptQueue) });
         console.log(`[${req.params.cardId}] queue:remove "${text.slice(0, 40)}"`);
-        reply.send({ ok: true, followUp: [...s.promptQueue] });
+        reply.send({ ok: true, followUp: queueDisplays(s.promptQueue) });
     });
     // Clear the whole queue (error/abort recovery) — returns what was dropped
-    // so the client can hand the text back to the composer.
+    // so the client can hand the text back to the composer (display strings).
     app.post("/sessions/:cardId/queue/clear", async (req, reply) => {
         const s = registry.get(req.params.cardId);
         if (!s)
             return reply.code(404).send({ error: "unknown card" });
-        const dropped = [...s.promptQueue];
+        const dropped = queueDisplays(s.promptQueue);
         s.promptQueue = [];
         registry.broadcast(req.params.cardId, { type: "queue", followUp: [] });
         console.log(`[${req.params.cardId}] queue:clear (${dropped.length} items)`);

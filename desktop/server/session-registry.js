@@ -1,3 +1,6 @@
+export function queueDisplays(queue) {
+    return queue.map((q) => q.display ?? q.text);
+}
 export function isCursorSession(session) {
     return (session.runtime.session.model?.provider ?? "").toLowerCase() === "cursor";
 }

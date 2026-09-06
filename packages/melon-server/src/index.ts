@@ -92,6 +92,8 @@ import {
 	isCurrentCursorTurn,
 	isCursorSession,
 	isCursorTurnAborted,
+	type QueuedPrompt,
+	queueDisplays,
 	SessionRegistry,
 } from "./session-registry.ts";
 import {
@@ -208,18 +210,21 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		let lastCursorTurnId: number | undefined;
 		const run = async () => {
 			while (s.promptQueue.length > 0) {
-				const next = s.promptQueue.shift() as string;
-				console.log(`[${cardId}] queue:drain "${next.slice(0, 40)}" (remaining=${JSON.stringify(s.promptQueue)})`);
-				registry.broadcast(cardId, { type: "queue", followUp: [...s.promptQueue] });
+				const next = s.promptQueue.shift() as QueuedPrompt;
+				console.log(
+					`[${cardId}] queue:drain "${next.text.slice(0, 40)}" (remaining=${JSON.stringify(queueDisplays(s.promptQueue))})`,
+				);
+				registry.broadcast(cardId, { type: "queue", followUp: queueDisplays(s.promptQueue) });
 				// The client never optimistically renders queued messages — this
-				// event is the moment the text actually reaches the model.
-				registry.broadcast(cardId, { type: "user_message", text: next });
+				// event is the moment the text actually reaches the model. The
+				// user bubble shows the DISPLAY text (model directives stay hidden).
+				registry.broadcast(cardId, { type: "user_message", text: next.display ?? next.text });
 				const cursorTurnId = beginCursorTurn(s);
 				lastCursorTurnId = cursorTurnId ?? lastCursorTurnId;
 				if (cursorTurnId === undefined) s.busy = true;
 				try {
 					await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () =>
-						s.runtime.session.prompt(next, { streamingBehavior: "followUp" }),
+						s.runtime.session.prompt(next.text, { streamingBehavior: "followUp" }),
 					);
 					if (cursorTurnId !== undefined && isCursorTurnAborted(s, cursorTurnId)) return;
 				} catch (e) {
@@ -3374,9 +3379,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		// (agent_end -> drainPromptQueue) executes queued items one at a time.
 		if (s.busy) {
 			const text = String((req.body as any)?.text ?? "");
-			s.promptQueue.push(text);
-			console.log(`[${cardId}] queue:push "${text.slice(0, 40)}" (queue=${JSON.stringify(s.promptQueue)})`);
-			registry.broadcast(cardId, { type: "queue", followUp: [...s.promptQueue] });
+			const display = String((req.body as any)?.display ?? "") || undefined;
+			s.promptQueue.push({ text, display });
+			console.log(
+				`[${cardId}] queue:push "${(display ?? text).slice(0, 40)}" (queue=${JSON.stringify(queueDisplays(s.promptQueue))})`,
+			);
+			registry.broadcast(cardId, { type: "queue", followUp: queueDisplays(s.promptQueue) });
 			reply.send({ ok: true, queued: true });
 			return;
 		}
@@ -3417,37 +3425,38 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	app.get("/sessions/:cardId/queue", async (req, reply) => {
 		const s = registry.get((req.params as any).cardId);
 		if (!s) return reply.code(404).send({ error: "unknown card" });
-		reply.send({ followUp: [...s.promptQueue] });
+		reply.send({ followUp: queueDisplays(s.promptQueue) });
 	});
 
-	// Items are identified by TEXT, not index: the queue mutates as items
-	// drain, so a stale index could remove the wrong entry.
+	// Items are identified by their DISPLAY text, not index: the queue mutates
+	// as items drain, so a stale index could remove the wrong entry. Display is
+	// what the client holds (chips / drafts).
 	app.post("/sessions/:cardId/queue/remove", async (req, reply) => {
 		const s = registry.get((req.params as any).cardId);
 		if (!s) return reply.code(404).send({ error: "unknown card" });
 		const text = String((req.body as any)?.text ?? "");
 		if (!text) return reply.code(400).send({ error: "text required" });
-		const index = s.promptQueue.indexOf(text);
+		const index = s.promptQueue.findIndex((q) => (q.display ?? q.text) === text);
 		if (index === -1) {
 			// Already drained — it is executing (or done) now. 409 + current
 			// list lets the client resync instead of erroring.
 			console.log(
-				`[${(req.params as any).cardId}] queue:remove MISS "${text.slice(0, 40)}" (queue=${JSON.stringify(s.promptQueue)})`,
+				`[${(req.params as any).cardId}] queue:remove MISS "${text.slice(0, 40)}" (queue=${JSON.stringify(queueDisplays(s.promptQueue))})`,
 			);
-			return reply.code(409).send({ error: "queued message not found", followUp: [...s.promptQueue] });
+			return reply.code(409).send({ error: "queued message not found", followUp: queueDisplays(s.promptQueue) });
 		}
 		s.promptQueue.splice(index, 1);
-		registry.broadcast((req.params as any).cardId, { type: "queue", followUp: [...s.promptQueue] });
+		registry.broadcast((req.params as any).cardId, { type: "queue", followUp: queueDisplays(s.promptQueue) });
 		console.log(`[${(req.params as any).cardId}] queue:remove "${text.slice(0, 40)}"`);
-		reply.send({ ok: true, followUp: [...s.promptQueue] });
+		reply.send({ ok: true, followUp: queueDisplays(s.promptQueue) });
 	});
 
 	// Clear the whole queue (error/abort recovery) — returns what was dropped
-	// so the client can hand the text back to the composer.
+	// so the client can hand the text back to the composer (display strings).
 	app.post("/sessions/:cardId/queue/clear", async (req, reply) => {
 		const s = registry.get((req.params as any).cardId);
 		if (!s) return reply.code(404).send({ error: "unknown card" });
-		const dropped = [...s.promptQueue];
+		const dropped = queueDisplays(s.promptQueue);
 		s.promptQueue = [];
 		registry.broadcast((req.params as any).cardId, { type: "queue", followUp: [] });
 		console.log(`[${(req.params as any).cardId}] queue:clear (${dropped.length} items)`);

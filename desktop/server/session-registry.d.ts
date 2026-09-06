@@ -13,7 +13,7 @@ export interface AttachedSession {
      * source of truth for the UI (chips, cancel, edit) and is drained one
      * prompt at a time whenever the agent goes idle.
      */
-    promptQueue: string[];
+    promptQueue: QueuedPrompt[];
     /** Guards the drain loop against re-entrant agent_end triggers. */
     draining?: boolean;
     /** Monotonic token for Cursor turns; prevents a settled old turn mutating a newer one. */
@@ -23,6 +23,18 @@ export interface AttachedSession {
     /** Extension UI (select/confirm/input) → Melon card question panel. */
     extensionUi?: CardExtensionUiBridge;
 }
+/**
+ * One queued prompt. `text` is what the model receives; `display` is what the
+ * UI shows everywhere (queue chips, cancel-to-draft, the user_message frame).
+ * Command expansions like /diagram append a model-facing directive to `text`
+ * — without `display`, that directive would leak into the user's composer and
+ * transcript.
+ */
+export interface QueuedPrompt {
+    text: string;
+    display?: string;
+}
+export declare function queueDisplays(queue: QueuedPrompt[]): string[];
 export declare function isCursorSession(session: Pick<AttachedSession, "runtime">): boolean;
 /** Claim a Cursor card synchronously before prompt() can yield. */
 export declare function beginCursorTurn(session: Pick<AttachedSession, "runtime" | "busy" | "cursorTurnId">): number | undefined;
