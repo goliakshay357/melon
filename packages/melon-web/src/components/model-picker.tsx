@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, Search } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { fuzzyScore } from "@/lib/fuzzy";
 import { useCanvasStore } from "@/store/canvas-store";
 
 interface ModelInfo {
@@ -98,8 +99,16 @@ export function ModelPicker({
 		onOpenChange(false);
 	};
 
-	const q = query.trim().toLowerCase();
-	const filtered = q ? models.filter((m) => m.label.toLowerCase().includes(q)) : models;
+	const q = query.trim();
+	const filtered = q
+		? models
+				.flatMap((m) => {
+					const score = fuzzyScore(q, `${m.label} ${m.id}`);
+					return score === null ? [] : [{ m, score }];
+				})
+				.sort((a, b) => a.score - b.score)
+				.map(({ m }) => m)
+		: models;
 	const recentModels = recents.filter((r) => r.startsWith(`${provider}/`));
 	const showRecents = !q && recentModels.length > 0;
 

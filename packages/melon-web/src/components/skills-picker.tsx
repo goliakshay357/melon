@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronDown, Search, Wand2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { fuzzyScore } from '@/lib/fuzzy';
 
 interface SkillInfo {
     id: string;
@@ -68,13 +69,15 @@ export function SkillsPicker({
         onChange(next);
     };
 
-    const q = query.trim().toLowerCase();
+    const q = query.trim();
     const filtered = q
-        ? skills.filter(
-              (sk) =>
-                  sk.name.toLowerCase().includes(q) ||
-                  (sk.description ?? '').toLowerCase().includes(q),
-          )
+        ? skills
+              .flatMap((sk) => {
+                  const score = fuzzyScore(q, `${sk.name} ${sk.id} ${sk.description ?? ''}`);
+                  return score === null ? [] : [{ sk, score }];
+              })
+              .sort((a, b) => a.score - b.score)
+              .map(({ sk }) => sk)
         : skills;
 
     return (

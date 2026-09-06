@@ -2,6 +2,7 @@ import {
 	type Component,
 	Container,
 	type Focusable,
+	fuzzyMatch,
 	getKeybindings,
 	Input,
 	type Keybinding,
@@ -334,7 +335,7 @@ class TreeList implements Component {
 			this.lastSelectedId = this.filteredNodes[this.selectedIndex]?.node.entry.id ?? this.lastSelectedId;
 		}
 
-		const searchTokens = this.searchQuery.toLowerCase().split(/\s+/).filter(Boolean);
+		const searchTokens = this.searchQuery.split(/\s+/).filter(Boolean);
 
 		this.filteredNodes = this.flatNodes.filter((flatNode) => {
 			const entry = flatNode.node.entry;
@@ -389,8 +390,8 @@ class TreeList implements Component {
 
 			// Apply search filter
 			if (searchTokens.length > 0) {
-				const nodeText = this.getSearchableText(flatNode.node).toLowerCase();
-				return searchTokens.every((token) => nodeText.includes(token));
+				const nodeText = this.getSearchableText(flatNode.node);
+				return searchTokens.every((token) => fuzzyMatch(token, nodeText).matches);
 			}
 
 			return true;

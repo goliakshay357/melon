@@ -8,6 +8,7 @@ import {
 	type Component,
 	Container,
 	type Focusable,
+	fuzzyMatch,
 	getKeybindings,
 	Input,
 	matchesKey,
@@ -324,7 +325,10 @@ class ResourceList implements Component, Focusable {
 			return;
 		}
 
-		const lowerQuery = query.toLowerCase();
+		const tokens = query
+			.trim()
+			.split(/[\s/]+/)
+			.filter((t) => t.length > 0);
 		const matchingItems = new Set<ResourceItem>();
 		const matchingSubgroups = new Set<ResourceSubgroup>();
 		const matchingGroups = new Set<ResourceGroup>();
@@ -332,11 +336,8 @@ class ResourceList implements Component, Focusable {
 		for (const entry of this.flatItems) {
 			if (entry.type === "item") {
 				const item = entry.item;
-				if (
-					item.displayName.toLowerCase().includes(lowerQuery) ||
-					item.resourceType.toLowerCase().includes(lowerQuery) ||
-					item.path.toLowerCase().includes(lowerQuery)
-				) {
+				const text = `${item.displayName} ${item.resourceType} ${item.path}`;
+				if (tokens.every((token) => fuzzyMatch(token, text).matches)) {
 					matchingItems.add(item);
 				}
 			}

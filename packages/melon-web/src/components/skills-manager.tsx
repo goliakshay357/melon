@@ -3,6 +3,7 @@ import { Plus, Pencil, Trash2, Search, Copy, ArrowLeft } from 'lucide-react';
 import { confirmAction } from '@/components/dialogs';
 import { useCanvasStore } from '@/store/canvas-store';
 import { cn } from '@/lib/utils';
+import { fuzzyScore } from '@/lib/fuzzy';
 
 interface SkillRow {
     id: string;
@@ -53,14 +54,15 @@ export function SkillsManager({
     }, [refreshKey]);
 
     const filtered = useMemo(() => {
-        const q = query.trim().toLowerCase();
+        const q = query.trim();
         if (!q) return skills;
-        return skills.filter(
-            (s) =>
-                s.id.toLowerCase().includes(q) ||
-                s.name.toLowerCase().includes(q) ||
-                (s.description ?? '').toLowerCase().includes(q),
-        );
+        return skills
+            .flatMap((s) => {
+                const score = fuzzyScore(q, `${s.id} ${s.name} ${s.description ?? ''}`);
+                return score === null ? [] : [{ s, score }];
+            })
+            .sort((a, b) => a.score - b.score)
+            .map(({ s }) => s);
     }, [skills, query]);
 
     const remove = async (sk: SkillRow) => {
