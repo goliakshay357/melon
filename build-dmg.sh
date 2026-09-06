@@ -39,6 +39,12 @@ cd "$ROOT/desktop"
 rm -rf server web-dist
 cp -r ../packages/melon-server/dist server
 cp -r ../packages/melon-web/dist web-dist
+# diagram-design is a multi-file bundled skill — p0 that it actually ships.
+test -f server/skills/diagram-design/SKILL.md || {
+  echo "  ✗ diagram-design skill missing from server bundle (did melon-server build copy assets/skills?)"
+  exit 1
+}
+echo "  ✓ diagram-design skill bundled ($(find server/skills/diagram-design -type f | wc -l | tr -d ' ') files)"
 # Packaged Settings footer reads version from desktop/package.json (via
 # Electron MELON_VERSION / app.getVersion). Keep server package.json aligned.
 cp ../packages/melon-server/package.json server/package.json

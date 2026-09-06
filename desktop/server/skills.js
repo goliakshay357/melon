@@ -1,4 +1,5 @@
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -70,38 +71,89 @@ function saveDeleted(ids) {
 }
 /**
  * Default skills SHIP WITH THE APP in <compiled>/skills/ (bundled from
- * assets/skills by the build). On every startup we copy them into the agent
+ * assets/skills by the build). On every startup we sync them into the agent
  * dir so a fresh laptop gets them without manual setup — unless the user
  * deleted that skill (denylisted).
+ *
+ * Skills may be multi-file packages (SKILL.md + references/ + assets/), so a
+ * skill dir is synced whole. Bundled skill UPDATES must reach users: a stock
+ * (never user-edited) file is overwritten with the new ship, while a file the
+ * user modified is left alone. "Stock" is detected with a manifest of the
+ * content hashes we last shipped — if the file on disk still matches the
+ * recorded hash, the user hasn't touched it. Files with no manifest entry are
+ * treated as stock (first run after this system, or a skill the UI never
+ * tracks per-file); from then on the hash guards user edits.
  */
 export function materializeSkills() {
     const bundled = join(dirname(fileURLToPath(import.meta.url)), "skills");
     const target = skillsDir();
     const deleted = loadDeleted();
+    const manifest = loadShippedManifest();
+    let changed = 0;
     try {
-        let copied = 0;
-        const entries = readdirSync(bundled, { withFileTypes: true });
-        for (const entry of entries) {
+        for (const entry of readdirSync(bundled, { withFileTypes: true })) {
             if (!entry.isDirectory())
                 continue;
             if (deleted.has(entry.name))
                 continue; // user deleted it — don't resurrect
-            const src = join(bundled, entry.name, "SKILL.md");
-            if (!existsSync(src))
+            if (!existsSync(join(bundled, entry.name, "SKILL.md")))
                 continue;
-            const dstDir = join(target, entry.name);
-            const dst = join(dstDir, "SKILL.md");
-            if (existsSync(dst))
-                continue;
-            mkdirSync(dstDir, { recursive: true });
-            writeFileSync(dst, readFileSync(src, "utf8"));
-            copied++;
+            manifest[entry.name] ??= {};
+            changed += syncBundledDir(join(bundled, entry.name), join(target, entry.name), entry.name, "", manifest);
         }
-        console.error(`[skills] materialized ${copied} bundled skills`);
+        if (changed > 0) {
+            saveShippedManifest(manifest);
+            console.error(`[skills] synced ${changed} bundled skill files`);
+        }
     }
     catch {
         /* bundled dir missing — fine in dev */
     }
+}
+function shippedManifestFile() {
+    return join(getAgentDir(), "melon", "bundled-skills-manifest.json");
+}
+function loadShippedManifest() {
+    try {
+        return JSON.parse(readFileSync(shippedManifestFile(), "utf8"));
+    }
+    catch {
+        return {};
+    }
+}
+function saveShippedManifest(manifest) {
+    mkdirSync(join(getAgentDir(), "melon"), { recursive: true });
+    writeFileSync(shippedManifestFile(), JSON.stringify(manifest, null, 2));
+}
+function hashFile(path) {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+/** Sync one bundled dir into the agent dir. `prefix` is the rel path so far. */
+function syncBundledDir(src, dst, skillId, prefix, manifest) {
+    let changed = 0;
+    mkdirSync(dst, { recursive: true });
+    for (const entry of readdirSync(src, { withFileTypes: true })) {
+        const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+        const srcPath = join(src, entry.name);
+        const dstPath = join(dst, entry.name);
+        if (entry.isDirectory()) {
+            changed += syncBundledDir(srcPath, dstPath, skillId, rel, manifest);
+            continue;
+        }
+        if (!entry.isFile())
+            continue;
+        manifest[skillId] ??= {};
+        const shippedHash = manifest[skillId][rel];
+        // Missing → new file. No recorded hash, or disk content still equals the
+        // recorded ship → stock file the user never touched → safe to upgrade.
+        // Anything else is a user edit — hands off.
+        if (!existsSync(dstPath) || shippedHash === undefined || hashFile(dstPath) === shippedHash) {
+            copyFileSync(srcPath, dstPath);
+            manifest[skillId][rel] = hashFile(dstPath);
+            changed++;
+        }
+    }
+    return changed;
 }
 /**
  * Skill registry — .md files are the SINGLE source of truth.

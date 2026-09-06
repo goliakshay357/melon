@@ -7,9 +7,18 @@ export interface Skill {
 export declare function skillsDir(): string;
 /**
  * Default skills SHIP WITH THE APP in <compiled>/skills/ (bundled from
- * assets/skills by the build). On every startup we copy them into the agent
+ * assets/skills by the build). On every startup we sync them into the agent
  * dir so a fresh laptop gets them without manual setup — unless the user
  * deleted that skill (denylisted).
+ *
+ * Skills may be multi-file packages (SKILL.md + references/ + assets/), so a
+ * skill dir is synced whole. Bundled skill UPDATES must reach users: a stock
+ * (never user-edited) file is overwritten with the new ship, while a file the
+ * user modified is left alone. "Stock" is detected with a manifest of the
+ * content hashes we last shipped — if the file on disk still matches the
+ * recorded hash, the user hasn't touched it. Files with no manifest entry are
+ * treated as stock (first run after this system, or a skill the UI never
+ * tracks per-file); from then on the hash guards user edits.
  */
 export declare function materializeSkills(): void;
 /**
