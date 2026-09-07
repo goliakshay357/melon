@@ -268,6 +268,22 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	toolExecution?: ToolExecutionMode;
 
 	/**
+	 * Maximum number of consecutive automatic continuations for "dead" turns.
+	 *
+	 * A dead turn is an assistant response that produced no text and no tool calls,
+	 * only thinking content (or nothing at all) — typically a reasoning-only response
+	 * truncated by the output token limit, or a degenerate empty response. When a turn
+	 * is dead, the loop injects a synthetic user message ("Continue the task") and
+	 * retries, instead of silently ending the run.
+	 *
+	 * The counter resets on any turn that produces text or tool calls. Once the cap is
+	 * reached, the run ends as it would have without auto-continuation.
+	 *
+	 * Default: 2. Set to 0 to disable.
+	 */
+	maxDeadTurnContinues?: number;
+
+	/**
 	 * Called before a tool is executed, after arguments have been validated.
 	 *
 	 * Return `{ block: true }` to prevent execution. The loop emits an error tool result instead.

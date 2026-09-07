@@ -8,6 +8,7 @@ import {
 	type Context,
 	EventStream,
 	type ToolResultMessage,
+	type UserMessage,
 	validateToolArguments,
 } from "@earendil-works/pi-ai";
 import { getDefaultStreamFn } from "./stream-fn.ts";
@@ -149,6 +150,31 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	);
 }
 
+/** Default cap for consecutive dead-turn auto-continuations (AgentLoopConfig.maxDeadTurnContinues). */
+const DEFAULT_MAX_DEAD_TURN_CONTINUES = 2;
+
+/**
+ * A dead turn is an assistant response with nothing the user or the loop can act on:
+ * no tool calls and no non-empty text — only thinking content, or nothing at all.
+ * Typical causes: a reasoning-only response truncated by the output token limit, or a
+ * degenerate empty response.
+ */
+function isDeadTurn(message: AssistantMessage): boolean {
+	return !message.content.some((c) => (c.type === "text" ? c.text.trim().length > 0 : c.type === "toolCall"));
+}
+
+function createDeadTurnNudge(message: AssistantMessage): UserMessage {
+	const cause =
+		message.stopReason === "length"
+			? "Your previous response was cut off by the output token limit before it produced any text or tool calls."
+			: "Your previous response ended without producing any text or tool calls.";
+	return {
+		role: "user",
+		content: `${cause} Continue the task.`,
+		timestamp: Date.now(),
+	};
+}
+
 /**
  * Main loop logic shared by agentLoop and agentLoopContinue.
  */
@@ -163,6 +189,8 @@ async function runLoop(
 	let currentContext = initialContext;
 	let config = initialConfig;
 	let firstTurn = true;
+	// Consecutive dead turns (no text, no tool calls) in the current stall; reset on any productive turn.
+	let deadTurnContinues = 0;
 	// Check for steering messages at start (user may have typed while waiting)
 	let pendingMessages: AgentMessage[] = (await config.getSteeringMessages?.()) || [];
 
@@ -256,7 +284,22 @@ async function runLoop(
 				return;
 			}
 
-			pendingMessages = (await config.getSteeringMessages?.()) || [];
+			// Auto-continue dead turns: a reasoning-only response truncated by the output
+			// token limit (or a degenerate empty response) would otherwise end the run
+			// silently. Poke the model with a synthetic user message, bounded by
+			// maxDeadTurnContinues so a persistently broken provider cannot loop forever.
+			const nudges: AgentMessage[] = [];
+			if (isDeadTurn(message)) {
+				const maxContinues = config.maxDeadTurnContinues ?? DEFAULT_MAX_DEAD_TURN_CONTINUES;
+				if (deadTurnContinues < maxContinues) {
+					deadTurnContinues++;
+					nudges.push(createDeadTurnNudge(message));
+				}
+			} else {
+				deadTurnContinues = 0;
+			}
+
+			pendingMessages = [...nudges, ...((await config.getSteeringMessages?.()) || [])];
 		}
 
 		// Agent would stop here. Check for follow-up messages.

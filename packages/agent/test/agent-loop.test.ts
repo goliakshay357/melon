@@ -1605,3 +1605,144 @@ describe("agentLoopContinue with AgentMessage", () => {
 		expect(messages[0].role).toBe("assistant");
 	});
 });
+
+describe("dead turn auto-continue", () => {
+	function createDeadTurnMessage(stopReason: AssistantMessage["stopReason"] = "length"): AssistantMessage {
+		return createAssistantMessage([{ type: "thinking", thinking: "long deliberation" }], stopReason);
+	}
+
+	it("injects a nudge and continues after a reasoning-only truncated turn", async () => {
+		let call = 0;
+		const streamFn = () => {
+			call++;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message =
+					call === 1 ? createDeadTurnMessage("length") : createAssistantMessage([{ type: "text", text: "Done" }]);
+				stream.push({ type: "done", reason: call === 1 ? "length" : "stop", message });
+			});
+			return stream;
+		};
+
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		const stream = agentLoop([createUserMessage("Do the thing")], context, config, undefined, streamFn);
+
+		const events: AgentEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const messages = await stream.result();
+
+		expect(call).toBe(2);
+		expect(messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
+		const nudge = messages[2];
+		if (nudge.role !== "user") throw new Error("expected user nudge");
+		expect(nudge.content).toContain("output token limit");
+		expect(nudge.content).toContain("Continue the task.");
+		expect(messages[3]).toMatchObject({ role: "assistant" });
+	});
+
+	it("caps consecutive dead turns at maxDeadTurnContinues", async () => {
+		let call = 0;
+		const streamFn = () => {
+			call++;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({ type: "done", reason: "length", message: createDeadTurnMessage("length") });
+			});
+			return stream;
+		};
+
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		const stream = agentLoop([createUserMessage("Do the thing")], context, config, undefined, streamFn);
+
+		const events: AgentEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const messages = await stream.result();
+
+		// Initial turn + 2 auto-continues (default cap), then the run ends.
+		expect(call).toBe(3);
+		expect(messages.filter((m) => m.role === "user")).toHaveLength(3);
+	});
+
+	it("maxDeadTurnContinues: 0 disables auto-continue", async () => {
+		let call = 0;
+		const streamFn = () => {
+			call++;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				stream.push({ type: "done", reason: "length", message: createDeadTurnMessage("length") });
+			});
+			return stream;
+		};
+
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+			maxDeadTurnContinues: 0,
+		};
+		const stream = agentLoop([createUserMessage("Do the thing")], context, config, undefined, streamFn);
+
+		const events: AgentEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		await stream.result();
+
+		expect(call).toBe(1);
+	});
+
+	it("resets the counter after a productive turn", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `echoed: ${params.value}` }], details: { value: params.value } };
+			},
+		};
+
+		// Sequence: dead, dead (cap reached), toolUse (productive: counter resets), dead (poke again), text.
+		const script: ("dead" | "tool" | "text")[] = ["dead", "dead", "tool", "dead", "text"];
+		let call = 0;
+		const streamFn = () => {
+			const kind = script[call];
+			call++;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (kind === "dead") {
+					stream.push({ type: "done", reason: "length", message: createDeadTurnMessage("length") });
+				} else if (kind === "tool") {
+					const message = createAssistantMessage(
+						[{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }],
+						"toolUse",
+					);
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage([{ type: "text", text: "Done" }]);
+					stream.push({ type: "done", reason: "stop", message });
+				}
+			});
+			return stream;
+		};
+
+		const context: AgentContext = { systemPrompt: "", messages: [], tools: [tool] };
+		const config: AgentLoopConfig = { model: createModel(), convertToLlm: identityConverter };
+		const stream = agentLoop([createUserMessage("Do the thing")], context, config, undefined, streamFn);
+
+		const events: AgentEvent[] = [];
+		for await (const event of stream) {
+			events.push(event);
+		}
+		await stream.result();
+
+		expect(call).toBe(5);
+	});
+});

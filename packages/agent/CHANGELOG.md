@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AgentLoopConfig.maxDeadTurnContinues` (default 2): when an assistant turn produces no text and no tool calls (e.g. a reasoning-only response truncated by the output token limit), the loop now injects a synthetic user nudge and retries instead of silently ending the run.
+
 ### Fixed
 
 - Fixed `streamProxy()` dropping finalized tool-call metadata such as OpenAI Responses namespaces ([#7709](https://github.com/earendil-works/pi/issues/7709)).
