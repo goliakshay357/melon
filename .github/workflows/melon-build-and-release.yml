@@ -258,6 +258,15 @@ jobs:
             --notices --warnings --errors \
             desktop/build/AppIcon.xcassets
           [ -f desktop/build/car/Assets.car ] || { echo "::error::Assets.car was not produced"; exit 1; }
+          # actool exits 0 even when it assigns zero images (e.g. an icon entry
+          # it cannot map to the target platform) and just omits the car's icon.
+          # The catalog must use macOS assignment (idiom "mac" size slots, no
+          # "platform" key — actool rejects iOS-style `platform: "macos"` with
+          # `Unknown platform value` and silently compiles an empty car).
+          xcrun assetutil --info desktop/build/car/Assets.car | grep -Eq '"Name" *: *"AppIcon"' || {
+            echo "::error::Assets.car does not contain AppIcon — actool compiled zero icons"
+            exit 1
+          }
 
       - name: Build Melon (electron-builder, ${{ matrix.arch }})
         env:
