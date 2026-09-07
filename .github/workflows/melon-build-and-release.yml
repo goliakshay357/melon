@@ -227,6 +227,30 @@ jobs:
         run: npm ci
         working-directory: desktop
 
+      - name: Ship workspace pi-coding-agent into desktop (handoff exports)
+        shell: bash   # cp/rm + globs: bash, not pwsh
+        run: |
+          set -euo pipefail
+          # melon-server imports handoff/merge exports (HANDOFF_ARTIFACT_SYSTEM_PROMPT
+          # and friends) that only exist in this workspace's pi-coding-agent build;
+          # the published npm package the desktop pins does not have them, so the
+          # packaged server died at import time. Local DMG builds already solve
+          # this in build-dmg.sh step 2b — mirror it here: overwrite the npm copy's
+          # dist + package.json with the freshly built workspace package. Runtime
+          # deps (pi-ai, pi-tui, …) stay as npm-installed; the fork has not touched
+          # them. Runs after `npm ci` (which restores the npm copy) on every OS —
+          # the AppImage/exe bundles the same server.
+          AGENT_DIST="desktop/node_modules/@earendil-works/pi-coding-agent"
+          [ -d "$AGENT_DIST" ] || { echo "::error::$AGENT_DIST missing — desktop npm ci failed?"; exit 1; }
+          npm --workspace packages/coding-agent run build
+          rm -rf "$AGENT_DIST/dist"
+          cp -R packages/coding-agent/dist "$AGENT_DIST/dist"
+          cp packages/coding-agent/package.json "$AGENT_DIST/package.json"
+          grep -q "HANDOFF_ARTIFACT_SYSTEM_PROMPT" "$AGENT_DIST/dist/index.js" || {
+            echo "::error::synced pi-coding-agent dist lacks handoff exports — workspace build out of sync with melon-server"
+            exit 1
+          }
+
       - name: Compile macOS 26 icon (Assets.car — macOS 26 plates icons without one)
         if: runner.os == 'macOS'
         shell: bash
