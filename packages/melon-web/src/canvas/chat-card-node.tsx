@@ -147,7 +147,8 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     if (m.role === 'user') {
         return (
             <div className="flex justify-end">
-                <div className="max-w-[92%] overflow-hidden rounded-xl bg-primary/10 px-3 py-1.5 text-xs leading-relaxed text-primary">
+                <div
+                    className="max-w-[92%] overflow-hidden rounded-xl bg-primary/10 px-3 py-1.5 text-xs leading-relaxed text-primary whitespace-pre-wrap break-words">
                     <UserTextWithMentions text={m.text} />
                 </div>
             </div>

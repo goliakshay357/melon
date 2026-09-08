@@ -231,6 +231,12 @@ export function PromptComposer({
                         setDismissed(false);
                         setCmdDismissed(false);
                     }}
+                    onPaste={(e) => {
+                        e.preventDefault();
+                        const text = e.clipboardData.getData('text/plain');
+                        onChange(text);
+                        growTextarea(e.target);
+                    }}
                     onSelect={(e) => syncCaret(e.currentTarget)}
                     onClick={(e) => {
                         syncCaret(e.currentTarget);
