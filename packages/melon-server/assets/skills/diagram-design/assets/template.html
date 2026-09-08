@@ -21,7 +21,6 @@
     body {
       font-family: var(--font-sans);
       color: var(--color-ink);
-      container-type: inline-size;
     }
 
     .frame { width: 100%; }
@@ -47,18 +46,14 @@
     }
 
     svg { display: block; width: 100%; height: auto; }
-    /* Fullscreen letterbox — R = viewBox width ÷ height (e.g. 1.667 for 1000/600). Keeps svg contain-fit.
-   Uses @media for broad browser support AND @container as fallback for resizable renderers.
-   body overflow: auto so the diagram scrolls when fullscreen height exceeds the viewport. */
+
+    /* Standalone page: on wide viewports keep the column readable and centered.
+       This template carries a header, so the svg stays width-driven here.
+       The Melon chat scaffold (svg alone in <body>, contain-fit in fullscreen) is
+       specified in SKILL.md § Frame contract — use that one for viz-html blocks. */
     @media (min-width: 800px) {
-      html, body { height: 100%; }
-      body { display: grid; place-items: center; overflow-y: auto; }
-      svg { width: min(100%, calc(100vh * R)); height: auto; }
-    }
-    @container (min-width: 800px) {
-      html, body { height: 100%; }
-      body { display: grid; place-items: center; overflow-y: auto; }
-      svg { width: min(100%, calc(100vh * R)); height: auto; }
+      body { display: grid; place-items: center; padding: 2rem; }
+      .frame { max-width: 1200px; }
     }
   </style>
 </head>

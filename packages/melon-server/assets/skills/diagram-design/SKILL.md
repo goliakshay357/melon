@@ -51,33 +51,29 @@ Overflowing labels are a failed render. Before placing any text, count character
 - Height is auto-reported and clamped to 200–700px; content taller than 700px is CLIPPED. Aim for a final rendered height of 300–680px.
 - Portrait or square canvases: set the `viewBox` width to 380–420 so the type ramp renders ≈1:1. Keep height/width ratio ≤ 1.8 (e.g. `0 0 400 700`).
 - Dense landscape types (Gantt, Wardley, db-schema, wide sankeys): `viewBox` width up to 720 and accept smaller inline text — the user can open fullscreen. The ratio cap still holds.
-- Horizontal overflow is always a defect. Use this scaffold — it fits inline AND letterboxes fullscreen:
+- Horizontal overflow is always a defect. Copy this scaffold verbatim. The only numbers you change are the two `min-*` values, and they are literally the `viewBox` width and height. Put NO `width`/`height` attributes on the `<svg>` — `viewBox` alone carries the ratio.
 
 ```css
 html, body { margin: 0; padding: 0; background: #f5f5f5; }
-body { container-type: inline-size; }
+/* Inline card (~370px wide): the svg spans the width, height follows the viewBox. */
 svg { display: block; width: 100%; height: auto; }
 
-/* Fullscreen letterbox — triggers when the chat frame exceeds ~800px.
-   Uses @media for broad browser support; @container is also included as a fallback.
-   body overflow-y: auto so the diagram scrolls when fullscreen height exceeds the viewport. */
+/* Fullscreen: the card frame is wider than 800px. This MUST be a media query.
+   A container query cannot do this job: @container rules only style DESCENDANTS
+   of the container, so `html`/`body` declarations inside an @container block are
+   silently dropped — the svg then keeps a stale width and hugs the left edge. */
 @media (min-width: 800px) {
   html, body { height: 100%; }
-  body { display: grid; place-items: center; overflow-y: auto; }
-  /* R = viewBox width ÷ height, e.g. 0.571 for 400×700. Keeps the svg contain-fit. */
-  svg { width: min(100%, calc(100vh * R)); height: auto; }
-}
-
-/* @container fallback (modern browsers only):
-   Triggers when the containing block's inline-size exceeds 800px.
-   Useful when the viz-html is rendered in a resizable iframe/card.
-   body overflow-y: auto so the diagram scrolls when fullscreen height exceeds the viewport. */
-@container (min-width: 800px) {
-  html, body { height: 100%; }
-  body { display: grid; place-items: center; overflow-y: auto; }
-  svg { width: min(100%, calc(100vh * R)); height: auto; }
+  body { display: grid; place-items: center; overflow: auto; }
+  /* The svg viewport fills the frame and preserveAspectRatio (default xMidYMid meet)
+     scales the drawing up and centers it — no ratio math needed. The min-* values are
+     the viewBox numbers, so a frame smaller than the canvas scrolls instead of
+     shrinking the type. Below: canvas 0 0 720 460. */
+  svg { width: 100%; height: 100%; min-width: 720px; min-height: 460px; }
 }
 ```
+
+For a `0 0 400 700` canvas the last rule is `svg { width: 100%; height: 100%; min-width: 400px; min-height: 700px; }`. Never emit `calc(100vh * <ratio>)` and never emit an `@container` block: a hand-computed ratio is how a fullscreen diagram ends up rendering at a third of the frame, left-aligned.
 
 ### Color contract — diagrams ALWAYS render the light skin
 
@@ -111,7 +107,8 @@ Melon runs dark app themes, but diagrams must not follow them. A diagram is an e
 2. Content fills ≥90% of the viewBox; no empty or placeholder boxes.
 3. Every text line fits inside its box (chars × 0.6 × font-size ≤ box width − 16). No overlaps.
 4. Palette is the light skin from the color contract — paper `#f5f5f5` even on a dark app theme.
-5. The deliverable is one fenced block tagged `viz-html` in the reply; zero files written.
+5. The fullscreen scaffold is copied verbatim: one `@media (min-width: 800px)` block, `min-width`/`min-height` equal to the viewBox width/height, no `@container` block, no `calc(100vh * ratio)`, no `width`/`height` attributes on the `<svg>`.
+6. The deliverable is one fenced block tagged `viz-html` in the reply; zero files written.
 
 ---
 
