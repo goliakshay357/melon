@@ -1840,10 +1840,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
 	async startConversation(text, position, options) {
 		const prompt = text.trim();
-		if (prompt.startsWith("/")) {
-			set({ canvasNotice: "Slash commands work inside a chat card — start a conversation first." });
-			return false;
-		}
 		const folder = get().folder;
 		if (
 			startingConversation ||
