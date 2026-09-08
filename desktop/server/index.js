@@ -96,6 +96,60 @@ export async function buildApp(deps = {}) {
     await app.register(cors, { origin: true });
     const registry = new SessionRegistry();
     const cursorAttachLocks = new Map();
+
+    // Watch for manual document changes and broadcast to all sessions
+    try {
+        const { watch, statSync } = await import("node:fs");
+        const manualsDir = join(getAgentDir(), "melon", "notes", "manual");
+        let manualWatcher = null;
+        let debounceTimer = null;
+        let pendingFiles = new Set();
+
+        function flushManualChanges() {
+            if (pendingFiles.size === 0) return;
+            const files = Array.from(pendingFiles);
+            pendingFiles.clear();
+            console.log("[melon] manual file watcher: detected changes in", files);
+            for (const filename of files) {
+                const filePath = join(manualsDir, filename);
+                let mtimeMs = 0;
+                try {
+                    mtimeMs = statSync(filePath).mtimeMs;
+                } catch {
+                    // File deleted or renamed — skip
+                    continue;
+                }
+                // Broadcast to all sessions
+                for (const session of registry.sessions.values()) {
+                    for (const client of session.clients) {
+                        try {
+                            client.raw.write(`data: ${JSON.stringify({
+                                type: "manual_updated",
+                                path: ".melon/notes/manual/" + filename,
+                                mtimeMs: mtimeMs
+                            })}\n\n`);
+                        } catch {
+                            // Client gone — ignore
+                        }
+                    }
+                }
+            }
+        }
+
+        try {
+            if (!existsSync(manualsDir)) mkdirSync(manualsDir, { recursive: true });
+            manualWatcher = watch(manualsDir, { persistent: true }, (eventType, filename) => {
+                if (!filename || !filename.endsWith(".md")) return;
+                pendingFiles.add(filename);
+                if (debounceTimer) clearTimeout(debounceTimer);
+                debounceTimer = setTimeout(flushManualChanges, 100);
+            });
+        } catch (err) {
+            console.error("[melon] manual file watcher failed:", err.message);
+        }
+    } catch (err) {
+        console.error("[melon] manual file watcher setup failed:", err.message);
+    }
     async function withCursorAttachLocks(keys, run) {
         const releases = [];
         for (const key of [...new Set(keys)].sort()) {

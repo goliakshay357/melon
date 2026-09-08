@@ -3135,6 +3135,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						cardId,
 						`⚙ ${tName} ${data.isError ? "✗" : "✓"}${data.durationMs ? ` ${data.durationMs}ms` : ""}${data.isError && data.output ? ` — ${data.output.slice(0, 200)}` : ""}`,
 					);
+				} else if (data.type === "manual_updated") {
+					// External edit to a manual document — refresh any bound document cards.
+					if (data.path) {
+						void useCanvasStore.getState().refreshFileCards(data.path);
+					}
 				} else if (data.type === "agent_meta") {
 					const meta = `stopReason=${data.stopReason} tokens in:${data.inputTokens ?? "?"} out:${data.outputTokens ?? "?"}`;
 					// Clock out any still-open thinking run.
