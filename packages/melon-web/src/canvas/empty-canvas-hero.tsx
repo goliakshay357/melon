@@ -127,7 +127,7 @@ export function EmptyCanvasHero({
                         onPermissionChange={setPermission}
                         thinkingLevel={thinkingLevel}
                         onThinkingChange={setThinkingLevel}
-                        disabled={waiting || starting}
+                        disabled={starting}
                         submitDisabled={!folder || !model}
                         autoFocus={hydrated && !serverOffline}
                         placeholder="Ask Melon to understand, build, or investigate something…"
