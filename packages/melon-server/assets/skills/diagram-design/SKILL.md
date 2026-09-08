@@ -57,10 +57,24 @@ Overflowing labels are a failed render. Before placing any text, count character
 html, body { margin: 0; padding: 0; background: #f5f5f5; }
 body { container-type: inline-size; }
 svg { display: block; width: 100%; height: auto; }
+
+/* Fullscreen letterbox — triggers when the chat frame exceeds ~800px.
+   Uses @media for broad browser support; @container is also included as a fallback.
+   body overflow-y: auto so the diagram scrolls when fullscreen height exceeds the viewport. */
+@media (min-width: 800px) {
+  html, body { height: 100%; }
+  body { display: grid; place-items: center; overflow-y: auto; }
+  /* R = viewBox width ÷ height, e.g. 0.571 for 400×700. Keeps the svg contain-fit. */
+  svg { width: min(100%, calc(100vh * R)); height: auto; }
+}
+
+/* @container fallback (modern browsers only):
+   Triggers when the containing block's inline-size exceeds 800px.
+   Useful when the viz-html is rendered in a resizable iframe/card.
+   body overflow-y: auto so the diagram scrolls when fullscreen height exceeds the viewport. */
 @container (min-width: 800px) {
   html, body { height: 100%; }
-  body { display: grid; place-items: center; }
-  /* R = viewBox width ÷ height, e.g. 0.571 for 400×700. Keeps the svg contain-fit. */
+  body { display: grid; place-items: center; overflow-y: auto; }
   svg { width: min(100%, calc(100vh * R)); height: auto; }
 }
 ```

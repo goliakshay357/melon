@@ -47,11 +47,18 @@
     }
 
     svg { display: block; width: 100%; height: auto; }
-    /* Fullscreen letterbox: R = viewBox width ÷ height (1000/600 here) — update to your ratio. */
+    /* Fullscreen letterbox — R = viewBox width ÷ height (e.g. 1.667 for 1000/600). Keeps svg contain-fit.
+   Uses @media for broad browser support AND @container as fallback for resizable renderers.
+   body overflow: auto so the diagram scrolls when fullscreen height exceeds the viewport. */
+    @media (min-width: 800px) {
+      html, body { height: 100%; }
+      body { display: grid; place-items: center; overflow-y: auto; }
+      svg { width: min(100%, calc(100vh * R)); height: auto; }
+    }
     @container (min-width: 800px) {
       html, body { height: 100%; }
-      body { display: grid; place-items: center; }
-      svg { width: min(100%, calc(100vh * 1.667)); height: auto; }
+      body { display: grid; place-items: center; overflow-y: auto; }
+      svg { width: min(100%, calc(100vh * R)); height: auto; }
     }
   </style>
 </head>
