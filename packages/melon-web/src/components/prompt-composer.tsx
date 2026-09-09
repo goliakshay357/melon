@@ -233,9 +233,24 @@ export function PromptComposer({
                     }}
                     onPaste={(e) => {
                         e.preventDefault();
-                        const text = e.clipboardData.getData('text/plain');
-                        onChange(text);
-                        growTextarea(e.target);
+                        const raw = e.clipboardData.getData('text/plain');
+                        const clean = raw
+                            .replace(/<[^>]*>/g, '')
+                            .replace(/style=["'][^"']*["']/gi, '')
+                            .replace(/\\n/g, '\n')
+                            .replace(/\\r/g, '');
+                        const start = e.currentTarget.selectionStart ?? 0;
+                        const end = e.currentTarget.selectionEnd ?? 0;
+                        const next = value.slice(0, start) + clean + value.slice(end);
+                        onChange(next);
+                        requestAnimationFrame(() => {
+                            const el = e.currentTarget;
+                            el.focus();
+                            const pos = start + clean.length;
+                            el.setSelectionRange(pos, pos);
+                            setCaret(pos);
+                            growTextarea(el);
+                        });
                     }}
                     onSelect={(e) => syncCaret(e.currentTarget)}
                     onClick={(e) => {
