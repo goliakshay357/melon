@@ -6,7 +6,7 @@ import { useVizFullscreen } from './viz-fullscreen';
 /**
  * Renders an agent-authored, self-contained HTML visualization inline in chat.
  * Sandboxed: scripts allowed, no same-origin. Height auto-fits the scene via
- * a postMessage handshake (clamped 200–700px).
+ * a postMessage handshake (clamped 200–1100px).
  *
  * Two modes:
  * - `code`  — inline HTML (small hand-written scenes)
@@ -72,7 +72,7 @@ export const IframeViz = memo(function IframeViz({
                 // slot is empty — ignore height reports (the fullscreen layer
                 // sizes by viewport, not by content).
                 if (fullscreenNode === frameRef.current) return;
-                const h = Math.min(Math.max(Math.round(d.height), 200), 700);
+                const h = Math.min(Math.max(Math.round(d.height), 200), 1100);
                 // Ignore sub-3px changes: the height handshake is a feedback
                 // loop (report → resize → report); a threshold stops 1-2px
                 // wobble from re-rendering/jumping the iframe.
@@ -125,7 +125,17 @@ export const IframeViz = memo(function IframeViz({
     const srcDoc = useMemo(() => {
         const doc = path ? fetchedDoc : code;
         if (doc == null) return null; // still loading (or error card shown below)
-        const dark = `<style>html,body{margin:0;background:var(--viz-bg,${theme.tokens.vizBackground});color:var(--viz-fg,${theme.tokens.vizForeground});overflow:hidden}</style>`;
+        // Content taller than the 1100px auto-height clamp must SCROLL inside the
+        // frame instead of being clipped away: overflow-y:auto (not hidden) keeps
+        // the handshake stable when content fits, and enables a scrollbar when
+        // the report gets clamped. Horizontal stays hidden — per the diagram
+        // frame contract, horizontal overflow is always a defect.
+        const dark = `<style>html,body{margin:0;background:var(--viz-bg,${theme.tokens.vizBackground});color:var(--viz-fg,${theme.tokens.vizForeground});overflow-x:hidden;overflow-y:auto}</style>`;
+        // Same guarantee for FULL documents: the scaffold may set its own
+        // overflow (e.g. body hidden / 100vh layouts), so force vertical scroll
+        // availability so clamped content stays reachable. No scrollbar shows
+        // when everything fits.
+        const scrollFix = `<style>html,body{overflow-y:auto!important;overflow-x:hidden!important}</style>`;
         if (!/<html|<body/i.test(doc)) {
             return `<!doctype html><html><head>${themeVars}${dark}${reporter}</head><body>${doc}</body></html>`;
         }
@@ -133,9 +143,9 @@ export const IframeViz = memo(function IframeViz({
         // so the height handshake and theme contract still work. The doc keeps
         // its own <html> attrs and styling; its var() references now resolve.
         if (doc.includes('<head>')) {
-            return doc.replace('<head>', `<head>${themeVars}${reporter}`);
+            return doc.replace('<head>', `<head>${themeVars}${scrollFix}${reporter}`);
         }
-        return `${themeVars}${dark}${reporter}${doc}`;
+        return `${themeVars}${scrollFix}${dark}${reporter}${doc}`;
     }, [path, fetchedDoc, code, theme, themeVars, reporter]);
 
     // While loading a file-mode viz, reserve a stable frame so the chat
