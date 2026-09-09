@@ -35,6 +35,7 @@ export interface AttachedSession {
 export interface QueuedPrompt {
 	text: string;
 	display?: string;
+	context?: string;
 }
 
 export function queueDisplays(queue: QueuedPrompt[]): string[] {

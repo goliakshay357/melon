@@ -201,6 +201,13 @@ export async function buildApp(deps = {}) {
                 if (cursorTurnId === undefined)
                     s.busy = true;
                 try {
+                    // Inject context for queued prompts too
+                    if (next.context) {
+                        await s.runtime.session.sendCustomMessage(
+                            { customType: "context", content: [{ type: "text", text: next.context }], display: false },
+                            { deliverAs: "nextTurn" },
+                        );
+                    }
                     await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => s.runtime.session.prompt(next.text, { streamingBehavior: "followUp" }));
                     if (cursorTurnId !== undefined && isCursorTurnAborted(s, cursorTurnId))
                         return;
@@ -3191,7 +3198,8 @@ export async function buildApp(deps = {}) {
         if (s.busy) {
             const text = String(req.body?.text ?? "");
             const display = String(req.body?.display ?? "") || undefined;
-            s.promptQueue.push({ text, display });
+            const context = req.body?.context ?? "";
+            s.promptQueue.push({ text, display, context: context || undefined });
             console.log(`[${cardId}] queue:push "${(display ?? text).slice(0, 40)}" (queue=${JSON.stringify(queueDisplays(s.promptQueue))})`);
             registry.broadcast(cardId, { type: "queue", followUp: queueDisplays(s.promptQueue) });
             reply.send({ ok: true, queued: true });
@@ -3203,8 +3211,15 @@ export async function buildApp(deps = {}) {
         registry.broadcast(cardId, { type: "raw", text: "\u2b07 prompt received by server" });
         try {
             const text = req.body?.text ?? "";
-            // Skills are activated via pi's native /skill: followUp on toggle —
-            // NOT appended per-prompt (that bloated the context window).
+            const context = req.body?.context ?? "";
+            // Inject diagram directives and file contents as custom context
+            // messages (not user text) so the model doesn't echo them back.
+            if (context) {
+                await s.runtime.session.sendCustomMessage(
+                    { customType: "context", content: [{ type: "text", text: context }], display: false },
+                    { deliverAs: "nextTurn" },
+                );
+            }
             await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => s.runtime.session.prompt(text));
             console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
         }
