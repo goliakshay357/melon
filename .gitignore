@@ -47,3 +47,6 @@ collect.sh
 # Local archify / design dumps at repo root
 cursor-*.html
 cursor-*.json
+
+# Installer artifacts (regenerable, not source)
+assets/*.dmg
