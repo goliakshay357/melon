@@ -178,9 +178,17 @@ export interface SessionCard {
 	/** Full trajectory trace — meta + every lifecycle event (for debugging). */
 	sessionId?: string;
 	events?: TraceEvent[];
+	/**
+	 * Collapsed to a title-only chip on the canvas (minimize/maximize toggle).
+	 * The chip keeps the card's stored width; height becomes MINIMIZED_CARD_HEIGHT.
+	 */
+	minimized?: boolean;
 }
 
 export const newCardId = () => `card_${nanoid(8)}`;
 
 /** Default chat/document card size when none is stored yet. */
 export const DEFAULT_CARD_SIZE = { width: 480, height: 520 } as const;
+
+/** Height of a minimized card — a single title strip, like an OS title bar. */
+export const MINIMIZED_CARD_HEIGHT = 40 as const;

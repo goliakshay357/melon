@@ -15,6 +15,7 @@ import { PromptComposer } from '@/components/prompt-composer';
 import { QuestionPanel } from '@/components/question-panel';
 import { ToolRunBlock } from '@/components/tool-run-block';
 import { DEFAULT_CARD_SIZE, type TraceEvent } from '@/types/session-card';
+import { MinimizedCardBar } from './minimized-card-bar';
 import {
     mentionExists,
     mentionPaths,
@@ -746,6 +747,22 @@ function ChatCardNodeInner({
 
     const focused = !!selected && !dragging;
 
+    // Minimized: the whole node collapses to a title strip. Live hooks above
+    // keep running (stream follow, pendingDraft restore), so maximizing
+    // brings the thread back exactly where it was.
+    if (card.minimized) {
+        return (
+            <MinimizedCardBar
+                title={card.title}
+                selected={focused}
+                leading={
+                    <span className={cn('size-2 shrink-0 rounded-full', statusDot[card.status])} />
+                }
+                onMaximize={() => useCanvasStore.getState().updateCard(id, { minimized: false })}
+            />
+        );
+    }
+
     const submit = async () => {
         const text = draft.trim();
         if (!text) return;
@@ -937,6 +954,16 @@ function ChatCardNodeInner({
                         title={serverOffline ? 'Reconnecting to server…' : 'Fork this conversation'}
                     >
                         <Plus className="size-4" />
+                    </button>
+                    <button
+                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            useCanvasStore.getState().updateCard(id, { minimized: true });
+                        }}
+                        title="Minimize to title strip"
+                    >
+                        <Minimize2 className="size-4" />
                     </button>
                     <button
                         className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"

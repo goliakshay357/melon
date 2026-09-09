@@ -580,8 +580,6 @@ interface CanvasState {
 	beginCardGesture: () => void;
 	undo: () => boolean;
 	redo: () => boolean;
-	/** Drop cards from the layout undo/redo stacks (hard-deleted files must stay gone). */
-	purgeCardFromHistory: (ids: string[]) => void;
 	deleteCards: (ids: string[]) => void;
 	sendMessage: (cardId: string, text: string, opts?: { cwd?: string; sessionFile?: string }) => Promise<boolean>;
 	resumeSession: (sessionFile: string) => Promise<string | null>;
@@ -613,9 +611,7 @@ interface CanvasState {
 	/** Open a @-mentioned path on the canvas (note node or document card). */
 	openFileOnCanvas: (relPath: string) => Promise<void>;
 	/** The agent mutated a file — refresh document/note cards bound to it. */
-	refreshFileCards: (absPath: string, cwd?: string, eventMtimeMs?: number) => Promise<void>;
-	/** Re-read ONE document card's backing file from disk (manual refresh button). */
-	refreshDocumentCard: (cardId: string) => Promise<void>;
+	refreshFileCards: (absPath: string) => Promise<void>;
 	/** Write pending manual edits now (blur). No-op when nothing is pending. */
 	flushManualSave: (cardId: string) => Promise<void>;
 	/** Flush every pending manual + note edit (before an agent turn). */
@@ -1035,35 +1031,17 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	},
 	/** One-shot "center this card" request, consumed by the canvas effect. */
 	focusCardId: null,
-	async refreshFileCards(absPath, refreshCwd, eventMtimeMs) {
-		console.log(
-			`[manual-refresh] refreshFileCards called absPath=${JSON.stringify(absPath)} cwd=${JSON.stringify(refreshCwd)} mtime=${eventMtimeMs}`,
-		);
+	async refreshFileCards(absPath) {
 		for (const c of get().cards) {
 			// Document card bound to this file?
 			const docFile = c.documentFile;
 			if (docFile && (absPath.endsWith(`/${docFile}`) || absPath === docFile)) {
-				// No-op guard: the watcher and tool_end can both fire for the same
-				// write; if we already have this exact mtime, skip the fetch.
-				if (eventMtimeMs !== undefined && (c.documentMtimeMs ?? 0) === eventMtimeMs) {
-					console.log(`[manual-refresh]   SKIP (mtime match ${eventMtimeMs})`);
-					continue;
-				}
 				try {
 					const docCwd = c.documentCwd;
-					// Watcher events carry the folder that changed; tool_end events carry
-					// an abs path. Trust the explicit cwd first, then docCwd, then folder.
-					const root = refreshCwd ?? (docCwd && absPath.startsWith(`${docCwd}/`) ? docCwd : (get().folder ?? ""));
-					console.log(`[manual-refresh]   MATCH docFile=${docFile} → fetch /file cwd=${root}`);
+					const root = docCwd && absPath.startsWith(`${docCwd}/`) ? docCwd : (get().folder ?? "");
 					const res = await fetch(`/file?cwd=${encodeURIComponent(root)}&path=${encodeURIComponent(docFile)}`);
-					if (!res.ok) {
-						console.log(`[manual-refresh]   fetch !ok status=${res.status}`);
-						continue;
-					}
+					if (!res.ok) continue;
 					const d = (await res.json()) as { content: string; mtimeMs?: number };
-					console.log(
-						`[manual-refresh]   FETCHED contentLen=${d.content?.length ?? 0} mtime=${d.mtimeMs} → patching card`,
-					);
 					patchCardInStore(c.id, (card) => ({
 						...card,
 						documentContent: d.content,
@@ -1071,8 +1049,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						documentVersion: (card.documentVersion ?? 0) + 1,
 					}));
 					pushLog(c.id, "✓ agent edit reflected (live)");
-				} catch (e) {
-					console.log(`[manual-refresh]   ERROR ${(e as Error)?.message}`);
+				} catch {
 					/* keep current content */
 				}
 				continue;
@@ -1085,43 +1062,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					await get().hydrateNote(c.id);
 				}
 			}
-		}
-	},
-	async refreshDocumentCard(cardId) {
-		const c = get().cards.find((x) => x.id === cardId);
-		const folder = get().folder ?? "";
-		console.log(
-			`[manual-refresh] refreshDocumentCard(${cardId}) entry docFile=${JSON.stringify(c?.documentFile ?? null)} docCwd=${JSON.stringify(c?.documentCwd ?? null)} docMtime=${c?.documentMtimeMs} folder=${JSON.stringify(folder)}`,
-		);
-		if (!c?.documentFile) {
-			console.log(`[manual-refresh] refreshDocumentCard(${cardId}) — no documentFile, skipped`);
-			return;
-		}
-		try {
-			const root = c.documentCwd ?? folder;
-			console.log(
-				`[manual-refresh] refreshDocumentCard(${cardId}) fetching /file cwd=${JSON.stringify(root)} path=${JSON.stringify(c.documentFile)}`,
-			);
-			const res = await fetch(`/file?cwd=${encodeURIComponent(root)}&path=${encodeURIComponent(c.documentFile)}`);
-			if (!res.ok) {
-				console.log(
-					`[manual-refresh] refreshDocumentCard(${cardId}) fetch !ok status=${res.status} — content NOT updated`,
-				);
-				return;
-			}
-			const d = (await res.json()) as { content: string; mtimeMs?: number };
-			console.log(
-				`[manual-refresh] refreshDocumentCard(${cardId}) fetched len=${d.content?.length ?? 0} newMtime=${d.mtimeMs} oldMtime=${c.documentMtimeMs} → updating card`,
-			);
-			patchCardInStore(cardId, (card) => ({
-				...card,
-				documentContent: d.content,
-				documentMtimeMs: d.mtimeMs,
-				documentVersion: (card.documentVersion ?? 0) + 1,
-			}));
-			pushLog(cardId, "🔄 manual refresh from disk");
-		} catch (e) {
-			console.log(`[manual-refresh] refreshDocumentCard(${cardId}) ERROR ${(e as Error)?.message}`);
 		}
 	},
 	requestFocusCard(id) {
@@ -1900,6 +1840,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
 	async startConversation(text, position, options) {
 		const prompt = text.trim();
+		if (prompt.startsWith("/")) {
+			set({ canvasNotice: "Slash commands work inside a chat card — start a conversation first." });
+			return false;
+		}
 		const folder = get().folder;
 		if (
 			startingConversation ||
@@ -2453,13 +2397,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		get().updateCard(id, { size: { width: Math.round(width), height: Math.round(height) } });
 	},
 
-	purgeCardFromHistory(ids) {
-		if (ids.length === 0) return;
-		const dead = new Set(ids);
-		for (const stack of [undoStack, redoStack]) {
-			for (let i = 0; i < stack.length; i++) stack[i] = stack[i].filter((c) => !dead.has(c.id));
-		}
-	},
 	deleteCards(ids) {
 		if (ids.length === 0) return;
 		pushUndo(get().cards);
@@ -3043,14 +2980,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					| { type: "thinking_level"; level: string; thinkingLevels?: string[] }
 					| { type: "queue"; followUp: string[] }
 					| { type: "user_message"; text: string }
-					| {
-							type: "manual_updated";
-							/** Folder whose .melon/notes/manual changed. */
-							cwd?: string;
-							/** Relative path inside the folder, e.g. .melon/notes/manual/x.md. */
-							path: string;
-							mtimeMs?: number;
-					  }
 					| { type: "note_injected"; artifactId: string; revision: number; mode: string; text: string }
 					| {
 							type: "extension_ui";
@@ -3206,12 +3135,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						cardId,
 						`⚙ ${tName} ${data.isError ? "✗" : "✓"}${data.durationMs ? ` ${data.durationMs}ms` : ""}${data.isError && data.output ? ` — ${data.output.slice(0, 200)}` : ""}`,
 					);
-				} else if (data.type === "manual_updated") {
-					// External edit to a manual document — refresh any bound document cards.
-					console.log(`[manual-refresh] SSE manual_updated received:`, data);
-					if (data.path) {
-						void useCanvasStore.getState().refreshFileCards(data.path, data.cwd, data.mtimeMs);
-					}
 				} else if (data.type === "agent_meta") {
 					const meta = `stopReason=${data.stopReason} tokens in:${data.inputTokens ?? "?"} out:${data.outputTokens ?? "?"}`;
 					// Clock out any still-open thinking run.
@@ -3464,20 +3387,12 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		// ── 3. send ──
 		// /diagram expands into a directive for the MODEL; @mentions expand into
 		// real file contents. The chat display keeps the user's own words.
-		// Build context separately so expansions go to the model as context,
-		// not as user text — prevents the model from echoing them back.
-		let context = "";
-		if (parsed.command?.name === "diagram") {
-			context = expandDiagramCommand("", parsed.command.args).trimStart();
-		}
-		if (parsed.mentions.length > 0) {
-			const fileParts = (
-				await expandMentions("", parsed.mentions, [cwd, get().folder !== cwd ? get().folder : null])
-			).trimStart();
-			if (fileParts) {
-				context = context ? `${context}\n\n${fileParts}` : fileParts;
-			}
-		}
+		const commandExpanded =
+			parsed.command?.name === "diagram" ? expandDiagramCommand(text, parsed.command.args) : text;
+		const outgoing = (await expandMentions(commandExpanded, parsed.mentions, [
+			cwd,
+			get().folder !== cwd ? get().folder : null,
+		])) as string;
 		const promptEventId = pushEvent(cardId, {
 			kind: "prompt",
 			name: text.slice(0, 60),
@@ -3489,8 +3404,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
-					text, // original user input — shown in transcript
-					...(context ? { context } : {}),
+					text: outgoing,
+					// Command expansions (/diagram) append a model-facing directive —
+					// queue chips, cancel-to-draft, and the transcript show the
+					// user's own words instead.
+					...(outgoing !== text ? { display: text } : {}),
 					viz: card.vizMode === true,
 					readonly: card.permission === "readonly",
 				}),
@@ -3522,23 +3440,3 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		return true;
 	},
 }));
-
-/**
- * Future-proof refresh entry point: ANY module can re-read a manual file from
- * disk and refresh every document/note card bound to it — e.g. a chat card
- * right after the agent finished editing .melon/notes/manual/*.md, an
- * extension, or the devtools console. Also exposed as window.melonRefresh for
- * callers that can't import this store.
- */
-export function refreshDocumentFromFile(absPath: string, cwd?: string): void {
-	void useCanvasStore.getState().refreshFileCards(absPath, cwd);
-}
-
-if (typeof window !== "undefined") {
-	const w = window as unknown as {
-		melonRefresh?: (absPath: string, cwd?: string) => void;
-		melonRefreshDocumentCard?: (cardId: string) => void;
-	};
-	w.melonRefresh = refreshDocumentFromFile;
-	w.melonRefreshDocumentCard = (cardId: string) => void useCanvasStore.getState().refreshDocumentCard(cardId);
-}

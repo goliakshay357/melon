@@ -1,11 +1,12 @@
 import { memo as ReactMemo, useCallback, useEffect, useRef, useState } from 'react';
 import { Handle, Node, NodeProps, NodeResizer, Position } from '@xyflow/react';
-import { BookMarked, Copy, Loader2, Plus, RefreshCw, RotateCcw, Send, X } from 'lucide-react';
+import { BookMarked, Copy, Loader2, Minimize2, Plus, RefreshCw, RotateCcw, Send, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { DocumentEditor } from '@/components/document-editor';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { confirmAction } from '@/components/dialogs';
 import { cn } from '@/lib/utils';
+import { MinimizedCardBar } from './minimized-card-bar';
 
 export type NoteCardNodeType = Node<{ cardId: string }, 'noteCard'>;
 
@@ -40,6 +41,24 @@ function NoteCardNodeInner({ id, selected }: NodeProps<NoteCardNodeType>) {
 
     const state = note.state;
     const isMerge = note.noteKind === 'merge';
+
+    // Minimized: collapse to a title strip. Body stays in the store + the
+    // artifact file, so maximizing restores the note in place.
+    if (card.minimized) {
+        return (
+            <MinimizedCardBar
+                title={card.title}
+                selected={selected}
+                leading={
+                    <span className="flex shrink-0 items-center gap-1 rounded bg-secondary px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                        <BookMarked className="size-3" />
+                        {isMerge ? 'merge' : 'ho'}
+                    </span>
+                }
+                onMaximize={() => useCanvasStore.getState().updateCard(id, { minimized: false })}
+            />
+        );
+    }
     const staleWires = note.wires.filter((w) => w.stale);
     const wireChips = note.wires.map((w) => ({
         ...w,
@@ -175,6 +194,16 @@ function NoteCardNodeInner({ id, selected }: NodeProps<NoteCardNodeType>) {
                 title="Spawn a new card seeded with this handoff"
             >
                 <Plus className="size-4" />
+            </button>
+            <button
+                className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
+                onClick={(e) => {
+                    e.stopPropagation();
+                    useCanvasStore.getState().updateCard(id, { minimized: true });
+                }}
+                title="Minimize to title strip"
+            >
+                <Minimize2 className="size-4" />
             </button>
             <button
                 className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-red-500"

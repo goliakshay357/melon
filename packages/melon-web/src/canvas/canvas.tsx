@@ -26,9 +26,17 @@ import { focusViewport, isFullyVisible, SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH, 
 import { useActiveTheme } from '@/theme/theme-store';
 import { SettingsPage } from '@/settings/settings-page';
 import { isTypingTarget } from '@/lib/utils';
-import { DEFAULT_CARD_SIZE } from '@/types/session-card';
+import { DEFAULT_CARD_SIZE, MINIMIZED_CARD_HEIGHT, type SessionCard } from '@/types/session-card';
 
 type AppNode = ChatCardNodeType | DocumentCardNodeType | NoteCardNodeType;
+
+/** Rendered card box on the canvas — minimized cards collapse to a title strip. */
+function cardBox(c: SessionCard): { w: number; h: number } {
+    return {
+        w: c.size?.width ?? DEFAULT_CARD_SIZE.width,
+        h: c.minimized ? MINIMIZED_CARD_HEIGHT : c.size?.height ?? DEFAULT_CARD_SIZE.height,
+    };
+}
 
 export function Canvas() {
     const cards = useCanvasStore((s) => s.cards);
@@ -146,8 +154,9 @@ export function Canvas() {
             const next = cards.map(
                 (c): AppNode => {
                     const old = prevById.get(c.id);
-                    const width = c.size?.width ?? DEFAULT_CARD_SIZE.width;
-                    const height = c.size?.height ?? DEFAULT_CARD_SIZE.height;
+                    const size = cardBox(c);
+                    const width = size.w;
+                    const height = size.h;
                     if (
                         old &&
                         old.position.x === c.position.x &&
@@ -188,11 +197,12 @@ export function Canvas() {
         useCanvasStore.getState().requestFocusCard(null);
         const card = cards.find((c) => c.id === focusCardId);
         if (!card) return;
+        const box = cardBox(card);
         const rect: WorldRect = {
             left: card.position.x,
             top: card.position.y,
-            right: card.position.x + (card.size?.width ?? DEFAULT_CARD_SIZE.width),
-            bottom: card.position.y + (card.size?.height ?? DEFAULT_CARD_SIZE.height),
+            right: card.position.x + box.w,
+            bottom: card.position.y + box.h,
         };
         const vp = useCanvasStore.getState().viewport ?? { x: 0, y: 0, zoom: 1 };
         const screen = {
@@ -216,11 +226,12 @@ export function Canvas() {
         const state = useCanvasStore.getState();
         if (state.canvasOpening || activeView !== 'canvas') return;
         const card = added[0];
+        const box = cardBox(card);
         const rect: WorldRect = {
             left: card.position.x,
             top: card.position.y,
-            right: card.position.x + (card.size?.width ?? DEFAULT_CARD_SIZE.width),
-            bottom: card.position.y + (card.size?.height ?? DEFAULT_CARD_SIZE.height),
+            right: card.position.x + box.w,
+            bottom: card.position.y + box.h,
         };
         const vp = state.viewport ?? { x: 0, y: 0, zoom: 1 };
         const screen = {
@@ -252,10 +263,8 @@ export function Canvas() {
                             targetSide: c.edgeToParent?.targetSide,
                             targetT: c.edgeToParent?.targetT,
                             // Pass positions so React Flow re-renders the edge on ANY card move.
-                            srcBox: parent
-                                ? { x: parent.position.x, y: parent.position.y, w: parent.size?.width ?? DEFAULT_CARD_SIZE.width, h: parent.size?.height ?? DEFAULT_CARD_SIZE.height }
-                                : null,
-                            tgtBox: { x: c.position.x, y: c.position.y, w: c.size?.width ?? DEFAULT_CARD_SIZE.width, h: c.size?.height ?? DEFAULT_CARD_SIZE.height },
+                            srcBox: parent ? { x: parent.position.x, y: parent.position.y, ...cardBox(parent) } : null,
+                            tgtBox: { x: c.position.x, y: c.position.y, ...cardBox(c) },
                         },
                     };
                 }),
@@ -269,9 +278,9 @@ export function Canvas() {
                         type: 'fork',
                         data: {
                             srcBox: parent
-                                ? { x: parent.position.x, y: parent.position.y, w: parent.size?.width ?? DEFAULT_CARD_SIZE.width, h: parent.size?.height ?? DEFAULT_CARD_SIZE.height }
+                                ? { x: parent.position.x, y: parent.position.y, ...cardBox(parent) }
                                 : null,
-                            tgtBox: { x: c.position.x, y: c.position.y, w: c.size?.width ?? DEFAULT_CARD_SIZE.width, h: c.size?.height ?? DEFAULT_CARD_SIZE.height },
+                            tgtBox: { x: c.position.x, y: c.position.y, ...cardBox(c) },
                         },
                     } satisfies Edge;
                 }),

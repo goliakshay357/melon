@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { BaseEdge, getBezierPath, Position, useReactFlow, type EdgeProps } from '@xyflow/react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useActiveTheme } from '@/theme/theme-store';
-import { DEFAULT_CARD_SIZE } from '@/types/session-card';
+import { DEFAULT_CARD_SIZE, MINIMIZED_CARD_HEIGHT } from '@/types/session-card';
 
 type Side = 'top' | 'bottom' | 'left' | 'right';
 interface Pt {
@@ -67,12 +67,22 @@ export function ForkEdge(props: EdgeProps) {
     const srcBox: Box | null =
         (data as any).srcBox ??
         (src
-            ? { x: src.position.x, y: src.position.y, w: src.size?.width ?? DEFAULT_CARD_SIZE.width, h: src.size?.height ?? DEFAULT_CARD_SIZE.height }
+            ? {
+                  x: src.position.x,
+                  y: src.position.y,
+                  w: src.size?.width ?? DEFAULT_CARD_SIZE.width,
+                  h: src.minimized ? MINIMIZED_CARD_HEIGHT : src.size?.height ?? DEFAULT_CARD_SIZE.height,
+              }
             : null);
     const tgtBox: Box | null =
         (data as any).tgtBox ??
         (tgt
-            ? { x: tgt.position.x, y: tgt.position.y, w: tgt.size?.width ?? DEFAULT_CARD_SIZE.width, h: tgt.size?.height ?? DEFAULT_CARD_SIZE.height }
+            ? {
+                  x: tgt.position.x,
+                  y: tgt.position.y,
+                  w: tgt.size?.width ?? DEFAULT_CARD_SIZE.width,
+                  h: tgt.minimized ? MINIMIZED_CARD_HEIGHT : tgt.size?.height ?? DEFAULT_CARD_SIZE.height,
+              }
             : null);
 
     // AUTO sides: derive the natural connection sides from the cards'

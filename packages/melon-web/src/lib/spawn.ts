@@ -1,4 +1,4 @@
-import { DEFAULT_CARD_SIZE } from "@/types/session-card";
+import { DEFAULT_CARD_SIZE, MINIMIZED_CARD_HEIGHT } from "@/types/session-card";
 
 /**
  * Card spawn placement — pure functions, unit-tested in test/spawn-placement.test.ts.
@@ -175,13 +175,15 @@ export interface SpawnCardLike {
 	id: string;
 	position: { x: number; y: number };
 	size?: SpawnSize;
+	/** Collapsed cards count as title-strip height when placing new cards. */
+	minimized?: boolean;
 }
 
 function spawnCardWidth(c: SpawnCardLike): number {
 	return c.size?.width ?? DEFAULT_CARD_SIZE.width;
 }
 function spawnCardHeight(c: SpawnCardLike): number {
-	return c.size?.height ?? DEFAULT_CARD_SIZE.height;
+	return c.minimized ? MINIMIZED_CARD_HEIGHT : (c.size?.height ?? DEFAULT_CARD_SIZE.height);
 }
 
 interface SpawnBox {
