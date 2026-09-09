@@ -46,6 +46,25 @@ import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyPluginAsync } from "fastify";
 import { inspectCanvasShare, shareCanvasWork } from "./canvas-share.ts";
 import {
+	CLAUDE_BRIDGE_PROVIDER_ID,
+	claudeBridgeIsolatedExtensionPath,
+	claudeBridgeSessionIsolationAvailable,
+	getClaudeBridgeCatalogStatus,
+	hasClaudeBridgeAuth,
+	loadClaudeBridgeProviderInto,
+} from "./claude-bridge-extension.ts";
+import {
+	cancelClaudeBridgeLogin,
+	getClaudeBridgeLoginStatus,
+	logoutClaudeBridge,
+	startClaudeBridgeLogin,
+	waitClaudeBridgeLogin,
+} from "./claude-bridge-login.ts";
+import {
+	runInBoundClaudeBridgeSession,
+	stripClaudeBridgeSessionEntriesFromSessionFile,
+} from "./claude-bridge-session-binding.ts";
+import {
 	expandHome,
 	loadConfig,
 	type MelonConfig,
@@ -89,11 +108,11 @@ import {
 	wireIsStale,
 } from "./notes.ts";
 import {
-	abortCurrentCursorTurn,
-	beginCursorTurn,
-	isCurrentCursorTurn,
-	isCursorSession,
-	isCursorTurnAborted,
+	abortCurrentIsolationTurn,
+	beginIsolationTurn,
+	isCurrentIsolationTurn,
+	isIsolationSensitiveSession,
+	isIsolationTurnAborted,
 	type QueuedPrompt,
 	queueDisplays,
 	SessionRegistry,
@@ -123,6 +142,19 @@ function httpError(statusCode: number, message: string): Error & { statusCode: n
 	return Object.assign(new Error(message), { statusCode });
 }
 
+/** Providers that need Melon per-card isolation (Cursor, Claude Code). */
+function isIsolationProviderId(provider: string): boolean {
+	const id = provider.toLowerCase();
+	return id === CURSOR_PROVIDER_ID || id === CLAUDE_BRIDGE_PROVIDER_ID;
+}
+
+function providerLabel(provider: string): string {
+	const id = provider.toLowerCase();
+	if (id === CURSOR_PROVIDER_ID) return "Cursor";
+	if (id === CLAUDE_BRIDGE_PROVIDER_ID) return "Claude Code";
+	return provider;
+}
+
 /**
  * Product version shown in Settings and stamped into release artifacts.
  * Prefer MELON_VERSION (CI/local override), else the nearest package.json:
@@ -145,8 +177,8 @@ let _modelRuntime: ModelRuntime | undefined;
 async function getModelRuntime(): Promise<ModelRuntime> {
 	if (!_modelRuntime) {
 		_modelRuntime = await ModelRuntime.create();
-		// Register bundled extension providers (cursor) so the GUI pickers see
-		// them. Fail-open — builtin providers must work even if this fails.
+		// Register bundled extension providers (cursor, claude-bridge) so the GUI
+		// pickers see them. Fail-open — builtin providers must work even if this fails.
 		try {
 			await loadCursorProviderInto(_modelRuntime);
 		} catch (e) {
@@ -157,8 +189,30 @@ async function getModelRuntime(): Promise<ModelRuntime> {
 				console.warn("[melon] cursor: unexpected load failure:", message);
 			}
 		}
+		try {
+			await loadClaudeBridgeProviderInto(_modelRuntime);
+		} catch (e) {
+			const message = (e as Error)?.message ?? String(e);
+			console.error("[melon] claude-bridge provider load failed (continuing without it):", message);
+			if (!getClaudeBridgeCatalogStatus().issues.some((i) => i.includes(message))) {
+				console.warn("[melon] claude-bridge: unexpected load failure:", message);
+			}
+		}
 	}
 	return _modelRuntime;
+}
+
+/** Bundled provider extensions for session runtimes (picker + session catalogs match). */
+function bundledSessionExtensionPaths(): string[] {
+	const paths: string[] = [];
+	if (cursorSessionIsolationAvailable() && cursorExtensionPath()) {
+		paths.push(cursorExtensionPath()!);
+	}
+	if (claudeBridgeSessionIsolationAvailable()) {
+		const isolated = claudeBridgeIsolatedExtensionPath();
+		if (isolated) paths.push(isolated);
+	}
+	return paths;
 }
 
 export interface MelonServerDeps {
@@ -174,7 +228,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	await app.register(cors, { origin: true });
 
 	const registry = new SessionRegistry();
-	const cursorAttachLocks = new Map<string, Promise<void>>();
+	const sessionAttachLocks = new Map<string, Promise<void>>();
 
 	// Watch each OPEN FOLDER's .melon/notes/manual for changes and broadcast to
 	// all sessions. Manual documents are per-folder (the folder or its worktree)
@@ -239,20 +293,20 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		}
 	}
 
-	async function withCursorAttachLocks<T>(keys: string[], run: () => Promise<T>): Promise<T> {
+	async function withSessionAttachLocks<T>(keys: string[], run: () => Promise<T>): Promise<T> {
 		const releases: Array<() => void> = [];
 		for (const key of [...new Set(keys)].sort()) {
-			const previous = cursorAttachLocks.get(key) ?? Promise.resolve();
+			const previous = sessionAttachLocks.get(key) ?? Promise.resolve();
 			let release!: () => void;
 			const current = new Promise<void>((resolve) => {
 				release = resolve;
 			});
 			const queued = previous.then(() => current);
-			cursorAttachLocks.set(key, queued);
+			sessionAttachLocks.set(key, queued);
 			await previous;
 			releases.push(() => {
 				release();
-				if (cursorAttachLocks.get(key) === queued) cursorAttachLocks.delete(key);
+				if (sessionAttachLocks.get(key) === queued) sessionAttachLocks.delete(key);
 			});
 		}
 		try {
@@ -260,6 +314,22 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		} finally {
 			for (const release of releases.reverse()) release();
 		}
+	}
+
+	/** Cursor ALS host session and/or Claude bridge re-bind before prompt(). */
+	async function runInBoundIsolationSession<T>(
+		runtime: any,
+		options: { uiContext?: ReturnType<CardExtensionUiBridge["getUIContext"]> },
+		run: () => Promise<T>,
+	): Promise<T> {
+		const provider = (runtime.session.model?.provider ?? "").toLowerCase();
+		if (provider === CURSOR_PROVIDER_ID) {
+			return runInBoundCursorSession(runtime, options, run);
+		}
+		if (provider === CLAUDE_BRIDGE_PROVIDER_ID) {
+			return runInBoundClaudeBridgeSession(runtime, options, run);
+		}
+		return run();
 	}
 
 	/**
@@ -272,7 +342,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const s = registry.get(cardId);
 		if (!s || s.draining || s.promptQueue.length === 0) return;
 		s.draining = true;
-		let lastCursorTurnId: number | undefined;
+		let lastIsolationTurnId: number | undefined;
 		const run = async () => {
 			while (s.promptQueue.length > 0) {
 				const next = s.promptQueue.shift() as QueuedPrompt;
@@ -284,9 +354,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				// event is the moment the text actually reaches the model. The
 				// user bubble shows the DISPLAY text (model directives stay hidden).
 				registry.broadcast(cardId, { type: "user_message", text: next.display ?? next.text });
-				const cursorTurnId = beginCursorTurn(s);
-				lastCursorTurnId = cursorTurnId ?? lastCursorTurnId;
-				if (cursorTurnId === undefined) s.busy = true;
+				const isolationTurnId = beginIsolationTurn(s);
+				lastIsolationTurnId = isolationTurnId ?? lastIsolationTurnId;
+				if (isolationTurnId === undefined) s.busy = true;
 				try {
 					// Inject context for queued prompts too
 					if (next.context) {
@@ -299,10 +369,10 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 							{ deliverAs: "nextTurn" },
 						);
 					}
-					await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () =>
+					await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () =>
 						s.runtime.session.prompt(next.text, { streamingBehavior: "followUp" }),
 					);
-					if (cursorTurnId !== undefined && isCursorTurnAborted(s, cursorTurnId)) return;
+					if (isolationTurnId !== undefined && isIsolationTurnAborted(s, isolationTurnId)) return;
 				} catch (e) {
 					console.error(`[${cardId}] queued prompt THREW ${(e as Error).stack}`);
 					s.extensionUi?.cancelAll();
@@ -316,9 +386,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		};
 		void run().finally(() => {
 			s.draining = false;
-			// A newer Cursor turn may already own the card after agent_end. An
-			// older queue drain must not mark that newer turn idle.
-			if (lastCursorTurnId === undefined || isCurrentCursorTurn(s, lastCursorTurnId)) s.busy = false;
+			// A newer isolation-sensitive turn may already own the card after agent_end.
+			// An older queue drain must not mark that newer turn idle.
+			if (lastIsolationTurnId === undefined || isCurrentIsolationTurn(s, lastIsolationTurnId)) s.busy = false;
 		});
 	}
 
@@ -388,16 +458,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			// Keep the agent OUT of its own installation. One-time system-prompt
 			// addition (not per-prompt, no context bloat).
 			const appendSystemPromptOverride = (base: string[]) => [...base, MELON_GUARDRAIL];
+			const bundledExtensions = bundledSessionExtensionPaths();
 			const services = await createAgentSessionServices({
 				cwd,
 				resourceLoaderOptions: {
 					skillsOverride,
 					appendSystemPromptOverride,
-					// Bundled provider extensions (cursor) — same extension the GUI
-					// runtime loads, so session model lists match the picker.
-					...(cursorSessionIsolationAvailable() && cursorExtensionPath()
-						? { additionalExtensionPaths: [cursorExtensionPath()!] }
-						: {}),
+					// Bundled provider extensions (cursor, claude-bridge isolated) —
+					// session model lists match the GUI pickers.
+					...(bundledExtensions.length > 0 ? { additionalExtensionPaths: bundledExtensions } : {}),
 				},
 			});
 			return {
@@ -443,14 +512,14 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		explicitThinkingLevel?: string,
 	): Promise<any> {
 		const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
-		const wantsCursor = splitModel(wanted)[0].toLowerCase() === CURSOR_PROVIDER_ID;
-		const existingIsCursor =
-			(registry.get(cardId)?.runtime.session.model?.provider ?? "").toLowerCase() === CURSOR_PROVIDER_ID;
-		if (!wantsCursor && !existingIsCursor) {
+		const wantedProvider = splitModel(wanted)[0].toLowerCase();
+		const existingProvider = (registry.get(cardId)?.runtime.session.model?.provider ?? "").toLowerCase();
+		const needsIsolationLocks = isIsolationProviderId(wantedProvider) || isIsolationProviderId(existingProvider);
+		if (!needsIsolationLocks) {
 			return attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode, explicitThinkingLevel);
 		}
 		const sessionFile = sessionManager.getSessionFile?.() as string | undefined;
-		return withCursorAttachLocks([`card:${cardId}`, ...(sessionFile ? [`session:${sessionFile}`] : [])], () =>
+		return withSessionAttachLocks([`card:${cardId}`, ...(sessionFile ? [`session:${sessionFile}`] : [])], () =>
 			attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode, explicitThinkingLevel),
 		);
 	}
@@ -466,63 +535,80 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
 		const [wantedProvider, wantedId] = splitModel(wanted);
 		const wantsCursor = wantedProvider.toLowerCase() === CURSOR_PROVIDER_ID;
+		const wantsClaudeBridge = wantedProvider.toLowerCase() === CLAUDE_BRIDGE_PROVIDER_ID;
+		const wantsIsolation = wantsCursor || wantsClaudeBridge;
+
 		if (wantsCursor && !cursorSessionIsolationAvailable()) {
 			throw httpError(
 				503,
 				"Cursor is unavailable because its per-card isolation patch is missing. Reinstall desktop dependencies and restart Melon.",
 			);
 		}
+		if (wantsClaudeBridge && !claudeBridgeSessionIsolationAvailable()) {
+			throw httpError(
+				503,
+				"Claude Code is unavailable because its isolated bridge entry is missing. Reinstall desktop dependencies and restart Melon.",
+			);
+		}
 
 		const incomingSessionFile = sessionManager.getSessionFile?.() as string | undefined;
 		const existing = registry.get(cardId);
-		const existingIsCursor = (existing?.runtime.session.model?.provider ?? "").toLowerCase() === CURSOR_PROVIDER_ID;
+		const existingProvider = (existing?.runtime.session.model?.provider ?? "").toLowerCase();
+		const existingIsCursor = existingProvider === CURSOR_PROVIDER_ID;
+		const existingIsClaudeBridge = existingProvider === CLAUDE_BRIDGE_PROVIDER_ID;
+		const existingIsIsolation = existingIsCursor || existingIsClaudeBridge;
 		const existingSessionFile = existing?.runtime.session.sessionManager.getSessionFile?.() as string | undefined;
 
-		// SSE reconnects call /sessions/resume. For a live Cursor card this must
-		// reconnect to the existing runtime, not create a second runtime writing
-		// the same jsonl and broadcasting under the same card id.
+		// SSE reconnects call /sessions/resume. For a live isolation-sensitive card
+		// this must reconnect to the existing runtime, not create a second runtime
+		// writing the same jsonl and broadcasting under the same card id.
 		if (
 			existing &&
-			existingIsCursor &&
-			wantsCursor &&
+			existingIsIsolation &&
+			wantsIsolation &&
+			existingProvider === wantedProvider.toLowerCase() &&
 			(mode === "create" || existingSessionFile === incomingSessionFile)
 		) {
 			return existing.runtime;
 		}
 
-		// A Cursor SDK agent pool and bridge are keyed by session file. Two live
-		// cards owning the same file would therefore defeat per-card isolation.
+		// Cursor / Claude bridge sessions are keyed by session file. Two live
+		// cards owning the same file would defeat per-card isolation.
 		// Check first so a rejected move leaves this card's current runtime alive.
-		if (wantsCursor && incomingSessionFile) {
+		if (wantsIsolation && incomingSessionFile) {
 			for (const [ownerCardId, attached] of registry.entries()) {
 				if (ownerCardId === cardId) continue;
-				const ownerIsCursor = (attached.runtime.session.model?.provider ?? "").toLowerCase() === CURSOR_PROVIDER_ID;
+				const ownerProvider = (attached.runtime.session.model?.provider ?? "").toLowerCase();
+				if (ownerProvider !== wantedProvider.toLowerCase()) continue;
 				const ownerSessionFile = attached.runtime.session.sessionManager.getSessionFile?.();
-				if (ownerIsCursor && ownerSessionFile === incomingSessionFile) {
-					throw httpError(409, `Cursor session is already open in card ${ownerCardId}`);
+				if (ownerSessionFile === incomingSessionFile) {
+					throw httpError(409, `${providerLabel(wantedProvider)} session is already open in card ${ownerCardId}`);
 				}
 			}
 		}
 
-		// Only change replacement behavior when Cursor is involved. Other
-		// providers retain their existing attach/resume semantics.
-		if (existing && (existingIsCursor || wantsCursor)) {
+		// Only change replacement behavior when an isolation-sensitive provider
+		// is involved. Other providers retain their existing attach/resume semantics.
+		if (existing && (existingIsIsolation || wantsIsolation)) {
 			existing.extensionUi?.cancelAll();
 			if (existing.busy) {
 				try {
 					await existing.runtime.session.abort();
 				} catch (e) {
-					console.error(`[${cardId}] Cursor runtime replacement abort failed:`, (e as Error).message);
+					console.error(
+						`[${cardId}] ${providerLabel(existingProvider || wantedProvider)} runtime replacement abort failed:`,
+						(e as Error).message,
+					);
 				}
 			}
 			await existing.runtime.dispose();
 			if (registry.get(cardId) === existing) registry.delete(cardId);
 		}
 
-		// Load the GUI ModelRuntime (Cursor provider catalog) before the session
+		// Load the GUI ModelRuntime (bundled provider catalogs) before the session
 		// extension factory so picker models are ready. Session load registers
-		// that card's pi tool bridge; Melon's multicard SDK patch keeps sibling
-		// bridges alive when later cards also load Cursor.
+		// that card's extension runner; Cursor's multicard patch / Claude's isolated
+		// entry keep sibling cards from sharing process-global bridge state.
 		await getModelRuntime();
 		const { runtime, extensionUi } = await createRuntimeFor(sessionManager, skills, cardId);
 		try {
@@ -939,10 +1025,11 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	// Child becomes a live session under newCardId; the parent keeps its own
 	// runtime re-opened on its original file.
 	//
-	// Cursor: the branched jsonl copies `cursor-sdk-agent-resume` handles. In
-	// Melon's multi-card process those make the child resume the parent's
-	// Cursor agent. Strip them, then reopen both cards as distinct runtimes so
-	// the child bootstraps a NEW Cursor agent from the inherited transcript.
+	// Cursor: the branched jsonl copies `cursor-sdk-agent-resume` handles.
+	// Claude bridge: copies `claude-bridge-session` markers. In Melon's multi-
+	// card process those make the child resume the parent's remote agent.
+	// Strip them, then reopen both cards as distinct runtimes so the child
+	// bootstraps a NEW agent from the inherited transcript.
 	app.post("/sessions/:cardId/fork", async (req, reply) => {
 		const parentCardId = (req.params as any).cardId;
 		const body = req.body as any;
@@ -969,6 +1056,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const leaf = s.runtime.session.sessionManager.getLeafEntry();
 		const parentModel = modelToString(s.runtime.session.model);
 		const parentSkills = s.activeSkills ?? [];
+		const parentProvider = splitModel(parentModel)[0].toLowerCase();
 
 		const res = await s.runtime.fork(leaf?.id ?? "", { position: "at" });
 		if (res.cancelled) return reply.code(409).send({ error: "fork cancelled" });
@@ -977,17 +1065,23 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		if (!childSessionFile) {
 			return reply.code(500).send({ error: "fork produced no child session file" });
 		}
-		const stripped = stripCursorResumeEntriesFromSessionFile(childSessionFile);
-		if (stripped > 0) {
+		const strippedCursor = stripCursorResumeEntriesFromSessionFile(childSessionFile);
+		if (strippedCursor > 0) {
 			console.log(
-				`[melon] fork ${parentCardId}→${newCardId}: stripped ${stripped} cursor resume handle(s) from child session`,
+				`[melon] fork ${parentCardId}→${newCardId}: stripped ${strippedCursor} cursor resume handle(s) from child session`,
+			);
+		}
+		const strippedClaude = stripClaudeBridgeSessionEntriesFromSessionFile(childSessionFile);
+		if (strippedClaude > 0) {
+			console.log(
+				`[melon] fork ${parentCardId}→${newCardId}: stripped ${strippedClaude} claude-bridge session marker(s) from child session`,
 			);
 		}
 
 		// fork() leaves this runtime attached to the child file. Dispose that
-		// temporary Cursor owner before creating the child's permanent runtime,
-		// otherwise two bridges and two writers briefly own the same session.
-		if (splitModel(parentModel)[0].toLowerCase() === CURSOR_PROVIDER_ID) {
+		// temporary isolation-sensitive owner before creating the child's permanent
+		// runtime, otherwise two bridges and two writers briefly own the same session.
+		if (isIsolationProviderId(parentProvider)) {
 			s.extensionUi?.cancelAll();
 			await s.runtime.dispose();
 			if (registry.get(parentCardId) === s) registry.delete(parentCardId);
@@ -1007,7 +1101,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			thinkingLevels: childRuntime.runtime.session.getAvailableThinkingLevels(),
 			forkedFromEntryId: leaf?.id,
 			parentSessionFile,
-			strippedCursorResumeEntries: stripped,
+			strippedCursorResumeEntries: strippedCursor,
+			strippedClaudeBridgeSessionEntries: strippedClaude,
 		};
 	});
 
@@ -2988,14 +3083,25 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const denied = new Set((loadSettings().denylistedModels ?? []).map((x) => x));
 		const filtered = all.filter((m) => !denied.has(m.label));
 		const models = provider ? filtered.filter((m) => m.provider === provider) : filtered;
-		const wantsCursor = !provider || provider.toLowerCase() === CURSOR_PROVIDER_ID;
+		const providerKey = provider.toLowerCase();
+		const wantsCursor = !provider || providerKey === CURSOR_PROVIDER_ID;
+		const wantsClaudeBridge = !provider || providerKey === CLAUDE_BRIDGE_PROVIDER_ID;
 		const cursor = wantsCursor ? getCursorCatalogStatus() : undefined;
-		// Empty Cursor list is almost always a load/isolation/auth issue — surface it.
+		const claudeBridge = wantsClaudeBridge ? getClaudeBridgeCatalogStatus() : undefined;
+		// Empty Cursor / Claude bridge lists are almost always load/isolation/auth — surface it.
 		const error =
-			provider.toLowerCase() === CURSOR_PROVIDER_ID && models.length === 0
+			providerKey === CURSOR_PROVIDER_ID && models.length === 0
 				? (cursor?.issues[0] ?? "No Cursor models available")
-				: undefined;
-		return { models, total: models.length, ...(cursor ? { cursor } : {}), ...(error ? { error } : {}) };
+				: providerKey === CLAUDE_BRIDGE_PROVIDER_ID && models.length === 0
+					? (claudeBridge?.issues[0] ?? "No Claude Code models available")
+					: undefined;
+		return {
+			models,
+			total: models.length,
+			...(cursor ? { cursor } : {}),
+			...(claudeBridge ? { claudeBridge } : {}),
+			...(error ? { error } : {}),
+		};
 	});
 
 	// Liveness probe — the frontend polls this to clear the "reconnecting" banner.
@@ -3229,10 +3335,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const allProviderIds = new Set<string>();
 		for (const m of mr.getModels()) allProviderIds.add(m.provider);
 		for (const pid of Object.keys(authEntries)) allProviderIds.add(pid);
-		// Always list Cursor so a failed catalog load is visible in the picker.
+		// Always list bundled providers so a failed catalog load is visible in the picker.
 		allProviderIds.add(CURSOR_PROVIDER_ID);
+		allProviderIds.add(CLAUDE_BRIDGE_PROVIDER_ID);
 
 		const cursorStatus = getCursorCatalogStatus();
+		const claudeBridgeStatus = getClaudeBridgeCatalogStatus();
 		const result: Array<{
 			id: string;
 			provider: string;
@@ -3258,11 +3366,32 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			} else if (melonKey) {
 				keyPreview = maskKey(melonKey);
 				authType = "api_key";
+			} else if (pid === CLAUDE_BRIDGE_PROVIDER_ID && hasClaudeBridgeAuth(authEntries)) {
+				// Shared Anthropic Pro/Max OAuth counts as Claude Code credentials.
+				const anthropic = authEntries.anthropic as { type?: string; access?: unknown } | undefined;
+				if (anthropic?.type === "oauth" && typeof anthropic.access === "string") {
+					keyPreview = maskKey(anthropic.access);
+					authType = "oauth";
+				}
 			}
 
-			// The cursor extension registers a literal placeholder apiKey, so the
-			// generic status reports "configured" with no real key. Report the truth.
-			const configured = pid === CURSOR_PROVIDER_ID ? hasRealCursorKey(authEntries, melonKeys) : !!status.configured;
+			// Cursor / Claude bridge register placeholder apiKeys — report real auth.
+			const configured =
+				pid === CURSOR_PROVIDER_ID
+					? hasRealCursorKey(authEntries, melonKeys)
+					: pid === CLAUDE_BRIDGE_PROVIDER_ID
+						? hasClaudeBridgeAuth(authEntries)
+						: !!status.configured;
+
+			const error =
+				pid === CURSOR_PROVIDER_ID && (!cursorStatus.loaded || cursorStatus.issues.length > 0)
+					? cursorStatus.issues[0]
+					: pid === CLAUDE_BRIDGE_PROVIDER_ID &&
+							(!claudeBridgeStatus.loaded || claudeBridgeStatus.issues.length > 0)
+						? claudeBridgeStatus.issues[0]
+						: pid === CLAUDE_BRIDGE_PROVIDER_ID && !configured
+							? "Log in with Claude in the browser"
+							: undefined;
 
 			result.push({
 				id: pid,
@@ -3271,9 +3400,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				source: (status as any).source ?? undefined,
 				keyPreview,
 				authType,
-				...(pid === CURSOR_PROVIDER_ID && (!cursorStatus.loaded || cursorStatus.issues.length > 0)
-					? { error: cursorStatus.issues[0] }
-					: {}),
+				...(error ? { error } : {}),
 			});
 		}
 
@@ -3286,6 +3413,11 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 
 	app.post("/auth/:provider/key", async (req, reply) => {
 		const provider = (req.params as any).provider;
+		if (provider === CLAUDE_BRIDGE_PROVIDER_ID) {
+			return reply.code(400).send({
+				error: "Claude Code uses browser login. Use POST /auth/claude-bridge/login instead of an API key.",
+			});
+		}
 		const key = (req.body as any)?.key;
 		if (!key) return reply.code(400).send({ error: "key required" });
 		try {
@@ -3323,8 +3455,46 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		}
 	});
 
+	// Claude Code: browser OAuth (Claude Pro/Max). Returns the authorize URL;
+	// completion is tracked via /auth/claude-bridge/login/status.
+	app.post("/auth/claude-bridge/login", async (_req, reply) => {
+		try {
+			const { url } = await startClaudeBridgeLogin(getModelRuntime);
+			return { ok: true, url, status: getClaudeBridgeLoginStatus() };
+		} catch (e) {
+			const message = e instanceof Error ? e.message : String(e);
+			return reply.code(500).send({ error: message, status: getClaudeBridgeLoginStatus() });
+		}
+	});
+
+	app.get("/auth/claude-bridge/login/status", async () => getClaudeBridgeLoginStatus());
+
+	app.post("/auth/claude-bridge/login/wait", async (_req, reply) => {
+		try {
+			const status = await waitClaudeBridgeLogin();
+			if (status.phase === "error") {
+				return reply.code(500).send({ error: status.error ?? "Claude login failed", status });
+			}
+			return { ok: status.phase === "done", status };
+		} catch (e) {
+			return reply.code(500).send({
+				error: e instanceof Error ? e.message : String(e),
+				status: getClaudeBridgeLoginStatus(),
+			});
+		}
+	});
+
+	app.post("/auth/claude-bridge/login/cancel", async () => {
+		cancelClaudeBridgeLogin();
+		return { ok: true, status: getClaudeBridgeLoginStatus() };
+	});
+
 	app.delete("/auth/:provider", async (req) => {
 		const provider = (req.params as any).provider;
+		if (provider === CLAUDE_BRIDGE_PROVIDER_ID) {
+			await logoutClaudeBridge(getModelRuntime);
+			return { ok: true };
+		}
 		await (await getModelRuntime()).removeRuntimeApiKey(provider);
 		// Keep auth.json in sync with the runtime override removal.
 		try {
@@ -3494,7 +3664,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			reply.send({ ok: true, queued: true });
 			return;
 		}
-		const cursorTurnId = beginCursorTurn(s);
+		const isolationTurnId = beginIsolationTurn(s);
 		reply.send({ ok: true });
 
 		console.log(`[${cardId}] prompt:start "${String((req.body as any)?.text).slice(0, 60)}"`);
@@ -3514,7 +3684,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					{ deliverAs: "nextTurn" },
 				);
 			}
-			await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () =>
+			await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () =>
 				s.runtime.session.prompt(text),
 			);
 			console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
@@ -3524,15 +3694,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			registry.broadcast(cardId, { type: "error", message: rewriteCursorError((e as Error).message) });
 			registry.broadcast(cardId, { type: "status", status: "error" });
 		} finally {
-			if (cursorTurnId === undefined) {
-				// Preserve existing behavior for non-Cursor providers.
+			if (isolationTurnId === undefined) {
+				// Preserve existing behavior for ordinary providers.
 				drainPromptQueue(cardId);
-			} else if (registry.get(cardId) === s && isCurrentCursorTurn(s, cursorTurnId)) {
+			} else if (registry.get(cardId) === s && isCurrentIsolationTurn(s, isolationTurnId)) {
 				// agent_end may already have started the next queued turn. Only
 				// the current owner can release busy or drain, and an explicit
 				// Stop keeps queued prompts paused.
 				if (!s.draining) s.busy = false;
-				if (!isCursorTurnAborted(s, cursorTurnId)) drainPromptQueue(cardId);
+				if (!isIsolationTurnAborted(s, isolationTurnId)) drainPromptQueue(cardId);
 			}
 		}
 	});
@@ -3612,7 +3782,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	app.post("/sessions/:cardId/abort", async (req, reply) => {
 		const s = registry.get((req.params as any).cardId);
 		if (!s) return reply.code(404).send({ error: "unknown card" });
-		abortCurrentCursorTurn(s);
+		abortCurrentIsolationTurn(s);
 		registry.broadcast((req.params as any).cardId, { type: "raw", text: "⏹ stop requested (server)" });
 		// Unblock any open question panel immediately (don't wait for agent_end).
 		s.extensionUi?.cancelAll();
@@ -3625,25 +3795,27 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { ok: true };
 	});
 
-	// Cursor owns process-level SDK resources (agent pool, bridge, scoped
-	// resume state). Deleting a Cursor card must emit session_shutdown and
-	// remove that ownership; the existing non-Cursor delete behavior is left
-	// unchanged.
+	// Isolation-sensitive providers (Cursor, Claude Code) own process-level
+	// resources (agent pool / Claude session / bridge). Deleting such a card
+	// must emit session_shutdown and remove that ownership; ordinary providers
+	// keep their previous delete behavior.
 	app.delete("/sessions/:cardId", async (req, reply) => {
 		const cardId = (req.params as any).cardId as string;
 		const s = registry.get(cardId);
 		if (!s) return { ok: true };
-		if (!isCursorSession(s)) {
-			return reply.code(409).send({ error: "session teardown is only enabled for Cursor cards" });
+		if (!isIsolationSensitiveSession(s)) {
+			return reply.code(409).send({
+				error: "session teardown is only enabled for Cursor and Claude Code cards",
+			});
 		}
 
 		s.extensionUi?.cancelAll();
-		abortCurrentCursorTurn(s);
+		abortCurrentIsolationTurn(s);
 		if (s.busy) {
 			try {
 				await s.runtime.session.abort();
 			} catch (e) {
-				console.error(`[${cardId}] Cursor teardown abort failed:`, (e as Error).message);
+				console.error(`[${cardId}] isolation-sensitive teardown abort failed:`, (e as Error).message);
 			}
 		}
 		await s.runtime.dispose();

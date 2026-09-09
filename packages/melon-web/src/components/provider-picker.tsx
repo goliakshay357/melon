@@ -1,8 +1,10 @@
 import { useEffect, useRef, useState } from "react";
 import * as RadixDialog from "@radix-ui/react-dialog";
-import { Check, ChevronDown, KeyRound, Settings2 } from "lucide-react";
+import { Check, ChevronDown, KeyRound, LogIn, Settings2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCanvasStore } from "@/store/canvas-store";
+
+const CLAUDE_BRIDGE_PROVIDER_ID = "claude-bridge";
 
 interface ProviderInfo {
 	id: string;
@@ -27,6 +29,12 @@ type ModelsResponse = {
 	};
 };
 
+type ClaudeLoginStatus = {
+	phase?: "idle" | "awaiting_browser" | "done" | "error";
+	url?: string;
+	error?: string;
+};
+
 /**
  * Provider dropdown with configure/re-key inline (Radix dialog, no window.prompt).
  * Selecting a provider switches the card model to that provider's first model.
@@ -49,11 +57,15 @@ export function ProviderPicker({
 	onOpenChangeRef.current = onOpenChange;
 	const [providers, setProviders] = useState<ProviderInfo[]>([]);
 	const [configuring, setConfiguring] = useState<ProviderInfo | null>(null);
+	const [claudeLoginOpen, setClaudeLoginOpen] = useState(false);
+	const [claudeLoginBusy, setClaudeLoginBusy] = useState(false);
+	const [claudeLoginMessage, setClaudeLoginMessage] = useState("");
 	const [key, setKey] = useState("");
 	const [saving, setSaving] = useState(false);
 	const [error, setError] = useState("");
 	const [selectError, setSelectError] = useState("");
 	const ref = useRef<HTMLDivElement>(null);
+	const claudePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
 	const current = model.split("/")[0] ?? "";
 
@@ -63,9 +75,18 @@ export function ProviderPicker({
 			.then(setProviders)
 			.catch(() => {});
 
+	const stopClaudePoll = () => {
+		if (claudePollRef.current) {
+			clearInterval(claudePollRef.current);
+			claudePollRef.current = null;
+		}
+	};
+
 	useEffect(() => {
 		load();
 	}, []);
+
+	useEffect(() => () => stopClaudePoll(), []);
 
 	useEffect(() => {
 		const onDown = (e: MouseEvent) => {
@@ -179,6 +200,60 @@ export function ProviderPicker({
 		load();
 	};
 
+	const startClaudeLogin = async () => {
+		setClaudeLoginOpen(true);
+		setClaudeLoginBusy(true);
+		setClaudeLoginMessage("Opening Claude sign-in…");
+		setError("");
+		onOpenChange(false);
+		stopClaudePoll();
+		try {
+			const res = await fetch("/auth/claude-bridge/login", { method: "POST" });
+			const d = (await res.json().catch(() => ({}))) as {
+				url?: string;
+				error?: string;
+				status?: ClaudeLoginStatus;
+			};
+			if (!res.ok || !d.url) {
+				setClaudeLoginBusy(false);
+				setClaudeLoginMessage(d.error ?? "Could not start Claude login");
+				return;
+			}
+			window.open(d.url, "_blank", "noopener,noreferrer");
+			setClaudeLoginMessage("Finish signing in in your browser. This window will update when you're done.");
+			claudePollRef.current = setInterval(async () => {
+				try {
+					const statusRes = await fetch("/auth/claude-bridge/login/status");
+					const status = (await statusRes.json()) as ClaudeLoginStatus;
+					if (status.phase === "done") {
+						stopClaudePoll();
+						setClaudeLoginBusy(false);
+						setClaudeLoginMessage("Signed in with Claude.");
+						load();
+						setTimeout(() => setClaudeLoginOpen(false), 800);
+					} else if (status.phase === "error") {
+						stopClaudePoll();
+						setClaudeLoginBusy(false);
+						setClaudeLoginMessage(status.error ?? "Claude login failed");
+					}
+				} catch {
+					/* keep polling */
+				}
+			}, 1000);
+		} catch (e) {
+			setClaudeLoginBusy(false);
+			setClaudeLoginMessage(e instanceof Error ? e.message : "Network error starting Claude login");
+		}
+	};
+
+	const cancelClaudeLogin = async () => {
+		stopClaudePoll();
+		await fetch("/auth/claude-bridge/login/cancel", { method: "POST" }).catch(() => {});
+		setClaudeLoginBusy(false);
+		setClaudeLoginOpen(false);
+		setClaudeLoginMessage("");
+	};
+
 	return (
 		<div ref={ref} data-melon-picker-root className="relative">
 			<button
@@ -240,21 +315,71 @@ export function ProviderPicker({
 							)}
 							<button
 								className="shrink-0 rounded p-1 text-muted-foreground hover:bg-background hover:text-foreground"
-								title={p.configured ? "Re-key" : "Configure key"}
+								title={
+									p.id === CLAUDE_BRIDGE_PROVIDER_ID
+										? p.configured
+											? "Log out of Claude"
+											: "Log in with Claude"
+										: p.configured
+											? "Re-key"
+											: "Configure key"
+								}
 								onClick={(e) => {
 									e.stopPropagation();
+									if (p.id === CLAUDE_BRIDGE_PROVIDER_ID) {
+										if (p.configured) {
+											void removeKey(p);
+										} else {
+											void startClaudeLogin();
+										}
+										return;
+									}
 									setConfiguring(p);
 									setKey("");
 									setError("");
 									onOpenChange(false);
 								}}
 							>
-								<KeyRound className="size-3" />
+								{p.id === CLAUDE_BRIDGE_PROVIDER_ID ? (
+									<LogIn className="size-3" />
+								) : (
+									<KeyRound className="size-3" />
+								)}
 							</button>
 						</div>
 					))}
 				</div>
 			)}
+
+			<RadixDialog.Root
+				open={claudeLoginOpen}
+				onOpenChange={(o) => {
+					if (!o) void cancelClaudeLogin();
+				}}
+			>
+				<RadixDialog.Portal>
+					<RadixDialog.Overlay className="fixed inset-0 z-[1000] bg-black/60" />
+					<RadixDialog.Content
+						className="fixed left-1/2 top-1/2 z-[1001] w-[420px] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border bg-card p-5 shadow-2xl focus:outline-none"
+						onKeyDown={(e) => e.stopPropagation()}
+					>
+						<RadixDialog.Title className="text-sm font-semibold text-card-foreground">
+							Log in with Claude
+						</RadixDialog.Title>
+						<RadixDialog.Description className="mt-2 text-xs text-muted-foreground">
+							{claudeLoginMessage || "Sign in with your Claude account in the browser."}
+						</RadixDialog.Description>
+						<div className="mt-4 flex justify-end gap-2">
+							<button
+								className="rounded-lg px-3 py-1.5 text-xs text-muted-foreground hover:bg-secondary"
+								onClick={() => void cancelClaudeLogin()}
+							>
+								{claudeLoginBusy ? "Cancel" : "Close"}
+							</button>
+						</div>
+					</RadixDialog.Content>
+				</RadixDialog.Portal>
+			</RadixDialog.Root>
 
 			<RadixDialog.Root
 				open={configuring !== null}

@@ -1,4 +1,6 @@
 import type { FastifyReply } from "fastify";
+import { CLAUDE_BRIDGE_PROVIDER_ID } from "./claude-bridge-extension.ts";
+import { CURSOR_PROVIDER_ID } from "./cursor-extension.ts";
 import type { CardExtensionUiBridge } from "./extension-ui.ts";
 
 export interface AttachedSession {
@@ -17,9 +19,16 @@ export interface AttachedSession {
 	promptQueue: QueuedPrompt[];
 	/** Guards the drain loop against re-entrant agent_end triggers. */
 	draining?: boolean;
-	/** Monotonic token for Cursor turns; prevents a settled old turn mutating a newer one. */
+	/**
+	 * Monotonic token for isolation-sensitive turns (Cursor, Claude bridge).
+	 * Prevents a settled old turn mutating a newer one.
+	 */
+	isolationTurnId?: number;
+	/** Isolation-sensitive turn explicitly stopped by the user; queue stays paused. */
+	isolationAbortedTurnId?: number;
+	/** @deprecated Use isolationTurnId — kept as alias for older call sites/tests. */
 	cursorTurnId?: number;
-	/** Cursor turn explicitly stopped by the user; its queue must remain paused. */
+	/** @deprecated Use isolationAbortedTurnId. */
 	cursorAbortedTurnId?: number;
 	/** Extension UI (select/confirm/input) → Melon card question panel. */
 	extensionUi?: CardExtensionUiBridge;
@@ -42,35 +51,97 @@ export function queueDisplays(queue: QueuedPrompt[]): string[] {
 	return queue.map((q) => q.display ?? q.text);
 }
 
-export function isCursorSession(session: Pick<AttachedSession, "runtime">): boolean {
-	return (session.runtime.session.model?.provider ?? "").toLowerCase() === "cursor";
+function providerId(session: Pick<AttachedSession, "runtime">): string {
+	return (session.runtime.session.model?.provider ?? "").toLowerCase();
 }
 
-/** Claim a Cursor card synchronously before prompt() can yield. */
-export function beginCursorTurn(
-	session: Pick<AttachedSession, "runtime" | "busy" | "cursorTurnId">,
+/** Providers that require Melon per-card isolation (attach locks, turn tokens, …). */
+export function isIsolationSensitiveSession(session: Pick<AttachedSession, "runtime">): boolean {
+	const id = providerId(session);
+	return id === CURSOR_PROVIDER_ID || id === CLAUDE_BRIDGE_PROVIDER_ID;
+}
+
+export function isCursorSession(session: Pick<AttachedSession, "runtime">): boolean {
+	return providerId(session) === CURSOR_PROVIDER_ID;
+}
+
+export function isClaudeBridgeSession(session: Pick<AttachedSession, "runtime">): boolean {
+	return providerId(session) === CLAUDE_BRIDGE_PROVIDER_ID;
+}
+
+/**
+ * Claim an isolation-sensitive card synchronously before prompt() can yield.
+ * Returns undefined for ordinary providers (caller sets busy itself).
+ */
+export function beginIsolationTurn(
+	session: Pick<AttachedSession, "runtime" | "busy" | "isolationTurnId" | "cursorTurnId">,
 ): number | undefined {
-	if (!isCursorSession(session)) return undefined;
-	const turnId = (session.cursorTurnId ?? 0) + 1;
+	if (!isIsolationSensitiveSession(session)) return undefined;
+	const turnId = (session.isolationTurnId ?? session.cursorTurnId ?? 0) + 1;
+	session.isolationTurnId = turnId;
 	session.cursorTurnId = turnId;
 	session.busy = true;
 	return turnId;
 }
 
-export function abortCurrentCursorTurn(
-	session: Pick<AttachedSession, "runtime" | "cursorTurnId" | "cursorAbortedTurnId">,
+/** @deprecated Prefer beginIsolationTurn — Cursor-named alias. */
+export function beginCursorTurn(
+	session: Pick<AttachedSession, "runtime" | "busy" | "isolationTurnId" | "cursorTurnId">,
+): number | undefined {
+	return beginIsolationTurn(session);
+}
+
+export function abortCurrentIsolationTurn(
+	session: Pick<
+		AttachedSession,
+		"runtime" | "isolationTurnId" | "isolationAbortedTurnId" | "cursorTurnId" | "cursorAbortedTurnId"
+	>,
 ): void {
-	if (isCursorSession(session) && session.cursorTurnId !== undefined) {
-		session.cursorAbortedTurnId = session.cursorTurnId;
-	}
+	if (!isIsolationSensitiveSession(session)) return;
+	const turnId = session.isolationTurnId ?? session.cursorTurnId;
+	if (turnId === undefined) return;
+	session.isolationAbortedTurnId = turnId;
+	session.cursorAbortedTurnId = turnId;
 }
 
-export function isCursorTurnAborted(session: Pick<AttachedSession, "cursorAbortedTurnId">, turnId: number): boolean {
-	return session.cursorAbortedTurnId === turnId;
+/** @deprecated Prefer abortCurrentIsolationTurn. */
+export function abortCurrentCursorTurn(
+	session: Pick<
+		AttachedSession,
+		"runtime" | "isolationTurnId" | "isolationAbortedTurnId" | "cursorTurnId" | "cursorAbortedTurnId"
+	>,
+): void {
+	abortCurrentIsolationTurn(session);
 }
 
-export function isCurrentCursorTurn(session: Pick<AttachedSession, "cursorTurnId">, turnId: number): boolean {
-	return session.cursorTurnId === turnId;
+export function isIsolationTurnAborted(
+	session: Pick<AttachedSession, "isolationAbortedTurnId" | "cursorAbortedTurnId">,
+	turnId: number,
+): boolean {
+	return (session.isolationAbortedTurnId ?? session.cursorAbortedTurnId) === turnId;
+}
+
+/** @deprecated Prefer isIsolationTurnAborted. */
+export function isCursorTurnAborted(
+	session: Pick<AttachedSession, "isolationAbortedTurnId" | "cursorAbortedTurnId">,
+	turnId: number,
+): boolean {
+	return isIsolationTurnAborted(session, turnId);
+}
+
+export function isCurrentIsolationTurn(
+	session: Pick<AttachedSession, "isolationTurnId" | "cursorTurnId">,
+	turnId: number,
+): boolean {
+	return (session.isolationTurnId ?? session.cursorTurnId) === turnId;
+}
+
+/** @deprecated Prefer isCurrentIsolationTurn. */
+export function isCurrentCursorTurn(
+	session: Pick<AttachedSession, "isolationTurnId" | "cursorTurnId">,
+	turnId: number,
+): boolean {
+	return isCurrentIsolationTurn(session, turnId);
 }
 
 export class SessionRegistry {
