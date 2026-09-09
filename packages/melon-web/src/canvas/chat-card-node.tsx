@@ -1,4 +1,4 @@
-import { memo as ReactMemo, useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import { memo as ReactMemo, useCallback, useEffect, useReducer, useRef, useState, type ReactNode, type RefObject } from 'react';
 import { createPortal } from 'react-dom';
 import {
     Handle,
@@ -8,7 +8,7 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { BookMarked, Bug, ChevronDown, Copy, Minimize2, MoreHorizontal, Pencil, Plus, X } from 'lucide-react';
+import { BookMarked, Bug, ChevronDown, ChevronUp, Copy, Minimize2, MoreHorizontal, Pencil, Plus, Search, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { PromptComposer } from '@/components/prompt-composer';
@@ -123,34 +123,55 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     cardId,
     streaming,
     totalMessages,
+    highlighted,
+    findQuery,
+    findActive,
 }: {
     m: MessageShape;
     index: number;
     cardId: string;
     streaming: boolean;
     totalMessages: number;
+    highlighted?: boolean;
+    findQuery?: string;
+    findActive?: boolean;
 }) {
+    const q = findQuery?.trim() ?? '';
     if (m.role === 'system') {
         const bad = m.text.startsWith('✗');
         return (
-            <div className="flex justify-center">
+            <div className="flex justify-center" data-msg-index={index}>
                 <span
                     className={cn(
                         'max-w-[92%] rounded-md px-2 py-0.5 text-center text-[10px]',
                         bad ? 'bg-red-500/10 text-red-500' : 'bg-secondary/60 text-muted-foreground',
                     )}
                 >
-                    {m.text}
+                    {q ? (
+                        <HighlightedPlainText text={m.text} query={q} current={findActive} />
+                    ) : (
+                        m.text
+                    )}
                 </span>
             </div>
         );
     }
     if (m.role === 'user') {
         return (
-            <div className="flex justify-end">
-                <div
-                    className="max-w-[92%] overflow-hidden rounded-xl bg-primary/10 px-3 py-1.5 text-xs leading-relaxed text-primary whitespace-pre-wrap break-words">
-                    <UserTextWithMentions text={m.text} />
+            <div
+                className={cn(
+                    'flex justify-end rounded-xl transition-colors duration-500',
+                    highlighted && 'ring-2 ring-primary/50 ring-offset-2 ring-offset-card',
+                )}
+                data-msg-index={index}
+                data-user-prompt="true"
+            >
+                <div className="max-w-[92%] overflow-hidden rounded-xl bg-primary/10 px-3 py-1.5 text-xs leading-relaxed text-primary whitespace-pre-wrap break-words">
+                    {q ? (
+                        <HighlightedPlainText text={m.text} query={q} current={findActive} />
+                    ) : (
+                        <UserTextWithMentions text={m.text} />
+                    )}
                 </div>
             </div>
         );
@@ -161,13 +182,21 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     const thinkingActive =
         isStreamingTail && !!m.thinking && !m.text.trim() && !hasTools;
     return (
-        <div className="min-w-0 space-y-2 pl-1">
+        <div
+            className={cn(
+                'min-w-0 space-y-2 pl-1 rounded-lg transition-colors duration-500',
+                highlighted && 'ring-2 ring-primary/40 ring-offset-2 ring-offset-card',
+            )}
+            data-msg-index={index}
+        >
             {m.thinking != null && m.thinking.length > 0 && (
                 <ThinkingBlock
                     cardId={cardId}
                     index={index}
                     text={m.thinking}
                     active={thinkingActive}
+                    findQuery={q}
+                    findActive={findActive}
                 />
             )}
             {(m.tools ?? []).map((t) => (
@@ -186,23 +215,518 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
             ))}
             {(isStreamingTail ? m.text.length > 0 : m.text.trim()) ? (
                 <div className="rounded-lg bg-secondary/40 px-3 py-2">
-                    <MarkdownBlock content={m.text} streaming={isStreamingTail} />
+                    {q ? (
+                        <FindHighlightHost query={q} current={findActive}>
+                            <MarkdownBlock content={m.text} streaming={isStreamingTail} />
+                        </FindHighlightHost>
+                    ) : (
+                        <MarkdownBlock content={m.text} streaming={isStreamingTail} />
+                    )}
                 </div>
             ) : null}
         </div>
     );
 });
 
+/** Truncate a user prompt for the maximized-mode jump-nav preview. */
+function promptNavPreview(text: string, max = 140): string {
+    const oneLine = text.replace(/\s+/g, ' ').trim();
+    if (oneLine.length <= max) return oneLine;
+    return `${oneLine.slice(0, max - 1)}…`;
+}
+
+function messageSearchHaystack(m: MessageShape): string {
+    const parts = [m.text, m.thinking ?? ''];
+    for (const t of m.tools ?? []) {
+        parts.push(t.name, t.args ?? '', t.output ?? '');
+    }
+    return parts.join('\n');
+}
+
+/** Message indexes whose text/thinking/tools contain `query` (case-insensitive). */
+function findMatchingMessageIndexes(
+    messages: Array<MessageShape>,
+    query: string,
+): number[] {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const out: number[] = [];
+    for (let i = 0; i < messages.length; i++) {
+        const m = messages[i];
+        if (!m || m.role === 'system') continue;
+        if (messageSearchHaystack(m).toLowerCase().includes(q)) out.push(i);
+    }
+    return out;
+}
+
+/** Compact floating Cmd/Ctrl+F control — overlay, not a full-width strip. */
+function MaximizedFindBar({
+    query,
+    matchIndex,
+    matchCount,
+    onQueryChange,
+    onPrev,
+    onNext,
+    onClose,
+    inputRef,
+}: {
+    query: string;
+    matchIndex: number;
+    matchCount: number;
+    onQueryChange: (value: string) => void;
+    onPrev: () => void;
+    onNext: () => void;
+    onClose: () => void;
+    inputRef: RefObject<HTMLInputElement>;
+}) {
+    const status =
+        query.trim().length === 0
+            ? '—'
+            : matchCount === 0
+              ? '0/0'
+              : `${matchIndex + 1}/${matchCount}`;
+
+    const noHits = query.trim().length > 0 && matchCount === 0;
+
+    return (
+        <div className="flex items-center gap-2 rounded-xl border border-border/70 bg-card/95 px-3 py-2 shadow-lg ring-1 ring-black/5 backdrop-blur-md dark:ring-white/10">
+            <Search className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+            <input
+                ref={inputRef}
+                type="search"
+                value={query}
+                placeholder="Find in chat"
+                aria-label="Find in chat"
+                autoComplete="off"
+                spellCheck={false}
+                onChange={(e) => onQueryChange(e.target.value)}
+                onKeyDown={(e) => {
+                    if (e.key === 'ArrowDown' || (e.key === 'Enter' && !e.shiftKey)) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onNext();
+                        return;
+                    }
+                    if (e.key === 'ArrowUp' || (e.key === 'Enter' && e.shiftKey)) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onPrev();
+                        return;
+                    }
+                    if (e.key === 'Escape') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        onClose();
+                    }
+                }}
+                className="nodrag nowheel w-[12rem] bg-transparent text-[13px] leading-none text-card-foreground outline-none placeholder:text-muted-foreground/80 sm:w-[14rem]"
+            />
+            <span
+                className={cn(
+                    'min-w-[2.75rem] shrink-0 text-right text-[11px] tabular-nums',
+                    noHits ? 'text-amber-600 dark:text-amber-400' : 'text-muted-foreground',
+                )}
+                aria-live="polite"
+            >
+                {status}
+            </span>
+            <div className="flex items-center gap-0.5 border-l border-border/60 pl-2">
+                <button
+                    type="button"
+                    className="nodrag inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:opacity-35"
+                    onClick={onPrev}
+                    disabled={matchCount === 0}
+                    title="Previous match (↑)"
+                    aria-label="Previous match"
+                >
+                    <ChevronUp className="size-3.5" />
+                </button>
+                <button
+                    type="button"
+                    className="nodrag inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:opacity-35"
+                    onClick={onNext}
+                    disabled={matchCount === 0}
+                    title="Next match (↓)"
+                    aria-label="Next match"
+                >
+                    <ChevronDown className="size-3.5" />
+                </button>
+            </div>
+            <button
+                type="button"
+                className="nodrag inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                onClick={onClose}
+                title="Close (Esc)"
+                aria-label="Close find"
+            >
+                <X className="size-3.5" />
+            </button>
+        </div>
+    );
+}
+
+function escapeRegExp(value: string): string {
+    return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Split plain text into normal + match segments for in-text find highlights. */
+function highlightPlainParts(
+    text: string,
+    query: string,
+): Array<{ text: string; hit: boolean }> {
+    const q = query.trim();
+    if (!q || !text) return [{ text, hit: false }];
+    const re = new RegExp(escapeRegExp(q), 'gi');
+    const parts: Array<{ text: string; hit: boolean }> = [];
+    let last = 0;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) != null) {
+        if (m.index > last) parts.push({ text: text.slice(last, m.index), hit: false });
+        parts.push({ text: m[0], hit: true });
+        last = m.index + m[0].length;
+        if (m[0].length === 0) re.lastIndex++;
+    }
+    if (last < text.length) parts.push({ text: text.slice(last), hit: false });
+    return parts.length > 0 ? parts : [{ text, hit: false }];
+}
+
+function FindMark({
+    text,
+    current,
+}: {
+    text: string;
+    current?: boolean;
+}) {
+    return (
+        <mark
+            data-find-hit=""
+            data-find-current={current ? '' : undefined}
+            className={cn(
+                'rounded-[2px] px-0.5 py-px font-medium not-italic',
+                current
+                    ? 'bg-[#FFEA00] text-black ring-1 ring-[#FF8A00]'
+                    : 'bg-[#7CFFB2] text-[#062816]',
+            )}
+        >
+            {text}
+        </mark>
+    );
+}
+
+function HighlightedPlainText({
+    text,
+    query,
+    current,
+}: {
+    text: string;
+    query: string;
+    current?: boolean;
+}) {
+    const parts = highlightPlainParts(text, query);
+    if (!query.trim()) return <>{text}</>;
+    let sawCurrent = false;
+    return (
+        <>
+            {parts.map((p, i) => {
+                if (!p.hit) return <span key={i}>{p.text}</span>;
+                const isCurrent = !!current && !sawCurrent;
+                if (isCurrent) sawCurrent = true;
+                return <FindMark key={i} text={p.text} current={isCurrent} />;
+            })}
+        </>
+    );
+}
+
+function clearDomFindMarks(root: HTMLElement): void {
+    const marks = root.querySelectorAll('mark[data-find-hit]');
+    for (const mark of marks) {
+        const parent = mark.parentNode;
+        if (!parent) continue;
+        while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+        parent.removeChild(mark);
+        parent.normalize();
+    }
+}
+
+/** Walk text nodes and wrap query hits in <mark> — works for rendered markdown. */
+function applyDomFindMarks(root: HTMLElement, query: string, current: boolean): void {
+    const q = query.trim();
+    if (!q) return;
+    const re = new RegExp(escapeRegExp(q), 'gi');
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+            const parent = node.parentElement;
+            if (!parent) return NodeFilter.FILTER_REJECT;
+            if (parent.closest('mark[data-find-hit], script, style')) {
+                return NodeFilter.FILTER_REJECT;
+            }
+            // Skip empty / whitespace-only nodes for speed.
+            if (!node.nodeValue || !node.nodeValue.trim()) return NodeFilter.FILTER_REJECT;
+            return NodeFilter.FILTER_ACCEPT;
+        },
+    });
+    const textNodes: Text[] = [];
+    let node = walker.nextNode();
+    while (node) {
+        textNodes.push(node as Text);
+        node = walker.nextNode();
+    }
+
+    let assignedCurrent = false;
+    for (const textNode of textNodes) {
+        const value = textNode.nodeValue ?? '';
+        re.lastIndex = 0;
+        if (!re.test(value)) continue;
+        re.lastIndex = 0;
+        const frag = document.createDocumentFragment();
+        let last = 0;
+        let m: RegExpExecArray | null;
+        while ((m = re.exec(value)) != null) {
+            if (m.index > last) {
+                frag.appendChild(document.createTextNode(value.slice(last, m.index)));
+            }
+            const mark = document.createElement('mark');
+            mark.setAttribute('data-find-hit', '');
+            const isCurrent = current && !assignedCurrent;
+            if (isCurrent) {
+                mark.setAttribute('data-find-current', '');
+                assignedCurrent = true;
+            }
+            mark.className = isCurrent
+                ? 'rounded-[2px] px-0.5 py-px font-medium bg-[#FFEA00] text-black ring-1 ring-[#FF8A00]'
+                : 'rounded-[2px] px-0.5 py-px font-medium bg-[#7CFFB2] text-[#062816]';
+            mark.textContent = m[0];
+            frag.appendChild(mark);
+            last = m.index + m[0].length;
+            if (m[0].length === 0) re.lastIndex++;
+        }
+        if (last < value.length) {
+            frag.appendChild(document.createTextNode(value.slice(last)));
+        }
+        textNode.parentNode?.replaceChild(frag, textNode);
+    }
+}
+
+/** Applies find highlights inside markdown / mixed DOM after paint. */
+function FindHighlightHost({
+    query,
+    current,
+    children,
+    className,
+}: {
+    query: string;
+    current?: boolean;
+    children: ReactNode;
+    className?: string;
+}) {
+    const ref = useRef<HTMLDivElement>(null);
+    useEffect(() => {
+        const root = ref.current;
+        if (!root) return;
+        clearDomFindMarks(root);
+        const q = query.trim();
+        if (!q) return;
+        applyDomFindMarks(root, q, !!current);
+    }, [query, current, children]);
+    return (
+        <div ref={ref} className={className}>
+            {children}
+        </div>
+    );
+}
+
+/**
+ * Right-edge prompt bars (maximized chat only).
+ * Stacked ticks (not a minimap). Active bar follows chat scroll; the list
+ * auto-scrolls so that bar stays visible — you don't scrub the rail yourself.
+ */
+function UserPromptSideNav({
+    prompts,
+    activeIndex,
+    onJump,
+}: {
+    prompts: Array<{ index: number; text: string }>;
+    activeIndex: number;
+    onJump: (messageIndex: number) => void;
+}) {
+    const [hovered, setHovered] = useState<number | null>(null);
+    const [hoverAnchor, setHoverAnchor] = useState<{ top: number; right: number } | null>(null);
+    const leaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const activeBtnRef = useRef<HTMLButtonElement | null>(null);
+    const btnRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
+
+    useEffect(() => {
+        return () => {
+            if (leaveTimer.current) clearTimeout(leaveTimer.current);
+        };
+    }, []);
+
+    // Keep the active tick in view as the chat scroll position changes.
+    useEffect(() => {
+        if (activeIndex < 0) return;
+        activeBtnRef.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }, [activeIndex]);
+
+    const clearLeave = () => {
+        if (leaveTimer.current) {
+            clearTimeout(leaveTimer.current);
+            leaveTimer.current = null;
+        }
+    };
+
+    const placeHover = (index: number) => {
+        const el = btnRefs.current.get(index);
+        if (!el) {
+            setHovered(index);
+            setHoverAnchor(null);
+            return;
+        }
+        const rect = el.getBoundingClientRect();
+        setHovered(index);
+        // Anchor to the left of the tick so the card isn't clipped by the rail.
+        setHoverAnchor({
+            top: rect.top + rect.height / 2,
+            right: window.innerWidth - rect.left + 10,
+        });
+    };
+
+    const onEnter = (index: number) => {
+        clearLeave();
+        placeHover(index);
+    };
+
+    const onLeave = () => {
+        clearLeave();
+        leaveTimer.current = setTimeout(() => {
+            setHovered(null);
+            setHoverAnchor(null);
+        }, 100);
+    };
+
+    if (prompts.length === 0) return null;
+
+    const hoveredOrdinal = hovered == null ? -1 : prompts.findIndex((p) => p.index === hovered);
+    const hoveredPrompt = hoveredOrdinal >= 0 ? prompts[hoveredOrdinal] : null;
+
+    return (
+        <>
+            <nav
+                aria-label="Jump to user prompts"
+                className="nodrag nowheel pointer-events-none absolute inset-y-0 right-0 z-20 flex w-14 flex-col items-end justify-center py-10 pr-2.5"
+                onMouseLeave={onLeave}
+            >
+                {/* max-h-full: short chats stay centered; long chats fill + auto-scroll */}
+                <div
+                    className="flex max-h-full flex-col items-end gap-1.5 overflow-y-auto overscroll-contain"
+                    style={{ scrollbarWidth: 'none' }}
+                >
+                    {prompts.map((p, n) => {
+                        const active = p.index === activeIndex;
+                        const isHot = hovered === p.index;
+                        return (
+                            <button
+                                key={p.index}
+                                ref={(el) => {
+                                    if (el) btnRefs.current.set(p.index, el);
+                                    else btnRefs.current.delete(p.index);
+                                    if (active) activeBtnRef.current = el;
+                                }}
+                                type="button"
+                                aria-label={`Jump to prompt ${n + 1}: ${promptNavPreview(p.text, 64)}`}
+                                aria-current={active ? 'true' : undefined}
+                                onMouseEnter={() => onEnter(p.index)}
+                                onFocus={() => onEnter(p.index)}
+                                onBlur={onLeave}
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    onJump(p.index);
+                                }}
+                                className="pointer-events-auto nodrag relative flex h-3.5 w-14 shrink-0 items-center justify-end outline-none"
+                            >
+                                <span
+                                    className={cn(
+                                        'block h-[3px] origin-right rounded-full will-change-[width]',
+                                        'transition-[width,background-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]',
+                                        active || isHot
+                                            ? 'w-10 bg-primary opacity-100'
+                                            : 'w-2.5 bg-muted-foreground/45 opacity-60',
+                                    )}
+                                />
+                            </button>
+                        );
+                    })}
+                </div>
+            </nav>
+            {/* Portal so overflow on the rail can't clip the prompt preview. */}
+            {hoveredPrompt &&
+                hoverAnchor &&
+                createPortal(
+                    <div
+                        role="tooltip"
+                        className="pointer-events-none fixed z-[1100] w-[min(17rem,70vw)] -translate-y-1/2"
+                        style={{ top: hoverAnchor.top, right: hoverAnchor.right }}
+                    >
+                        <div className="rounded-lg border border-border/80 bg-card/95 px-3 py-2.5 shadow-lg ring-1 ring-black/5 backdrop-blur-md dark:ring-white/10">
+                            <div className="mb-1 flex items-center justify-between gap-2">
+                                <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                                    Prompt {hoveredOrdinal + 1}
+                                </span>
+                                <span className="text-[10px] tabular-nums text-muted-foreground/70">
+                                    {hoveredOrdinal + 1}/{prompts.length}
+                                </span>
+                            </div>
+                            <p className="line-clamp-3 text-[12px] leading-snug text-card-foreground">
+                                {promptNavPreview(hoveredPrompt.text, 180)}
+                            </p>
+                        </div>
+                    </div>,
+                    document.body,
+                )}
+        </>
+    );
+}
+
+/** Which user prompt owns the current reading position in the scroll viewport. */
+function resolveViewportPromptIndex(scroller: HTMLDivElement): number {
+    const nodes = scroller.querySelectorAll('[data-user-prompt="true"]');
+    if (nodes.length === 0) return -1;
+    const rootRect = scroller.getBoundingClientRect();
+    // Reading line: a bit below the top so the section you're in stays active.
+    const marker = scroller.scrollTop + Math.min(96, scroller.clientHeight * 0.18);
+    let current = -1;
+    for (const node of nodes) {
+        if (!(node instanceof HTMLElement)) continue;
+        const y =
+            node.getBoundingClientRect().top - rootRect.top + scroller.scrollTop;
+        const idx = Number(node.getAttribute('data-msg-index'));
+        if (!Number.isFinite(idx)) continue;
+        if (y <= marker) current = idx;
+        else break;
+    }
+    if (current < 0) {
+        const first = nodes[0];
+        if (first instanceof HTMLElement) {
+            const idx = Number(first.getAttribute('data-msg-index'));
+            return Number.isFinite(idx) ? idx : -1;
+        }
+    }
+    return current;
+}
+
 function ThinkingBlock({
     cardId,
     index,
     text,
     active,
+    findQuery = '',
+    findActive = false,
 }: {
     cardId: string;
     index: number;
     text: string;
     active: boolean;
+    findQuery?: string;
+    findActive?: boolean;
 }) {
     const key = `${cardId}:think:${index}`;
     const [open, setOpen] = useState(() => uiFlag(key, true));
@@ -229,6 +753,15 @@ function ThinkingBlock({
         const el = bodyRef.current;
         if (el) el.scrollTop = el.scrollHeight;
     }, [text, active, open]);
+
+    // Open thinking when a find hit lives inside it.
+    useEffect(() => {
+        if (!findQuery.trim() || !findActive) return;
+        if (text.toLowerCase().includes(findQuery.trim().toLowerCase())) {
+            setOpen(true);
+            setUiFlag(key, true);
+        }
+    }, [findQuery, findActive, text, key]);
 
     return (
         <div
@@ -262,7 +795,15 @@ function ThinkingBlock({
                     ref={bodyRef}
                     className="nowheel max-h-56 overflow-y-auto whitespace-pre-wrap border-t border-border/50 px-2.5 py-1.5 text-[10px] italic leading-relaxed text-muted-foreground"
                 >
-                    {text || '…'}
+                    {findQuery.trim() ? (
+                        <HighlightedPlainText
+                            text={text || '…'}
+                            query={findQuery}
+                            current={findActive}
+                        />
+                    ) : (
+                        text || '…'
+                    )}
                 </div>
             )}
         </div>
@@ -636,6 +1177,12 @@ function ChatCardNodeInner({
     const [maximized, setMaximized] = useState(false);
     const [view, setView] = useState<'chat' | 'trajectory'>('chat');
     const [editingTitle, setEditingTitle] = useState(false);
+    const [highlightedIndex, setHighlightedIndex] = useState(-1);
+    const [viewportPromptIndex, setViewportPromptIndex] = useState(-1);
+    const [findOpen, setFindOpen] = useState(false);
+    const [findQuery, setFindQuery] = useState('');
+    const [findMatchCursor, setFindMatchCursor] = useState(0);
+    const findInputRef = useRef<HTMLInputElement>(null);
     const dbg = (...args: unknown[]) => console.log('[ui-debug]', ...args);
     useEffect(() => { dbg('card mounted', id); }, []);
     const scrollRef = useRef<HTMLDivElement>(null);
@@ -643,12 +1190,19 @@ function ChatCardNodeInner({
     const atBottomRef = useRef(true); // user pinned to the newest output?
     const [showDown, setShowDown] = useState(false); // floating ↓ button
     const lastMsg = card?.messages[card.messages.length - 1];
+    const highlightClearRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    const findMatches = findMatchingMessageIndexes(card?.messages ?? [], findQuery);
 
     const handleMessagesScroll = (el: HTMLDivElement) => {
         const near = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
         dbg('scroll', `st=${el.scrollTop} sh=${el.scrollHeight} ch=${el.clientHeight} atBottom=${near}`);
         atBottomRef.current = near;
         setShowDown(!near); // React bails out when unchanged
+        if (maximized) {
+            const next = resolveViewportPromptIndex(el);
+            setViewportPromptIndex((prev) => (prev === next ? prev : next));
+        }
     };
     const goToBottom = () => {
         dbg('DOWN-ARROW clicked — jumping to bottom');
@@ -659,6 +1213,75 @@ function ChatCardNodeInner({
         const el2 = maxScrollRef.current;
         if (el2) el2.scrollTop = el2.scrollHeight;
     };
+
+    const jumpToMessage = useCallback((messageIndex: number, opts?: { sticky?: boolean }) => {
+        // Leaving the bottom so stream auto-follow does not yank us away.
+        atBottomRef.current = false;
+        setShowDown(true);
+        setHighlightedIndex(messageIndex);
+        setViewportPromptIndex(messageIndex);
+        if (highlightClearRef.current) clearTimeout(highlightClearRef.current);
+        if (!opts?.sticky) {
+            highlightClearRef.current = setTimeout(() => setHighlightedIndex(-1), 1800);
+        }
+        const root = maxScrollRef.current;
+        const target = root?.querySelector(`[data-msg-index="${messageIndex}"]`);
+        if (target instanceof HTMLElement) {
+            target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            // After paint, land on the exact highlighted letter(s) if present.
+            window.setTimeout(() => {
+                const hit =
+                    target.querySelector('mark[data-find-current]') ??
+                    target.querySelector('mark[data-find-hit]');
+                if (hit instanceof HTMLElement) {
+                    hit.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
+            }, 80);
+        }
+    }, []);
+
+    const jumpToUserPrompt = useCallback(
+        (messageIndex: number) => jumpToMessage(messageIndex),
+        [jumpToMessage],
+    );
+
+    const closeFind = useCallback(() => {
+        setFindOpen(false);
+        setFindQuery('');
+        setFindMatchCursor(0);
+        setHighlightedIndex(-1);
+        if (highlightClearRef.current) clearTimeout(highlightClearRef.current);
+    }, []);
+
+    const goToFindMatch = useCallback(
+        (cursor: number, matches: number[]) => {
+            if (matches.length === 0) return;
+            const next = ((cursor % matches.length) + matches.length) % matches.length;
+            setFindMatchCursor(next);
+            jumpToMessage(matches[next]!, { sticky: true });
+        },
+        [jumpToMessage],
+    );
+
+    const onFindQueryChange = useCallback(
+        (value: string) => {
+            setFindQuery(value);
+            const matches = findMatchingMessageIndexes(card?.messages ?? [], value);
+            setFindMatchCursor(0);
+            if (matches.length > 0) {
+                jumpToMessage(matches[0]!, { sticky: true });
+            } else {
+                setHighlightedIndex(-1);
+            }
+        },
+        [card?.messages, jumpToMessage],
+    );
+
+    useEffect(() => {
+        return () => {
+            if (highlightClearRef.current) clearTimeout(highlightClearRef.current);
+        };
+    }, []);
 
     // Auto-follow ONLY while the user is at the bottom. If they scroll away,
     // new output must NOT yank them down — the ↓ button returns them instead.
@@ -714,18 +1337,64 @@ function ChatCardNodeInner({
     };
 
     useEffect(() => {
-        if (!maximized) return;
+        if (!maximized) {
+            setHighlightedIndex(-1);
+            setViewportPromptIndex(-1);
+            setFindOpen(false);
+            setFindQuery('');
+            setFindMatchCursor(0);
+            return;
+        }
         const prevOverflow = document.body.style.overflow;
         document.body.style.overflow = 'hidden';
+        // Seed "you are here" as soon as fullscreen opens.
+        requestAnimationFrame(() => {
+            const el = maxScrollRef.current;
+            if (el) setViewportPromptIndex(resolveViewportPromptIndex(el));
+        });
         const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') setMaximized(false);
+            const mod = e.metaKey || e.ctrlKey;
+            if (mod && e.key.toLowerCase() === 'f') {
+                e.preventDefault();
+                e.stopPropagation();
+                setFindOpen(true);
+                requestAnimationFrame(() => {
+                    findInputRef.current?.focus();
+                    findInputRef.current?.select();
+                });
+                return;
+            }
+            if (findOpen && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+                const el = e.target as HTMLElement | null;
+                const tag = el?.tagName;
+                // Find input / composer handle their own keys.
+                if (tag === 'TEXTAREA' || tag === 'INPUT') return;
+                const matches = findMatchingMessageIndexes(card?.messages ?? [], findQuery);
+                if (matches.length > 0) {
+                    e.preventDefault();
+                    goToFindMatch(
+                        findMatchCursor + (e.key === 'ArrowDown' ? 1 : -1),
+                        matches,
+                    );
+                }
+                return;
+            }
+            if (e.key === 'Escape') {
+                if (findOpen) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    closeFind();
+                    return;
+                }
+                setMaximized(false);
+            }
         };
         window.addEventListener('keydown', onKey);
         return () => {
             document.body.style.overflow = prevOverflow;
             window.removeEventListener('keydown', onKey);
         };
-    }, [maximized]);
+    }, [maximized, findOpen, findQuery, findMatchCursor, closeFind, goToFindMatch, card?.messages]);
 
     useEffect(() => {
         if (!card?.pendingDraft) return;
@@ -1004,31 +1673,43 @@ function ChatCardNodeInner({
 
     const messagesBody = (scrollTo: React.RefObject<HTMLDivElement>, opts?: { roomy?: boolean }) => {
         const streaming = card.status === 'streaming';
+        // roomy (maximized): scroll surface is full-bleed so side gutters/padding
+        // still receive wheel events; max-width + horizontal padding live INSIDE.
         return (
         <div className="relative min-h-0 min-w-0 flex-1">
             <div
                 ref={scrollTo}
                 onScroll={(e) => handleMessagesScroll(e.currentTarget)}
                 className={cn(
-                    'nodrag nowheel h-full cursor-default select-text space-y-4 overflow-y-auto',
-                    opts?.roomy ? 'px-1 py-5 sm:px-2' : 'px-4 py-3',
+                    'nodrag nowheel h-full cursor-default select-text overflow-y-auto',
+                    opts?.roomy ? 'py-5' : 'space-y-4 px-4 py-3',
                 )}
             >
-                {card.messages.length === 0 && !streaming && (
-                    <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                        Ask something to start this thread.
-                    </p>
-                )}
-                {card.messages.map((m, i) => (
-                    <MessageBlocks
-                        key={i}
-                        m={m}
-                        index={i}
-                        cardId={id}
-                        streaming={streaming}
-                        totalMessages={card.messages.length}
-                    />
-                ))}
+                <div
+                    className={cn(
+                        opts?.roomy &&
+                            'mx-auto w-full max-w-[72rem] space-y-4 px-5 sm:px-8 lg:px-10',
+                    )}
+                >
+                    {card.messages.length === 0 && !streaming && (
+                        <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
+                            Ask something to start this thread.
+                        </p>
+                    )}
+                    {card.messages.map((m, i) => (
+                        <MessageBlocks
+                            key={i}
+                            m={m}
+                            index={i}
+                            cardId={id}
+                            streaming={streaming}
+                            totalMessages={card.messages.length}
+                            highlighted={highlightedIndex === i}
+                            findQuery={findOpen ? findQuery : ''}
+                            findActive={findOpen && highlightedIndex === i}
+                        />
+                    ))}
+                </div>
             </div>
             {showDown && (
                 <button
@@ -1200,6 +1881,22 @@ function ChatCardNodeInner({
                         aria-label={card.title || 'Chat'}
                     >
                         {header(true)}
+                        {findOpen && (
+                            <div className="pointer-events-none absolute right-5 top-14 z-40 sm:right-8 sm:top-[3.75rem]">
+                                <div className="pointer-events-auto">
+                                    <MaximizedFindBar
+                                        query={findQuery}
+                                        matchIndex={findMatches.length === 0 ? 0 : findMatchCursor}
+                                        matchCount={findMatches.length}
+                                        onQueryChange={onFindQueryChange}
+                                        onPrev={() => goToFindMatch(findMatchCursor - 1, findMatches)}
+                                        onNext={() => goToFindMatch(findMatchCursor + 1, findMatches)}
+                                        onClose={closeFind}
+                                        inputRef={findInputRef}
+                                    />
+                                </div>
+                            </div>
+                        )}
                         {card.error && (
                             <div className="nodrag flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-5 py-2">
                                 <span className="shrink-0 text-xs">⚠️</span>
@@ -1218,18 +1915,32 @@ function ChatCardNodeInner({
                                 </button>
                             </div>
                         )}
-                        {/* Wider reading column (~72rem) — gutters shrink without billboard-width lines. */}
-                        <div className="mx-auto flex min-h-0 w-full max-w-[72rem] flex-1 flex-col px-5 sm:px-8 lg:px-10">
-                            {view === 'trajectory' ? (
+                        {view === 'trajectory' ? (
+                            <div className="mx-auto flex min-h-0 w-full max-w-[72rem] flex-1 flex-col px-5 sm:px-8 lg:px-10">
                                 <TrajectoryView card={card} />
-                            ) : (
-                                <>
-                                    {messagesBody(maxScrollRef, { roomy: true })}
-                                    {card.debug === true && <DebugConsole logs={card.logs ?? []} />}
+                            </div>
+                        ) : (
+                            <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+                                <UserPromptSideNav
+                                    prompts={card.messages
+                                        .map((m, index) => ({ index, text: m.text, role: m.role }))
+                                        .filter((m) => m.role === 'user' && m.text.trim().length > 0)
+                                        .map(({ index, text }) => ({ index, text }))}
+                                    activeIndex={viewportPromptIndex}
+                                    onJump={jumpToUserPrompt}
+                                />
+                                {/* Full-bleed scroll; reading column width is applied inside messagesBody. */}
+                                {messagesBody(maxScrollRef, { roomy: true })}
+                                {card.debug === true && (
+                                    <div className="mx-auto w-full max-w-[72rem] shrink-0 px-5 sm:px-8 lg:px-10">
+                                        <DebugConsole logs={card.logs ?? []} />
+                                    </div>
+                                )}
+                                <div className="mx-auto w-full max-w-[72rem] shrink-0 px-5 sm:px-8 lg:px-10">
                                     {footerInput}
-                                </>
-                            )}
-                        </div>
+                                </div>
+                            </div>
+                        )}
                     </div>,
                     document.body,
                 )}

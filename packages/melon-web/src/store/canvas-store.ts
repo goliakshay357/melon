@@ -429,6 +429,24 @@ function settleTransientStatuses(cards: SessionCard[]): SessionCard[] {
 	});
 }
 
+/**
+ * After save/load, disk (and sometimes a stale cache) has status idle even when
+ * the card's SSE is still open. Indicators (title dot + "Thinking/Working")
+ * key off card.status — revive streaming for any card with a live stream.
+ */
+function reviveLiveStreamStatuses(cards: SessionCard[]): SessionCard[] {
+	return cards.map((c) => {
+		if (!streams.has(c.id)) return c;
+		if (c.status === "streaming" || c.status === "error") return c;
+		return { ...c, status: "streaming" as const };
+	});
+}
+
+/** Cold restore: keep live streams, settle everything else. */
+function cardsAfterColdLoad(loaded: SessionCard[]): SessionCard[] {
+	return reviveLiveStreamStatuses(loaded.map((c) => (streams.has(c.id) ? c : settleTransientStatuses([c])[0]!)));
+}
+
 export interface CanvasMeta {
 	id: string;
 	name: string;
@@ -1580,10 +1598,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			if (!res?.ok) return false;
 			const cv = await res.json();
 			const loaded = Array.isArray(cv.cards) ? (cv.cards as SessionCard[]) : [];
-			// Cold load: no live SSE for these cards yet. Keep any still-attached
-			// stream state if the card id somehow survived (should not after clear).
-			// Strip zombie pendingExtensionUi — dialog ids are not durable.
-			const cards = loaded.map((c) => (streams.has(c.id) ? c : settleTransientStatuses([c])[0]!));
+			// Cold load: strip zombie UI for cards without a live SSE. Cards that
+			// still have an open stream must show streaming again — disk always
+			// saves status as idle (settleTransientStatuses).
+			const cards = cardsAfterColdLoad(loaded);
 			const name = cv.name ?? "Untitled";
 			const viewport = cv.viewport as CanvasState["viewport"];
 			const wt = applyWorktree(cv);
@@ -1651,18 +1669,21 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			// or a stale stash after a 409 empty-save guard — always recheck disk.
 			if (cached && cached.cards.length > 0) {
 				const wt = applyWorktree(cached);
+				// Cache can go stale idle if we stashed mid-settle or only disk
+				// was updated — revive any card whose SSE is still open.
+				const cards = reviveLiveStreamStatuses(cached.cards);
 				set({
-					cards: cached.cards,
+					cards,
 					canvasId: id,
 					canvasName: cached.name,
 					viewport: cached.viewport,
 					...wt,
 					canvasActivity: {
 						...get().canvasActivity,
-						[id]: activityOf(cached.cards),
+						[id]: activityOf(cards),
 					},
 				});
-				setWorkspaceCards(id, cached.cards, {
+				setWorkspaceCards(id, cards, {
 					viewport: cached.viewport,
 					name: cached.name,
 					worktreePath: wt.worktreePath,
@@ -1671,7 +1692,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					useWorktree: wt.useWorktree,
 					worktreeMode: wt.worktreeMode,
 				});
-				reindexCanvasCards(id, cached.cards);
+				reindexCanvasCards(id, cards);
 				localStorage.setItem("melon:lastCanvas", id);
 				await touchOpened();
 				// Refresh isolation existence without replacing cards.
@@ -1697,19 +1718,20 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			if (!loaded && cached) {
 				// Disk miss; fall back to empty cache (brand-new canvas).
 				const wt = applyWorktree(cached);
+				const cards = reviveLiveStreamStatuses(cached.cards);
 				set({
-					cards: cached.cards,
+					cards,
 					canvasId: id,
 					canvasName: cached.name,
 					viewport: cached.viewport,
 					...wt,
 					canvasActivity: {
 						...get().canvasActivity,
-						[id]: activityOf(cached.cards),
+						[id]: activityOf(cards),
 					},
 				});
-				reindexCanvasCards(id, cached.cards);
-				workspaces.set(id, { ...cached, ...wt, touchedAt: Date.now() });
+				reindexCanvasCards(id, cards);
+				workspaces.set(id, { ...cached, cards, ...wt, touchedAt: Date.now() });
 				localStorage.setItem("melon:lastCanvas", id);
 				await touchOpened();
 			}
@@ -2013,7 +2035,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			if (listRes?.ok) canvases = ((await listRes.json()) as { canvases?: CanvasMeta[] }).canvases ?? [];
 			const cv = await canvasRes.json();
 			const loaded = Array.isArray(cv.cards) ? (cv.cards as SessionCard[]) : [];
-			const cards = loaded.map((c) => (streams.has(c.id) ? c : settleTransientStatuses([c])[0]!));
+			const cards = cardsAfterColdLoad(loaded);
 			const name = (cv.name as string | undefined) ?? "Untitled";
 			const viewport = cv.viewport as CanvasState["viewport"];
 			const path = typeof cv.worktreePath === "string" ? cv.worktreePath : null;
@@ -3083,7 +3105,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						const last = msgs[msgs.length - 1];
 						if (last?.role === "assistant") msgs[msgs.length - 1] = fn(last);
 						else msgs.push(fn({ role: "assistant", text: "" }));
-						return { ...c, messages: msgs };
+						// Mid-turn deltas must heal idle after a canvas restore that
+						// reloaded disk status while this SSE was still open.
+						const status = c.status === "idle" && streams.has(cardId) ? ("streaming" as const) : c.status;
+						return { ...c, messages: msgs, status };
 					});
 				};
 				const patchLastAssistant = (fn: (m: ChatMessage) => ChatMessage, immediate = false) => {
@@ -3118,7 +3143,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 							if (i >= 0) tools[i] = { ...tools[i], ...run } as ToolRun;
 							return { ...m, tools };
 						});
-						if (found) return { ...c, messages };
+						const status = c.status === "idle" && streams.has(cardId) ? ("streaming" as const) : c.status;
+						if (found) return { ...c, messages, status };
 						// First sighting — attach to the last assistant message (or open one).
 						const msgs = [...c.messages];
 						const last = msgs[msgs.length - 1];
@@ -3137,7 +3163,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 								tools: [{ name: "tool", status: "running", output: "", ...run } as ToolRun],
 							});
 						}
-						return { ...c, messages: msgs };
+						return { ...c, messages: msgs, status };
 					});
 				};
 
