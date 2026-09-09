@@ -580,6 +580,8 @@ interface CanvasState {
 	beginCardGesture: () => void;
 	undo: () => boolean;
 	redo: () => boolean;
+	/** Drop cards from the layout undo/redo stacks (hard-deleted files must stay gone). */
+	purgeCardFromHistory: (ids: string[]) => void;
 	deleteCards: (ids: string[]) => void;
 	sendMessage: (cardId: string, text: string, opts?: { cwd?: string; sessionFile?: string }) => Promise<boolean>;
 	resumeSession: (sessionFile: string) => Promise<string | null>;
@@ -1102,7 +1104,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			);
 			const res = await fetch(`/file?cwd=${encodeURIComponent(root)}&path=${encodeURIComponent(c.documentFile)}`);
 			if (!res.ok) {
-				console.log(`[manual-refresh] refreshDocumentCard(${cardId}) fetch !ok status=${res.status} — content NOT updated`);
+				console.log(
+					`[manual-refresh] refreshDocumentCard(${cardId}) fetch !ok status=${res.status} — content NOT updated`,
+				);
 				return;
 			}
 			const d = (await res.json()) as { content: string; mtimeMs?: number };
@@ -2449,6 +2453,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		get().updateCard(id, { size: { width: Math.round(width), height: Math.round(height) } });
 	},
 
+	purgeCardFromHistory(ids) {
+		if (ids.length === 0) return;
+		const dead = new Set(ids);
+		for (const stack of [undoStack, redoStack]) {
+			for (let i = 0; i < stack.length; i++) stack[i] = stack[i].filter((c) => !dead.has(c.id));
+		}
+	},
 	deleteCards(ids) {
 		if (ids.length === 0) return;
 		pushUndo(get().cards);

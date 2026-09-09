@@ -20,6 +20,7 @@ import {
 	readdirSync,
 	readFileSync,
 	renameSync,
+	rmSync,
 	statSync,
 	watch,
 	writeFileSync,
@@ -1610,6 +1611,32 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const rel = `.melon/notes/manual/${name}`;
 		console.log(`[notes] renamed manual ${relPath} -> ${rel}`);
 		return { ok: true, relPath: rel, content: updated, mtimeMs: statSync(join(dirAbs, name)).mtimeMs };
+	});
+
+	// Delete a manual document FILE (X on a document card). Removing the file is
+	// what keeps @-mentions from resurrecting a deleted document: mentions list
+	// files from disk, so a file that's gone is gone.
+	app.post("/notes/manual/delete", async (req, reply) => {
+		const body = req.body as any;
+		let dir: string;
+		try {
+			dir = assertCwd(body?.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const relPath = String(body?.path ?? "");
+		if (!/^\.melon\/notes\/manual\/[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(relPath)) {
+			return reply.code(400).send({ error: "invalid manual path" });
+		}
+		const abs = resolveInside(dir, relPath);
+		if (!abs) return reply.code(404).send({ error: "manual not found" });
+		try {
+			rmSync(abs, { force: true });
+		} catch (e) {
+			return reply.code(500).send({ error: `could not delete manual: ${(e as Error).message}` });
+		}
+		console.log(`[notes] deleted manual ${relPath}`);
+		return { ok: true };
 	});
 
 	// ── @-mention files: fuzzy search, existence batch, guarded read ──

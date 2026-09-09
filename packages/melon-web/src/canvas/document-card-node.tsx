@@ -210,10 +210,41 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
             </button>
             <button
                 className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-red-500"
-                title="Delete document"
+                title="Delete document (removes the .md file)"
                 onClick={async () => {
                     const ok = await confirmAction({ title: 'Delete this document?' });
-                    if (ok) useCanvasStore.getState().deleteCards([id]);
+                    if (!ok) return;
+                    const st = useCanvasStore.getState();
+                    // File-backed manual: remove the .md on disk FIRST so
+                    // @-mentions (which list files from disk) never resurrect
+                    // a deleted document. 404 = file already gone — fine.
+                    if (card.documentFile) {
+                        const root = card.documentCwd ?? st.folder ?? '';
+                        try {
+                            const res = await fetch('/notes/manual/delete', {
+                                method: 'POST',
+                                headers: { 'content-type': 'application/json' },
+                                body: JSON.stringify({ cwd: root, path: card.documentFile }),
+                            });
+                            if (!res.ok && res.status !== 404) {
+                                useCanvasStore.setState({
+                                    canvasNotice: `Could not delete ${card.documentFile}.`,
+                                });
+                                return;
+                            }
+                        } catch {
+                            useCanvasStore.setState({
+                                canvasNotice: `Could not delete ${card.documentFile} (server unreachable).`,
+                            });
+                            return;
+                        }
+                    }
+                    st.deleteCards([id]);
+                    // Hard delete: the file is gone, so undo/redo must never
+                    // resurrect this card (a restored card would recreate the
+                    // .md on its next autosave). Purge AFTER deleteCards —
+                    // deleteCards pushes the pre-delete snapshot into undo.
+                    if (card.documentFile) st.purgeCardFromHistory([id]);
                 }}
             >
                 <X className="size-4" />
