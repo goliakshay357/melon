@@ -21,6 +21,7 @@ import {
 	readFileSync,
 	renameSync,
 	statSync,
+	watch,
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
@@ -174,6 +175,69 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	const registry = new SessionRegistry();
 	const cursorAttachLocks = new Map<string, Promise<void>>();
 
+	// Watch each OPEN FOLDER's .melon/notes/manual for changes and broadcast to
+	// all sessions. Manual documents are per-folder (the folder or its worktree)
+	// — a single watcher on <agentDir>/melon/notes/manual never saw real edits,
+	// because nothing ever writes there.
+	const manualWatchers = new Map<string, ReturnType<typeof watch>>(); // cwd -> FSWatcher
+	const manualDebounces = new Map<string, { timer: NodeJS.Timeout | null; pending: Set<string> }>();
+	function flushManualChanges(cwd: string): void {
+		const d = manualDebounces.get(cwd);
+		if (!d || d.pending.size === 0) return;
+		const files = Array.from(d.pending);
+		d.pending.clear();
+		d.timer = null;
+		console.log(`[melon] manual watcher (${cwd}) detected:`, files);
+		const dir = join(cwd, ".melon", "notes", "manual");
+		for (const filename of files) {
+			let mtimeMs = 0;
+			try {
+				mtimeMs = statSync(join(dir, filename)).mtimeMs;
+			} catch {
+				// Deleted or renamed — skip
+				continue;
+			}
+			const payload = JSON.stringify({
+				type: "manual_updated",
+				cwd,
+				path: `.melon/notes/manual/${filename}`,
+				mtimeMs,
+			});
+			for (const [, session] of registry.entries()) {
+				for (const client of session.clients) {
+					try {
+						client.raw.write(`data: ${payload}\n\n`);
+					} catch {
+						// Client gone — ignore
+					}
+				}
+			}
+			console.log(`[melon] manual_updated broadcast for ${cwd}: ${filename} (${mtimeMs})`);
+		}
+	}
+	function ensureManualWatcher(cwd: string): void {
+		if (!cwd || manualWatchers.has(cwd)) return;
+		const dir = join(cwd, ".melon", "notes", "manual");
+		try {
+			if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+			const w = watch(dir, { persistent: true }, (_eventType, filename) => {
+				if (!filename || !filename.endsWith(".md")) return;
+				let d = manualDebounces.get(cwd);
+				if (!d) {
+					d = { timer: null, pending: new Set() };
+					manualDebounces.set(cwd, d);
+				}
+				d.pending.add(filename);
+				if (d.timer) clearTimeout(d.timer);
+				d.timer = setTimeout(() => flushManualChanges(cwd), 100);
+			});
+			manualWatchers.set(cwd, w);
+			console.log(`[melon] manual watcher ready: ${dir}`);
+		} catch (err) {
+			console.error(`[melon] manual watcher failed for ${dir}:`, (err as Error).message);
+		}
+	}
+
 	async function withCursorAttachLocks<T>(keys: string[], run: () => Promise<T>): Promise<T> {
 		const releases: Array<() => void> = [];
 		for (const key of [...new Set(keys)].sort()) {
@@ -223,6 +287,17 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				lastCursorTurnId = cursorTurnId ?? lastCursorTurnId;
 				if (cursorTurnId === undefined) s.busy = true;
 				try {
+					// Inject context for queued prompts too
+					if (next.context) {
+						await s.runtime.session.sendCustomMessage(
+							{
+								customType: "context",
+								content: [{ type: "text", text: next.context }],
+								display: false,
+							},
+							{ deliverAs: "nextTurn" },
+						);
+					}
 					await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () =>
 						s.runtime.session.prompt(next.text, { streamingBehavior: "followUp" }),
 					);
@@ -766,6 +841,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			"create",
 			typeof body?.thinkingLevel === "string" ? body.thinkingLevel : undefined,
 		);
+		ensureManualWatcher(dir);
 		return {
 			cardId,
 			sessionId: runtime.session.sessionId,
@@ -802,11 +878,13 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			"resume",
 			typeof body?.thinkingLevel === "string" ? body.thinkingLevel : undefined,
 		);
+		const resumedCwd = String(runtime.session.sessionManager.getCwd?.() ?? "");
+		if (resumedCwd) ensureManualWatcher(resumedCwd);
 		return {
 			cardId,
 			sessionId: runtime.session.sessionId,
 			sessionFile,
-			cwd: runtime.session.sessionManager.getCwd(),
+			cwd: resumedCwd,
 			model: modelToString(runtime.session.model),
 			thinkingLevel: runtime.session.thinkingLevel,
 			thinkingLevels: runtime.session.getAvailableThinkingLevels(),
@@ -3380,7 +3458,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		if (s.busy) {
 			const text = String((req.body as any)?.text ?? "");
 			const display = String((req.body as any)?.display ?? "") || undefined;
-			s.promptQueue.push({ text, display });
+			const context = (req.body as any)?.context ?? "";
+			s.promptQueue.push({ text, display, context: context || undefined });
 			console.log(
 				`[${cardId}] queue:push "${(display ?? text).slice(0, 40)}" (queue=${JSON.stringify(queueDisplays(s.promptQueue))})`,
 			);
@@ -3395,8 +3474,19 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		registry.broadcast(cardId, { type: "raw", text: "\u2b07 prompt received by server" });
 		try {
 			const text = (req.body as any)?.text ?? "";
-			// Skills are activated via pi's native /skill: followUp on toggle —
-			// NOT appended per-prompt (that bloated the context window).
+			const context = (req.body as any)?.context ?? "";
+			// Inject diagram directives and file contents as custom context
+			// messages (not user text) so the model doesn't echo them back.
+			if (context) {
+				await s.runtime.session.sendCustomMessage(
+					{
+						customType: "context",
+						content: [{ type: "text", text: context }],
+						display: false,
+					},
+					{ deliverAs: "nextTurn" },
+				);
+			}
 			await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () =>
 				s.runtime.session.prompt(text),
 			);

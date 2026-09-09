@@ -1,10 +1,11 @@
 import { memo as ReactMemo, useCallback, useEffect, useRef, useState } from 'react';
 import { Handle, Node, NodeProps, Position, NodeResizer } from '@xyflow/react';
-import { Plus, X } from 'lucide-react';
+import { Minimize2, Plus, RefreshCw, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { DocumentEditor } from '@/components/document-editor';
 import { confirmAction } from '@/components/dialogs';
 import { cn } from '@/lib/utils';
+import { MinimizedCardBar } from './minimized-card-bar';
 
 export type DocumentCardNodeType = Node<{ cardId: string }, 'documentCard'>;
 
@@ -14,7 +15,21 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
     // Seed once per mount so store documentContent updates don't remount Milkdown
     // (which would wipe Mod-Z history on every keystroke).
     const seedRef = useRef<string | null>(null);
-    if (card && seedRef.current === null) seedRef.current = card.documentContent ?? '';
+    // Version we seeded with. An EXTERNAL refresh (agent write, watcher, or the
+    // refresh button) bumps documentVersion — the editor key changes and it WILL
+    // remount, so re-seed with the CURRENT content instead of the first seed.
+    // User typing never bumps documentVersion, so undo history stays intact.
+    const seedVersionRef = useRef<number | null>(null);
+    if (card) {
+        if (seedVersionRef.current === null) {
+            seedVersionRef.current = card.documentVersion ?? 0;
+            seedRef.current = card.documentContent ?? '';
+        } else if ((card.documentVersion ?? 0) !== seedVersionRef.current) {
+            seedVersionRef.current = card.documentVersion ?? 0;
+            seedRef.current = card.documentContent ?? '';
+        }
+    }
+
 
     // File-backed manuals: adopt disk state on mount (external editors, second
     // window) — a changed file bumps documentVersion, remounting the editor.
@@ -64,6 +79,19 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
     );
 
     if (!card) return null;
+
+    // Minimized: collapse to a title strip. The Milkdown editor unmounts, but
+    // the store owns the body, so maximizing restores the content in place.
+    if (card.minimized) {
+        return (
+            <MinimizedCardBar
+                title={card.title}
+                selected={selected}
+                leading={<span className="shrink-0 text-sm leading-none">📄</span>}
+                onMaximize={() => useCanvasStore.getState().updateCard(id, { minimized: false })}
+            />
+        );
+    }
 
     // Rename: card title follows the user — and for file-backed manuals the
     // FILE follows too (slug filename + leading H1 rewritten server-side).
@@ -145,6 +173,21 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
                     📄 {card.title}
                 </span>
             )}
+            {card.documentFile ? (
+                <button
+                    className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
+                    title="Reload this document from disk"
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        console.log(
+                            `[manual-refresh] refresh button CLICKED card=${id} docFile=${JSON.stringify(card.documentFile)} docCwd=${JSON.stringify(card.documentCwd ?? null)} folder=${JSON.stringify(useCanvasStore.getState().folder ?? null)}`,
+                        );
+                        void useCanvasStore.getState().refreshDocumentCard(id);
+                    }}
+                >
+                    <RefreshCw className="size-4" />
+                </button>
+            ) : null}
             <button
                 className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
                 onClick={(e) => {
@@ -154,6 +197,16 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
                 title="Branch a new card from here (mind map)"
             >
                 <Plus className="size-4" />
+            </button>
+            <button
+                className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
+                onClick={(e) => {
+                    e.stopPropagation();
+                    useCanvasStore.getState().updateCard(id, { minimized: true });
+                }}
+                title="Minimize to title strip"
+            >
+                <Minimize2 className="size-4" />
             </button>
             <button
                 className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-red-500"
