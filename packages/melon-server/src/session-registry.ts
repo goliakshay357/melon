@@ -1,4 +1,5 @@
 import type { FastifyReply } from "fastify";
+import { ANTIGRAVITY_PROVIDER_ID } from "./antigravity-extension.ts";
 import { CLAUDE_BRIDGE_PROVIDER_ID } from "./claude-bridge-extension.ts";
 import { CURSOR_PROVIDER_ID } from "./cursor-extension.ts";
 import type { CardExtensionUiBridge } from "./extension-ui.ts";
@@ -20,7 +21,7 @@ export interface AttachedSession {
 	/** Guards the drain loop against re-entrant agent_end triggers. */
 	draining?: boolean;
 	/**
-	 * Monotonic token for isolation-sensitive turns (Cursor, Claude bridge).
+	 * Monotonic token for isolation-sensitive turns (Cursor, Claude bridge, Antigravity).
 	 * Prevents a settled old turn mutating a newer one.
 	 */
 	isolationTurnId?: number;
@@ -58,7 +59,7 @@ function providerId(session: Pick<AttachedSession, "runtime">): string {
 /** Providers that require Melon per-card isolation (attach locks, turn tokens, …). */
 export function isIsolationSensitiveSession(session: Pick<AttachedSession, "runtime">): boolean {
 	const id = providerId(session);
-	return id === CURSOR_PROVIDER_ID || id === CLAUDE_BRIDGE_PROVIDER_ID;
+	return id === CURSOR_PROVIDER_ID || id === CLAUDE_BRIDGE_PROVIDER_ID || id === ANTIGRAVITY_PROVIDER_ID;
 }
 
 export function isCursorSession(session: Pick<AttachedSession, "runtime">): boolean {
@@ -67,6 +68,10 @@ export function isCursorSession(session: Pick<AttachedSession, "runtime">): bool
 
 export function isClaudeBridgeSession(session: Pick<AttachedSession, "runtime">): boolean {
 	return providerId(session) === CLAUDE_BRIDGE_PROVIDER_ID;
+}
+
+export function isAntigravitySession(session: Pick<AttachedSession, "runtime">): boolean {
+	return providerId(session) === ANTIGRAVITY_PROVIDER_ID;
 }
 
 /**

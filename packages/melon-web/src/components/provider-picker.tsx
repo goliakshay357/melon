@@ -5,6 +5,31 @@ import { cn } from "@/lib/utils";
 import { useCanvasStore } from "@/store/canvas-store";
 
 const CLAUDE_BRIDGE_PROVIDER_ID = "claude-bridge";
+const ANTIGRAVITY_PROVIDER_ID = "antigravity";
+
+const BROWSER_OAUTH_PROVIDERS: Record<
+	string,
+	{ loginPath: string; statusPath: string; cancelPath: string; title: string; opening: string; waiting: string; done: string }
+> = {
+	[CLAUDE_BRIDGE_PROVIDER_ID]: {
+		loginPath: "/auth/claude-bridge/login",
+		statusPath: "/auth/claude-bridge/login/status",
+		cancelPath: "/auth/claude-bridge/login/cancel",
+		title: "Log in with Claude",
+		opening: "Opening Claude sign-in…",
+		waiting: "Finish signing in in your browser. This window will update when you're done.",
+		done: "Signed in with Claude.",
+	},
+	[ANTIGRAVITY_PROVIDER_ID]: {
+		loginPath: "/auth/antigravity/login",
+		statusPath: "/auth/antigravity/login/status",
+		cancelPath: "/auth/antigravity/login/cancel",
+		title: "Log in with Google (Antigravity)",
+		opening: "Opening Google sign-in…",
+		waiting: "Finish signing in in your browser. This window will update when you're done.",
+		done: "Signed in with Antigravity.",
+	},
+};
 
 interface ProviderInfo {
 	id: string;
@@ -29,7 +54,7 @@ type ModelsResponse = {
 	};
 };
 
-type ClaudeLoginStatus = {
+type BrowserLoginStatus = {
 	phase?: "idle" | "awaiting_browser" | "done" | "error";
 	url?: string;
 	error?: string;
@@ -57,15 +82,15 @@ export function ProviderPicker({
 	onOpenChangeRef.current = onOpenChange;
 	const [providers, setProviders] = useState<ProviderInfo[]>([]);
 	const [configuring, setConfiguring] = useState<ProviderInfo | null>(null);
-	const [claudeLoginOpen, setClaudeLoginOpen] = useState(false);
-	const [claudeLoginBusy, setClaudeLoginBusy] = useState(false);
-	const [claudeLoginMessage, setClaudeLoginMessage] = useState("");
+	const [browserLoginProvider, setBrowserLoginProvider] = useState<string | null>(null);
+	const [browserLoginBusy, setBrowserLoginBusy] = useState(false);
+	const [browserLoginMessage, setBrowserLoginMessage] = useState("");
 	const [key, setKey] = useState("");
 	const [saving, setSaving] = useState(false);
 	const [error, setError] = useState("");
 	const [selectError, setSelectError] = useState("");
 	const ref = useRef<HTMLDivElement>(null);
-	const claudePollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+	const browserPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
 	const current = model.split("/")[0] ?? "";
 
@@ -75,10 +100,10 @@ export function ProviderPicker({
 			.then(setProviders)
 			.catch(() => {});
 
-	const stopClaudePoll = () => {
-		if (claudePollRef.current) {
-			clearInterval(claudePollRef.current);
-			claudePollRef.current = null;
+	const stopBrowserPoll = () => {
+		if (browserPollRef.current) {
+			clearInterval(browserPollRef.current);
+			browserPollRef.current = null;
 		}
 	};
 
@@ -86,7 +111,7 @@ export function ProviderPicker({
 		load();
 	}, []);
 
-	useEffect(() => () => stopClaudePoll(), []);
+	useEffect(() => () => stopBrowserPoll(), []);
 
 	useEffect(() => {
 		const onDown = (e: MouseEvent) => {
@@ -200,58 +225,61 @@ export function ProviderPicker({
 		load();
 	};
 
-	const startClaudeLogin = async () => {
-		setClaudeLoginOpen(true);
-		setClaudeLoginBusy(true);
-		setClaudeLoginMessage("Opening Claude sign-in…");
+	const startBrowserLogin = async (providerId: string) => {
+		const cfg = BROWSER_OAUTH_PROVIDERS[providerId];
+		if (!cfg) return;
+		setBrowserLoginProvider(providerId);
+		setBrowserLoginBusy(true);
+		setBrowserLoginMessage(cfg.opening);
 		setError("");
 		onOpenChange(false);
-		stopClaudePoll();
+		stopBrowserPoll();
 		try {
-			const res = await fetch("/auth/claude-bridge/login", { method: "POST" });
+			const res = await fetch(cfg.loginPath, { method: "POST" });
 			const d = (await res.json().catch(() => ({}))) as {
 				url?: string;
 				error?: string;
-				status?: ClaudeLoginStatus;
+				status?: BrowserLoginStatus;
 			};
 			if (!res.ok || !d.url) {
-				setClaudeLoginBusy(false);
-				setClaudeLoginMessage(d.error ?? "Could not start Claude login");
+				setBrowserLoginBusy(false);
+				setBrowserLoginMessage(d.error ?? `Could not start ${cfg.title}`);
 				return;
 			}
 			window.open(d.url, "_blank", "noopener,noreferrer");
-			setClaudeLoginMessage("Finish signing in in your browser. This window will update when you're done.");
-			claudePollRef.current = setInterval(async () => {
+			setBrowserLoginMessage(cfg.waiting);
+			browserPollRef.current = setInterval(async () => {
 				try {
-					const statusRes = await fetch("/auth/claude-bridge/login/status");
-					const status = (await statusRes.json()) as ClaudeLoginStatus;
+					const statusRes = await fetch(cfg.statusPath);
+					const status = (await statusRes.json()) as BrowserLoginStatus;
 					if (status.phase === "done") {
-						stopClaudePoll();
-						setClaudeLoginBusy(false);
-						setClaudeLoginMessage("Signed in with Claude.");
+						stopBrowserPoll();
+						setBrowserLoginBusy(false);
+						setBrowserLoginMessage(cfg.done);
 						load();
-						setTimeout(() => setClaudeLoginOpen(false), 800);
+						setTimeout(() => setBrowserLoginProvider(null), 800);
 					} else if (status.phase === "error") {
-						stopClaudePoll();
-						setClaudeLoginBusy(false);
-						setClaudeLoginMessage(status.error ?? "Claude login failed");
+						stopBrowserPoll();
+						setBrowserLoginBusy(false);
+						setBrowserLoginMessage(status.error ?? `${cfg.title} failed`);
 					}
 				} catch {
 					/* keep polling */
 				}
 			}, 1000);
 		} catch (e) {
-			setClaudeLoginBusy(false);
-			setClaudeLoginMessage(e instanceof Error ? e.message : "Network error starting Claude login");
+			setBrowserLoginBusy(false);
+			setBrowserLoginMessage(e instanceof Error ? e.message : `Network error starting ${cfg.title}`);
 		}
 	};
 
-	const cancelClaudeLogin = async () => {
-		stopClaudePoll();
-		await fetch("/auth/claude-bridge/login/cancel", { method: "POST" }).catch(() => {});
-		setClaudeLoginBusy(false);
-		setClaudeLoginOpen(false);
-		setClaudeLoginMessage("");
+	const cancelBrowserLogin = async () => {
+		const cfg = browserLoginProvider ? BROWSER_OAUTH_PROVIDERS[browserLoginProvider] : undefined;
+		stopBrowserPoll();
+		if (cfg) await fetch(cfg.cancelPath, { method: "POST" }).catch(() => {});
+		setBrowserLoginBusy(false);
+		setBrowserLoginProvider(null);
+		setBrowserLoginMessage("");
 	};
 
 	return (
@@ -316,21 +344,21 @@ export function ProviderPicker({
 							<button
 								className="shrink-0 rounded p-1 text-muted-foreground hover:bg-background hover:text-foreground"
 								title={
-									p.id === CLAUDE_BRIDGE_PROVIDER_ID
+									BROWSER_OAUTH_PROVIDERS[p.id]
 										? p.configured
-											? "Log out of Claude"
-											: "Log in with Claude"
+											? `Log out of ${p.id === ANTIGRAVITY_PROVIDER_ID ? "Antigravity" : "Claude"}`
+											: BROWSER_OAUTH_PROVIDERS[p.id]!.title
 										: p.configured
 											? "Re-key"
 											: "Configure key"
 								}
 								onClick={(e) => {
 									e.stopPropagation();
-									if (p.id === CLAUDE_BRIDGE_PROVIDER_ID) {
+									if (BROWSER_OAUTH_PROVIDERS[p.id]) {
 										if (p.configured) {
 											void removeKey(p);
 										} else {
-											void startClaudeLogin();
+											void startBrowserLogin(p.id);
 										}
 										return;
 									}
@@ -340,7 +368,7 @@ export function ProviderPicker({
 									onOpenChange(false);
 								}}
 							>
-								{p.id === CLAUDE_BRIDGE_PROVIDER_ID ? (
+								{BROWSER_OAUTH_PROVIDERS[p.id] ? (
 									<LogIn className="size-3" />
 								) : (
 									<KeyRound className="size-3" />
@@ -352,9 +380,9 @@ export function ProviderPicker({
 			)}
 
 			<RadixDialog.Root
-				open={claudeLoginOpen}
+				open={browserLoginProvider !== null}
 				onOpenChange={(o) => {
-					if (!o) void cancelClaudeLogin();
+					if (!o) void cancelBrowserLogin();
 				}}
 			>
 				<RadixDialog.Portal>
@@ -364,17 +392,18 @@ export function ProviderPicker({
 						onKeyDown={(e) => e.stopPropagation()}
 					>
 						<RadixDialog.Title className="text-sm font-semibold text-card-foreground">
-							Log in with Claude
+							{(browserLoginProvider && BROWSER_OAUTH_PROVIDERS[browserLoginProvider]?.title) ||
+								"Browser sign-in"}
 						</RadixDialog.Title>
 						<RadixDialog.Description className="mt-2 text-xs text-muted-foreground">
-							{claudeLoginMessage || "Sign in with your Claude account in the browser."}
+							{browserLoginMessage || "Sign in in your browser."}
 						</RadixDialog.Description>
 						<div className="mt-4 flex justify-end gap-2">
 							<button
 								className="rounded-lg px-3 py-1.5 text-xs text-muted-foreground hover:bg-secondary"
-								onClick={() => void cancelClaudeLogin()}
+								onClick={() => void cancelBrowserLogin()}
 							>
-								{claudeLoginBusy ? "Cancel" : "Close"}
+								{browserLoginBusy ? "Cancel" : "Close"}
 							</button>
 						</div>
 					</RadixDialog.Content>

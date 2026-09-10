@@ -98,3 +98,29 @@ if (claudeBridgeMissing.length > 0) {
 	process.exit(1);
 }
 console.log("OK: @fractaal/pi-claude-bridge deps and peers resolve from desktop/node_modules");
+
+// Same peer-install gap for pi-antigravity (Google Antigravity provider).
+const antigravityPkgPath = join(root, "desktop/node_modules/pi-antigravity/package.json");
+if (!existsSync(antigravityPkgPath)) {
+	console.error("pi-antigravity missing from desktop/node_modules — add it to desktop/package.json and npm install");
+	process.exit(1);
+}
+const antigravityPkg = JSON.parse(readFileSync(antigravityPkgPath, "utf8"));
+const antigravityRequires = {
+	...(antigravityPkg.dependencies ?? {}),
+	...(antigravityPkg.peerDependencies ?? {}),
+};
+const antigravityMissing = [];
+for (const name of Object.keys(antigravityRequires)) {
+	const inDesktopRoot = existsSync(join(root, "desktop/node_modules", name));
+	const inNested = existsSync(join(root, "desktop/node_modules/pi-antigravity/node_modules", name));
+	if (!inDesktopRoot && !inNested) antigravityMissing.push(name);
+}
+if (antigravityMissing.length > 0) {
+	console.error("pi-antigravity runtime deps/peers must resolve from desktop/node_modules:");
+	for (const name of antigravityMissing) {
+		console.error(`  missing ${name} — add it to desktop/package.json dependencies`);
+	}
+	process.exit(1);
+}
+console.log("OK: pi-antigravity deps and peers resolve from desktop/node_modules");

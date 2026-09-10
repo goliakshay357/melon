@@ -44,6 +44,25 @@ import {
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyPluginAsync } from "fastify";
+import {
+	ANTIGRAVITY_PROVIDER_ID,
+	antigravityExtensionEntryPath,
+	antigravitySessionIsolationAvailable,
+	getAntigravityCatalogStatus,
+	hasAntigravityAuth,
+	loadAntigravityProviderInto,
+} from "./antigravity-extension.ts";
+import {
+	cancelAntigravityLogin,
+	getAntigravityLoginStatus,
+	logoutAntigravity,
+	startAntigravityLogin,
+	waitAntigravityLogin,
+} from "./antigravity-login.ts";
+import {
+	runInBoundAntigravitySession,
+	stripAntigravitySessionEntriesFromSessionFile,
+} from "./antigravity-session-binding.ts";
 import { inspectCanvasShare, shareCanvasWork } from "./canvas-share.ts";
 import {
 	CLAUDE_BRIDGE_PROVIDER_ID,
@@ -147,16 +166,17 @@ function httpError(statusCode: number, message: string): Error & { statusCode: n
 	return Object.assign(new Error(message), { statusCode });
 }
 
-/** Providers that need Melon per-card isolation (Cursor, Claude Code). */
+/** Providers that need Melon per-card isolation (Cursor, Claude Code, Antigravity). */
 function isIsolationProviderId(provider: string): boolean {
 	const id = provider.toLowerCase();
-	return id === CURSOR_PROVIDER_ID || id === CLAUDE_BRIDGE_PROVIDER_ID;
+	return id === CURSOR_PROVIDER_ID || id === CLAUDE_BRIDGE_PROVIDER_ID || id === ANTIGRAVITY_PROVIDER_ID;
 }
 
 function providerLabel(provider: string): string {
 	const id = provider.toLowerCase();
 	if (id === CURSOR_PROVIDER_ID) return "Cursor";
 	if (id === CLAUDE_BRIDGE_PROVIDER_ID) return "Claude Code";
+	if (id === ANTIGRAVITY_PROVIDER_ID) return "Antigravity";
 	return provider;
 }
 
@@ -203,6 +223,15 @@ async function getModelRuntime(): Promise<ModelRuntime> {
 				console.warn("[melon] claude-bridge: unexpected load failure:", message);
 			}
 		}
+		try {
+			await loadAntigravityProviderInto(_modelRuntime);
+		} catch (e) {
+			const message = (e as Error)?.message ?? String(e);
+			console.error("[melon] antigravity provider load failed (continuing without it):", message);
+			if (!getAntigravityCatalogStatus().issues.some((i) => i.includes(message))) {
+				console.warn("[melon] antigravity: unexpected load failure:", message);
+			}
+		}
 	}
 	return _modelRuntime;
 }
@@ -216,6 +245,10 @@ function bundledSessionExtensionPaths(): string[] {
 	if (claudeBridgeSessionIsolationAvailable()) {
 		const isolated = claudeBridgeIsolatedExtensionPath();
 		if (isolated) paths.push(isolated);
+	}
+	if (antigravitySessionIsolationAvailable()) {
+		const entry = antigravityExtensionEntryPath();
+		if (entry) paths.push(entry);
 	}
 	return paths;
 }
@@ -337,6 +370,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			// Inject Melon OAuth + PATH so Claude Code spawn uses Melon login.
 			applyClaudeBridgeRuntimeEnv();
 			return runInBoundClaudeBridgeSession(runtime, options, run);
+		}
+		if (provider === ANTIGRAVITY_PROVIDER_ID) {
+			return runInBoundAntigravitySession(runtime, options, run);
 		}
 		return run();
 	}
@@ -545,7 +581,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const [wantedProvider, wantedId] = splitModel(wanted);
 		const wantsCursor = wantedProvider.toLowerCase() === CURSOR_PROVIDER_ID;
 		const wantsClaudeBridge = wantedProvider.toLowerCase() === CLAUDE_BRIDGE_PROVIDER_ID;
-		const wantsIsolation = wantsCursor || wantsClaudeBridge;
+		const wantsAntigravity = wantedProvider.toLowerCase() === ANTIGRAVITY_PROVIDER_ID;
+		const wantsIsolation = wantsCursor || wantsClaudeBridge || wantsAntigravity;
 
 		if (wantsCursor && !cursorSessionIsolationAvailable()) {
 			throw httpError(
@@ -561,13 +598,20 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				throw httpError(503, message);
 			}
 		}
+		if (wantsAntigravity && !antigravitySessionIsolationAvailable()) {
+			throw httpError(
+				503,
+				"Antigravity is unavailable because its bundled extension entry is missing. Reinstall desktop dependencies and restart Melon.",
+			);
+		}
 
 		const incomingSessionFile = sessionManager.getSessionFile?.() as string | undefined;
 		const existing = registry.get(cardId);
 		const existingProvider = (existing?.runtime.session.model?.provider ?? "").toLowerCase();
 		const existingIsCursor = existingProvider === CURSOR_PROVIDER_ID;
 		const existingIsClaudeBridge = existingProvider === CLAUDE_BRIDGE_PROVIDER_ID;
-		const existingIsIsolation = existingIsCursor || existingIsClaudeBridge;
+		const existingIsAntigravity = existingProvider === ANTIGRAVITY_PROVIDER_ID;
+		const existingIsIsolation = existingIsCursor || existingIsClaudeBridge || existingIsAntigravity;
 		const existingSessionFile = existing?.runtime.session.sessionManager.getSessionFile?.() as string | undefined;
 
 		// SSE reconnects call /sessions/resume. For a live isolation-sensitive card
@@ -1088,6 +1132,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				`[melon] fork ${parentCardId}→${newCardId}: stripped ${strippedClaude} claude-bridge session marker(s) from child session`,
 			);
 		}
+		const strippedAntigravity = stripAntigravitySessionEntriesFromSessionFile(childSessionFile);
+		if (strippedAntigravity > 0) {
+			console.log(
+				`[melon] fork ${parentCardId}→${newCardId}: stripped ${strippedAntigravity} antigravity session marker(s) from child session`,
+			);
+		}
 
 		// fork() leaves this runtime attached to the child file. Dispose that
 		// temporary isolation-sensitive owner before creating the child's permanent
@@ -1114,6 +1164,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			parentSessionFile,
 			strippedCursorResumeEntries: strippedCursor,
 			strippedClaudeBridgeSessionEntries: strippedClaude,
+			strippedAntigravitySessionEntries: strippedAntigravity,
 		};
 	});
 
@@ -3097,6 +3148,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const providerKey = provider.toLowerCase();
 		const wantsCursor = !provider || providerKey === CURSOR_PROVIDER_ID;
 		const wantsClaudeBridge = !provider || providerKey === CLAUDE_BRIDGE_PROVIDER_ID;
+		const wantsAntigravity = !provider || providerKey === ANTIGRAVITY_PROVIDER_ID;
 		const cursor = wantsCursor ? getCursorCatalogStatus() : undefined;
 		const claudeBridgeCatalog = wantsClaudeBridge ? getClaudeBridgeCatalogStatus() : undefined;
 		const claudeBridgeRuntime = wantsClaudeBridge ? getClaudeBridgeRuntimeStatus() : undefined;
@@ -3106,7 +3158,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					runtime: claudeBridgeRuntime,
 				}
 			: undefined;
-		// Empty Cursor / Claude bridge lists are almost always load/isolation/auth — surface it.
+		const antigravity = wantsAntigravity ? getAntigravityCatalogStatus() : undefined;
+		// Empty Cursor / Claude / Antigravity lists are almost always load/isolation/auth — surface it.
 		const error =
 			providerKey === CURSOR_PROVIDER_ID && models.length === 0
 				? (cursor?.issues[0] ?? "No Cursor models available")
@@ -3114,12 +3167,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					? (claudeBridgeCatalog?.issues[0] ?? "No Claude Code models available")
 					: providerKey === CLAUDE_BRIDGE_PROVIDER_ID && claudeBridgeRuntime && !claudeBridgeRuntime.ready
 						? claudeBridgeRuntime.issues[0]
-						: undefined;
+						: providerKey === ANTIGRAVITY_PROVIDER_ID && models.length === 0
+							? (antigravity?.issues[0] ?? "No Antigravity models available")
+							: undefined;
 		return {
 			models,
 			total: models.length,
 			...(cursor ? { cursor } : {}),
 			...(claudeBridge ? { claudeBridge } : {}),
+			...(antigravity ? { antigravity } : {}),
 			...(error ? { error } : {}),
 		};
 	});
@@ -3358,10 +3414,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		// Always list bundled providers so a failed catalog load is visible in the picker.
 		allProviderIds.add(CURSOR_PROVIDER_ID);
 		allProviderIds.add(CLAUDE_BRIDGE_PROVIDER_ID);
+		allProviderIds.add(ANTIGRAVITY_PROVIDER_ID);
 
 		const cursorStatus = getCursorCatalogStatus();
 		const claudeBridgeStatus = getClaudeBridgeCatalogStatus();
 		const claudeBridgeRuntime = getClaudeBridgeRuntimeStatus();
+		const antigravityStatus = getAntigravityCatalogStatus();
 		const result: Array<{
 			id: string;
 			provider: string;
@@ -3396,13 +3454,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				}
 			}
 
-			// Cursor / Claude bridge register placeholder apiKeys — report real auth.
+			// Cursor / Claude / Antigravity — report Melon-owned auth, not placeholder keys.
 			const configured =
 				pid === CURSOR_PROVIDER_ID
 					? hasRealCursorKey(authEntries, melonKeys)
 					: pid === CLAUDE_BRIDGE_PROVIDER_ID
 						? hasClaudeBridgeAuth(authEntries)
-						: !!status.configured;
+						: pid === ANTIGRAVITY_PROVIDER_ID
+							? hasAntigravityAuth(authEntries)
+							: !!status.configured;
 
 			const error =
 				pid === CURSOR_PROVIDER_ID && (!cursorStatus.loaded || cursorStatus.issues.length > 0)
@@ -3414,7 +3474,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 							? "Log in with Claude in the browser"
 							: pid === CLAUDE_BRIDGE_PROVIDER_ID && configured && !claudeBridgeRuntime.ready
 								? claudeBridgeRuntime.issues[0]
-								: undefined;
+								: pid === ANTIGRAVITY_PROVIDER_ID &&
+										(!antigravityStatus.loaded || antigravityStatus.issues.length > 0)
+									? antigravityStatus.issues[0]
+									: pid === ANTIGRAVITY_PROVIDER_ID && !configured
+										? "Log in with Google for Antigravity"
+										: undefined;
 
 			result.push({
 				id: pid,
@@ -3439,6 +3504,11 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		if (provider === CLAUDE_BRIDGE_PROVIDER_ID) {
 			return reply.code(400).send({
 				error: "Claude Code uses browser login. Use POST /auth/claude-bridge/login instead of an API key.",
+			});
+		}
+		if (provider === ANTIGRAVITY_PROVIDER_ID) {
+			return reply.code(400).send({
+				error: "Antigravity uses browser login. Use POST /auth/antigravity/login instead of an API key.",
 			});
 		}
 		const key = (req.body as any)?.key;
@@ -3515,10 +3585,47 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { ok: true, status: getClaudeBridgeLoginStatus() };
 	});
 
+	// Antigravity: Google OAuth in the system browser.
+	app.post("/auth/antigravity/login", async (_req, reply) => {
+		try {
+			const { url } = await startAntigravityLogin(getModelRuntime);
+			return { ok: true, url, status: getAntigravityLoginStatus() };
+		} catch (e) {
+			const message = e instanceof Error ? e.message : String(e);
+			return reply.code(500).send({ error: message, status: getAntigravityLoginStatus() });
+		}
+	});
+
+	app.get("/auth/antigravity/login/status", async () => getAntigravityLoginStatus());
+
+	app.post("/auth/antigravity/login/wait", async (_req, reply) => {
+		try {
+			const status = await waitAntigravityLogin();
+			if (status.phase === "error") {
+				return reply.code(500).send({ error: status.error ?? "Antigravity login failed", status });
+			}
+			return { ok: status.phase === "done", status };
+		} catch (e) {
+			return reply.code(500).send({
+				error: e instanceof Error ? e.message : String(e),
+				status: getAntigravityLoginStatus(),
+			});
+		}
+	});
+
+	app.post("/auth/antigravity/login/cancel", async () => {
+		cancelAntigravityLogin();
+		return { ok: true, status: getAntigravityLoginStatus() };
+	});
+
 	app.delete("/auth/:provider", async (req) => {
 		const provider = (req.params as any).provider;
 		if (provider === CLAUDE_BRIDGE_PROVIDER_ID) {
 			await logoutClaudeBridge(getModelRuntime);
+			return { ok: true };
+		}
+		if (provider === ANTIGRAVITY_PROVIDER_ID) {
+			await logoutAntigravity(getModelRuntime);
 			return { ok: true };
 		}
 		await (await getModelRuntime()).removeRuntimeApiKey(provider);
