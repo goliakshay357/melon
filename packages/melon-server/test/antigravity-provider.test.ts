@@ -92,6 +92,17 @@ describe("getAntigravityCatalogStatus", () => {
 	});
 });
 
+describe("loadAntigravityOAuthModule", () => {
+	it("loads OAuth helpers from pi-antigravity TypeScript under node_modules", async () => {
+		if (!antigravitySessionIsolationAvailable()) return;
+		const { loadAntigravityOAuthModule } = await import("../src/antigravity-extension.ts");
+		const oauth = await loadAntigravityOAuthModule();
+		expect(typeof oauth.loginAntigravity).toBe("function");
+		expect(typeof oauth.refreshAntigravityToken).toBe("function");
+		expect(typeof oauth.getApiKey).toBe("function");
+	});
+});
+
 describe("loadAntigravityProviderInto", () => {
 	it("registers antigravity into ModelRuntime when the package is present", async () => {
 		if (!antigravitySessionIsolationAvailable()) return;

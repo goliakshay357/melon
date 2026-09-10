@@ -16,6 +16,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { createJiti } from "jiti/static";
 
 const moduleDir = dirname(fileURLToPath(import.meta.url));
 
@@ -200,22 +201,46 @@ type AntigravityOAuthModule = {
 
 let oauthModulePromise: Promise<AntigravityOAuthModule> | null = null;
 
-/** Load OAuth helpers from the bundled package (TypeScript source entry). */
+/**
+ * Load OAuth helpers from the bundled package.
+ *
+ * `pi-antigravity` ships TypeScript under `node_modules`. Node's native type
+ * stripping refuses that path ("Stripping types is currently unsupported for
+ * files under node_modules"), which left Melon with "Unknown provider:
+ * antigravity" on login. Load `.ts` via jiti — same approach as pi's extension
+ * loader. Prefer a `.js` build if one exists.
+ */
 export function loadAntigravityOAuthModule(): Promise<AntigravityOAuthModule> {
 	if (!oauthModulePromise) {
 		oauthModulePromise = (async () => {
-			const root = antigravityExtensionPath();
-			if (!root) {
-				throw new Error("Antigravity unavailable: pi-antigravity is not installed in this Melon build.");
+			try {
+				const root = antigravityExtensionPath();
+				if (!root) {
+					throw new Error("Antigravity unavailable: pi-antigravity is not installed in this Melon build.");
+				}
+				const oauthTs = join(root, "src", "auth", "oauth.ts");
+				const oauthJs = join(root, "src", "auth", "oauth.js");
+				const path = existsSync(oauthJs) ? oauthJs : existsSync(oauthTs) ? oauthTs : null;
+				if (!path) {
+					throw new Error("Antigravity package is missing src/auth/oauth.(js|ts).");
+				}
+
+				let mod: AntigravityOAuthModule;
+				if (path.endsWith(".ts")) {
+					const jiti = createJiti(import.meta.url, { moduleCache: false });
+					mod = (await jiti.import(path)) as AntigravityOAuthModule;
+				} else {
+					mod = (await import(pathToFileURL(path).href)) as AntigravityOAuthModule;
+				}
+				if (typeof mod.loginAntigravity !== "function" || typeof mod.getApiKey !== "function") {
+					throw new Error("Antigravity package is missing OAuth login helpers.");
+				}
+				return mod;
+			} catch (error) {
+				// Allow a later retry after install/rebuild; do not cache a rejection forever.
+				oauthModulePromise = null;
+				throw error;
 			}
-			const oauthTs = join(root, "src", "auth", "oauth.ts");
-			const oauthJs = join(root, "src", "auth", "oauth.js");
-			const href = pathToFileURL(existsSync(oauthTs) ? oauthTs : oauthJs).href;
-			const mod = (await import(href)) as AntigravityOAuthModule;
-			if (typeof mod.loginAntigravity !== "function" || typeof mod.getApiKey !== "function") {
-				throw new Error("Antigravity package is missing OAuth login helpers.");
-			}
-			return mod;
 		})();
 	}
 	return oauthModulePromise;
