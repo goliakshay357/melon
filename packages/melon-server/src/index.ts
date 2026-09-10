@@ -110,6 +110,7 @@ import { runInBoundCursorSession, stripCursorResumeEntriesFromSessionFile } from
 import { CardExtensionUiBridge } from "./extension-ui.ts";
 import { fileExists, noteFiles, readTextFile, resolveInside, searchFiles } from "./files.ts";
 import { fuzzyScore } from "./fuzzy.ts";
+import { melonAskQuestionExtensionPath } from "./melon-ask-question.ts";
 import { createDeltaPump, createNoteJob, emitNoteJob, getNoteJob } from "./note-jobs.ts";
 import {
 	createManual,
@@ -239,6 +240,8 @@ async function getModelRuntime(): Promise<ModelRuntime> {
 /** Bundled provider extensions for session runtimes (picker + session catalogs match). */
 function bundledSessionExtensionPaths(): string[] {
 	const paths: string[] = [];
+	const askQuestion = melonAskQuestionExtensionPath();
+	if (askQuestion) paths.push(askQuestion);
 	if (cursorSessionIsolationAvailable() && cursorExtensionPath()) {
 		paths.push(cursorExtensionPath()!);
 	}
@@ -450,6 +453,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		"- If a task seems to require changing Melon itself (rare), ask the user first.",
 		"",
 		"Asking the user a question (always apply — ask_question, select, confirm, options, Cursor questions):",
+		"- On Claude Code / Antigravity / other non-Cursor cards: call the ask_question tool so Melon shows the card question panel. Do not invent a silent default when a material choice is needed.",
+		"- On Cursor cards: use pi__cursor_ask_question / cursor_ask_question when exposed.",
 		"- Write like you're talking to a smart friend who is new here. Short. Everyday words. No AI-slop.",
 		"- Question: one clear sentence. Ask what you need them to pick — not a design review.",
 		"- Option labels: what happens if they pick it, in plain words (about a dozen words max).",
