@@ -15,6 +15,13 @@ const serverProc = spawn(
     {
         env: {
             ...process.env,
+            // GUI apps often inherit a thin PATH; Claude Code commonly lives in ~/.local/bin.
+            PATH: [
+                join(homedir(), '.local', 'bin'),
+                '/opt/homebrew/bin',
+                '/usr/local/bin',
+                process.env.PATH || '',
+            ].filter(Boolean).join(':'),
             ELECTRON_RUN_AS_NODE: '1',
             MELON_PORT: '0',
             MELON_CODING_AGENT_DIR: MELON_AGENT_DIR,

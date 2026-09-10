@@ -269,8 +269,8 @@ export async function loadClaudeBridgeProviderInto(runtime: ModelRuntime): Promi
 
 /**
  * True when Melon has Claude subscription credentials usable for Claude Code.
- * Browser login wiring comes next; until then Anthropic OAuth (Pro/Max) in
- * auth.json counts, as does an explicit claude-bridge oauth entry.
+ * Melon browser login stores OAuth under `claude-bridge` and/or `anthropic`;
+ * applyClaudeBridgeRuntimeEnv exports the access token as CLAUDE_CODE_OAUTH_TOKEN.
  */
 export function hasClaudeBridgeAuth(authEntries: Record<string, unknown>): boolean {
 	const bridge = authEntries[CLAUDE_BRIDGE_PROVIDER_ID] as

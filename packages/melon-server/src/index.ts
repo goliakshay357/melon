@@ -61,6 +61,11 @@ import {
 	waitClaudeBridgeLogin,
 } from "./claude-bridge-login.ts";
 import {
+	applyClaudeBridgeRuntimeEnv,
+	getClaudeBridgeRuntimeStatus,
+	requireClaudeBridgeRuntimeReady,
+} from "./claude-bridge-runtime.ts";
+import {
 	runInBoundClaudeBridgeSession,
 	stripClaudeBridgeSessionEntriesFromSessionFile,
 } from "./claude-bridge-session-binding.ts";
@@ -221,6 +226,8 @@ export interface MelonServerDeps {
 
 export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInstance> {
 	const config = loadConfig(deps.config);
+	// Claude Code: GUI PATH is often thin — lift ~/.local/bin etc. and inject Melon OAuth.
+	applyClaudeBridgeRuntimeEnv();
 	// Canvas PUT sends the full card transcript as one JSON body. Fastify's
 	// default 1 MiB bodyLimit returns 413 once a canvas grows past that.
 	const CANVAS_BODY_LIMIT = 10 * 1024 * 1024; // 10 MiB
@@ -327,6 +334,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			return runInBoundCursorSession(runtime, options, run);
 		}
 		if (provider === CLAUDE_BRIDGE_PROVIDER_ID) {
+			// Inject Melon OAuth + PATH so Claude Code spawn uses Melon login.
+			applyClaudeBridgeRuntimeEnv();
 			return runInBoundClaudeBridgeSession(runtime, options, run);
 		}
 		return run();
@@ -544,11 +553,13 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				"Cursor is unavailable because its per-card isolation patch is missing. Reinstall desktop dependencies and restart Melon.",
 			);
 		}
-		if (wantsClaudeBridge && !claudeBridgeSessionIsolationAvailable()) {
-			throw httpError(
-				503,
-				"Claude Code is unavailable because its isolated bridge entry is missing. Reinstall desktop dependencies and restart Melon.",
-			);
+		if (wantsClaudeBridge) {
+			try {
+				requireClaudeBridgeRuntimeReady();
+			} catch (e) {
+				const message = e instanceof Error ? e.message : String(e);
+				throw httpError(503, message);
+			}
 		}
 
 		const incomingSessionFile = sessionManager.getSessionFile?.() as string | undefined;
@@ -3087,14 +3098,23 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const wantsCursor = !provider || providerKey === CURSOR_PROVIDER_ID;
 		const wantsClaudeBridge = !provider || providerKey === CLAUDE_BRIDGE_PROVIDER_ID;
 		const cursor = wantsCursor ? getCursorCatalogStatus() : undefined;
-		const claudeBridge = wantsClaudeBridge ? getClaudeBridgeCatalogStatus() : undefined;
+		const claudeBridgeCatalog = wantsClaudeBridge ? getClaudeBridgeCatalogStatus() : undefined;
+		const claudeBridgeRuntime = wantsClaudeBridge ? getClaudeBridgeRuntimeStatus() : undefined;
+		const claudeBridge = claudeBridgeCatalog
+			? {
+					...claudeBridgeCatalog,
+					runtime: claudeBridgeRuntime,
+				}
+			: undefined;
 		// Empty Cursor / Claude bridge lists are almost always load/isolation/auth — surface it.
 		const error =
 			providerKey === CURSOR_PROVIDER_ID && models.length === 0
 				? (cursor?.issues[0] ?? "No Cursor models available")
 				: providerKey === CLAUDE_BRIDGE_PROVIDER_ID && models.length === 0
-					? (claudeBridge?.issues[0] ?? "No Claude Code models available")
-					: undefined;
+					? (claudeBridgeCatalog?.issues[0] ?? "No Claude Code models available")
+					: providerKey === CLAUDE_BRIDGE_PROVIDER_ID && claudeBridgeRuntime && !claudeBridgeRuntime.ready
+						? claudeBridgeRuntime.issues[0]
+						: undefined;
 		return {
 			models,
 			total: models.length,
@@ -3341,6 +3361,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 
 		const cursorStatus = getCursorCatalogStatus();
 		const claudeBridgeStatus = getClaudeBridgeCatalogStatus();
+		const claudeBridgeRuntime = getClaudeBridgeRuntimeStatus();
 		const result: Array<{
 			id: string;
 			provider: string;
@@ -3391,7 +3412,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 						? claudeBridgeStatus.issues[0]
 						: pid === CLAUDE_BRIDGE_PROVIDER_ID && !configured
 							? "Log in with Claude in the browser"
-							: undefined;
+							: pid === CLAUDE_BRIDGE_PROVIDER_ID && configured && !claudeBridgeRuntime.ready
+								? claudeBridgeRuntime.issues[0]
+								: undefined;
 
 			result.push({
 				id: pid,
@@ -3475,7 +3498,10 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			if (status.phase === "error") {
 				return reply.code(500).send({ error: status.error ?? "Claude login failed", status });
 			}
-			return { ok: status.phase === "done", status };
+			if (status.phase === "done") {
+				applyClaudeBridgeRuntimeEnv();
+			}
+			return { ok: status.phase === "done", status, runtime: getClaudeBridgeRuntimeStatus() };
 		} catch (e) {
 			return reply.code(500).send({
 				error: e instanceof Error ? e.message : String(e),
