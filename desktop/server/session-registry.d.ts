@@ -16,9 +16,16 @@ export interface AttachedSession {
     promptQueue: QueuedPrompt[];
     /** Guards the drain loop against re-entrant agent_end triggers. */
     draining?: boolean;
-    /** Monotonic token for Cursor turns; prevents a settled old turn mutating a newer one. */
+    /**
+     * Monotonic token for isolation-sensitive turns (Cursor, Claude bridge, Antigravity).
+     * Prevents a settled old turn mutating a newer one.
+     */
+    isolationTurnId?: number;
+    /** Isolation-sensitive turn explicitly stopped by the user; queue stays paused. */
+    isolationAbortedTurnId?: number;
+    /** @deprecated Use isolationTurnId — kept as alias for older call sites/tests. */
     cursorTurnId?: number;
-    /** Cursor turn explicitly stopped by the user; its queue must remain paused. */
+    /** @deprecated Use isolationAbortedTurnId. */
     cursorAbortedTurnId?: number;
     /** Extension UI (select/confirm/input) → Melon card question panel. */
     extensionUi?: CardExtensionUiBridge;
@@ -33,14 +40,30 @@ export interface AttachedSession {
 export interface QueuedPrompt {
     text: string;
     display?: string;
+    context?: string;
 }
 export declare function queueDisplays(queue: QueuedPrompt[]): string[];
+/** Providers that require Melon per-card isolation (attach locks, turn tokens, …). */
+export declare function isIsolationSensitiveSession(session: Pick<AttachedSession, "runtime">): boolean;
 export declare function isCursorSession(session: Pick<AttachedSession, "runtime">): boolean;
-/** Claim a Cursor card synchronously before prompt() can yield. */
-export declare function beginCursorTurn(session: Pick<AttachedSession, "runtime" | "busy" | "cursorTurnId">): number | undefined;
-export declare function abortCurrentCursorTurn(session: Pick<AttachedSession, "runtime" | "cursorTurnId" | "cursorAbortedTurnId">): void;
-export declare function isCursorTurnAborted(session: Pick<AttachedSession, "cursorAbortedTurnId">, turnId: number): boolean;
-export declare function isCurrentCursorTurn(session: Pick<AttachedSession, "cursorTurnId">, turnId: number): boolean;
+export declare function isClaudeBridgeSession(session: Pick<AttachedSession, "runtime">): boolean;
+export declare function isAntigravitySession(session: Pick<AttachedSession, "runtime">): boolean;
+/**
+ * Claim an isolation-sensitive card synchronously before prompt() can yield.
+ * Returns undefined for ordinary providers (caller sets busy itself).
+ */
+export declare function beginIsolationTurn(session: Pick<AttachedSession, "runtime" | "busy" | "isolationTurnId" | "cursorTurnId">): number | undefined;
+/** @deprecated Prefer beginIsolationTurn — Cursor-named alias. */
+export declare function beginCursorTurn(session: Pick<AttachedSession, "runtime" | "busy" | "isolationTurnId" | "cursorTurnId">): number | undefined;
+export declare function abortCurrentIsolationTurn(session: Pick<AttachedSession, "runtime" | "isolationTurnId" | "isolationAbortedTurnId" | "cursorTurnId" | "cursorAbortedTurnId">): void;
+/** @deprecated Prefer abortCurrentIsolationTurn. */
+export declare function abortCurrentCursorTurn(session: Pick<AttachedSession, "runtime" | "isolationTurnId" | "isolationAbortedTurnId" | "cursorTurnId" | "cursorAbortedTurnId">): void;
+export declare function isIsolationTurnAborted(session: Pick<AttachedSession, "isolationAbortedTurnId" | "cursorAbortedTurnId">, turnId: number): boolean;
+/** @deprecated Prefer isIsolationTurnAborted. */
+export declare function isCursorTurnAborted(session: Pick<AttachedSession, "isolationAbortedTurnId" | "cursorAbortedTurnId">, turnId: number): boolean;
+export declare function isCurrentIsolationTurn(session: Pick<AttachedSession, "isolationTurnId" | "cursorTurnId">, turnId: number): boolean;
+/** @deprecated Prefer isCurrentIsolationTurn. */
+export declare function isCurrentCursorTurn(session: Pick<AttachedSession, "isolationTurnId" | "cursorTurnId">, turnId: number): boolean;
 export declare class SessionRegistry {
     private readonly sessions;
     set(cardId: string, session: AttachedSession): void;
