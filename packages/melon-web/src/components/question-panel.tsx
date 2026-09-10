@@ -144,7 +144,18 @@ export function QuestionPanel({
                         onKeyDown={(e) => {
                             if (e.key === 'Escape') {
                                 e.preventDefault();
+                                e.stopPropagation();
                                 respond({ id: pending.id, cancelled: true });
+                            }
+                            if (e.key === 'Enter') {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                const trimmed = custom.trim();
+                                if (!trimmed) {
+                                    respond({ id: pending.id, cancelled: true });
+                                    return;
+                                }
+                                respond({ id: pending.id, value: trimmed });
                             }
                         }}
                     />

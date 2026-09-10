@@ -1682,13 +1682,16 @@ function ChatCardNodeInner({
                 onScroll={(e) => handleMessagesScroll(e.currentTarget)}
                 className={cn(
                     'nodrag nowheel h-full cursor-default select-text overflow-y-auto',
-                    opts?.roomy ? 'py-5' : 'space-y-4 px-4 py-3',
+                    // Vertical padding on the scroller; space-y on the inner
+                    // column so user/thinking blocks get the same gaps as tools.
+                    opts?.roomy ? 'py-5' : 'px-4 py-3',
                 )}
             >
                 <div
                     className={cn(
+                        'space-y-4',
                         opts?.roomy &&
-                            'mx-auto w-full max-w-[72rem] space-y-4 px-5 sm:px-8 lg:px-10',
+                            'mx-auto w-full max-w-[72rem] px-5 sm:px-8 lg:px-10',
                     )}
                 >
                     {card.messages.length === 0 && !streaming && (

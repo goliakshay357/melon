@@ -1,8 +1,35 @@
 import { useEffect, useRef, useState } from "react";
 import * as RadixDialog from "@radix-ui/react-dialog";
-import { Check, ChevronDown, KeyRound, Settings2 } from "lucide-react";
+import { Check, ChevronDown, KeyRound, LogIn, Settings2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useCanvasStore } from "@/store/canvas-store";
+
+const CLAUDE_BRIDGE_PROVIDER_ID = "claude-bridge";
+const ANTIGRAVITY_PROVIDER_ID = "antigravity";
+
+const BROWSER_OAUTH_PROVIDERS: Record<
+	string,
+	{ loginPath: string; statusPath: string; cancelPath: string; title: string; opening: string; waiting: string; done: string }
+> = {
+	[CLAUDE_BRIDGE_PROVIDER_ID]: {
+		loginPath: "/auth/claude-bridge/login",
+		statusPath: "/auth/claude-bridge/login/status",
+		cancelPath: "/auth/claude-bridge/login/cancel",
+		title: "Log in with Claude",
+		opening: "Opening Claude sign-in…",
+		waiting: "Finish signing in in your browser. This window will update when you're done.",
+		done: "Signed in with Claude.",
+	},
+	[ANTIGRAVITY_PROVIDER_ID]: {
+		loginPath: "/auth/antigravity/login",
+		statusPath: "/auth/antigravity/login/status",
+		cancelPath: "/auth/antigravity/login/cancel",
+		title: "Log in with Google (Antigravity)",
+		opening: "Opening Google sign-in…",
+		waiting: "Finish signing in in your browser. This window will update when you're done.",
+		done: "Signed in with Antigravity.",
+	},
+};
 
 interface ProviderInfo {
 	id: string;
@@ -27,6 +54,12 @@ type ModelsResponse = {
 	};
 };
 
+type BrowserLoginStatus = {
+	phase?: "idle" | "awaiting_browser" | "done" | "error";
+	url?: string;
+	error?: string;
+};
+
 /**
  * Provider dropdown with configure/re-key inline (Radix dialog, no window.prompt).
  * Selecting a provider switches the card model to that provider's first model.
@@ -49,11 +82,15 @@ export function ProviderPicker({
 	onOpenChangeRef.current = onOpenChange;
 	const [providers, setProviders] = useState<ProviderInfo[]>([]);
 	const [configuring, setConfiguring] = useState<ProviderInfo | null>(null);
+	const [browserLoginProvider, setBrowserLoginProvider] = useState<string | null>(null);
+	const [browserLoginBusy, setBrowserLoginBusy] = useState(false);
+	const [browserLoginMessage, setBrowserLoginMessage] = useState("");
 	const [key, setKey] = useState("");
 	const [saving, setSaving] = useState(false);
 	const [error, setError] = useState("");
 	const [selectError, setSelectError] = useState("");
 	const ref = useRef<HTMLDivElement>(null);
+	const browserPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
 	const current = model.split("/")[0] ?? "";
 
@@ -63,9 +100,18 @@ export function ProviderPicker({
 			.then(setProviders)
 			.catch(() => {});
 
+	const stopBrowserPoll = () => {
+		if (browserPollRef.current) {
+			clearInterval(browserPollRef.current);
+			browserPollRef.current = null;
+		}
+	};
+
 	useEffect(() => {
 		load();
 	}, []);
+
+	useEffect(() => () => stopBrowserPoll(), []);
 
 	useEffect(() => {
 		const onDown = (e: MouseEvent) => {
@@ -179,6 +225,63 @@ export function ProviderPicker({
 		load();
 	};
 
+	const startBrowserLogin = async (providerId: string) => {
+		const cfg = BROWSER_OAUTH_PROVIDERS[providerId];
+		if (!cfg) return;
+		setBrowserLoginProvider(providerId);
+		setBrowserLoginBusy(true);
+		setBrowserLoginMessage(cfg.opening);
+		setError("");
+		onOpenChange(false);
+		stopBrowserPoll();
+		try {
+			const res = await fetch(cfg.loginPath, { method: "POST" });
+			const d = (await res.json().catch(() => ({}))) as {
+				url?: string;
+				error?: string;
+				status?: BrowserLoginStatus;
+			};
+			if (!res.ok || !d.url) {
+				setBrowserLoginBusy(false);
+				setBrowserLoginMessage(d.error ?? `Could not start ${cfg.title}`);
+				return;
+			}
+			window.open(d.url, "_blank", "noopener,noreferrer");
+			setBrowserLoginMessage(cfg.waiting);
+			browserPollRef.current = setInterval(async () => {
+				try {
+					const statusRes = await fetch(cfg.statusPath);
+					const status = (await statusRes.json()) as BrowserLoginStatus;
+					if (status.phase === "done") {
+						stopBrowserPoll();
+						setBrowserLoginBusy(false);
+						setBrowserLoginMessage(cfg.done);
+						load();
+						setTimeout(() => setBrowserLoginProvider(null), 800);
+					} else if (status.phase === "error") {
+						stopBrowserPoll();
+						setBrowserLoginBusy(false);
+						setBrowserLoginMessage(status.error ?? `${cfg.title} failed`);
+					}
+				} catch {
+					/* keep polling */
+				}
+			}, 1000);
+		} catch (e) {
+			setBrowserLoginBusy(false);
+			setBrowserLoginMessage(e instanceof Error ? e.message : `Network error starting ${cfg.title}`);
+		}
+	};
+
+	const cancelBrowserLogin = async () => {
+		const cfg = browserLoginProvider ? BROWSER_OAUTH_PROVIDERS[browserLoginProvider] : undefined;
+		stopBrowserPoll();
+		if (cfg) await fetch(cfg.cancelPath, { method: "POST" }).catch(() => {});
+		setBrowserLoginBusy(false);
+		setBrowserLoginProvider(null);
+		setBrowserLoginMessage("");
+	};
+
 	return (
 		<div ref={ref} data-melon-picker-root className="relative">
 			<button
@@ -240,21 +343,72 @@ export function ProviderPicker({
 							)}
 							<button
 								className="shrink-0 rounded p-1 text-muted-foreground hover:bg-background hover:text-foreground"
-								title={p.configured ? "Re-key" : "Configure key"}
+								title={
+									BROWSER_OAUTH_PROVIDERS[p.id]
+										? p.configured
+											? `Log out of ${p.id === ANTIGRAVITY_PROVIDER_ID ? "Antigravity" : "Claude"}`
+											: BROWSER_OAUTH_PROVIDERS[p.id]!.title
+										: p.configured
+											? "Re-key"
+											: "Configure key"
+								}
 								onClick={(e) => {
 									e.stopPropagation();
+									if (BROWSER_OAUTH_PROVIDERS[p.id]) {
+										if (p.configured) {
+											void removeKey(p);
+										} else {
+											void startBrowserLogin(p.id);
+										}
+										return;
+									}
 									setConfiguring(p);
 									setKey("");
 									setError("");
 									onOpenChange(false);
 								}}
 							>
-								<KeyRound className="size-3" />
+								{BROWSER_OAUTH_PROVIDERS[p.id] ? (
+									<LogIn className="size-3" />
+								) : (
+									<KeyRound className="size-3" />
+								)}
 							</button>
 						</div>
 					))}
 				</div>
 			)}
+
+			<RadixDialog.Root
+				open={browserLoginProvider !== null}
+				onOpenChange={(o) => {
+					if (!o) void cancelBrowserLogin();
+				}}
+			>
+				<RadixDialog.Portal>
+					<RadixDialog.Overlay className="fixed inset-0 z-[1000] bg-black/60" />
+					<RadixDialog.Content
+						className="fixed left-1/2 top-1/2 z-[1001] w-[420px] -translate-x-1/2 -translate-y-1/2 rounded-xl border border-border bg-card p-5 shadow-2xl focus:outline-none"
+						onKeyDown={(e) => e.stopPropagation()}
+					>
+						<RadixDialog.Title className="text-sm font-semibold text-card-foreground">
+							{(browserLoginProvider && BROWSER_OAUTH_PROVIDERS[browserLoginProvider]?.title) ||
+								"Browser sign-in"}
+						</RadixDialog.Title>
+						<RadixDialog.Description className="mt-2 text-xs text-muted-foreground">
+							{browserLoginMessage || "Sign in in your browser."}
+						</RadixDialog.Description>
+						<div className="mt-4 flex justify-end gap-2">
+							<button
+								className="rounded-lg px-3 py-1.5 text-xs text-muted-foreground hover:bg-secondary"
+								onClick={() => void cancelBrowserLogin()}
+							>
+								{browserLoginBusy ? "Cancel" : "Close"}
+							</button>
+						</div>
+					</RadixDialog.Content>
+				</RadixDialog.Portal>
+			</RadixDialog.Root>
 
 			<RadixDialog.Root
 				open={configuring !== null}
