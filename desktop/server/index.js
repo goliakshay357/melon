@@ -12,7 +12,7 @@
 //   POST /sessions/:cardId/extension-ui  {id, value|confirmed|cancelled}
 //   POST /sessions/:cardId/abort
 import { randomUUID } from "node:crypto";
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync, } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, watch, writeFileSync, } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,16 +21,24 @@ import { createAgentSessionFromServices, createAgentSessionRuntime, createAgentS
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
+import { ANTIGRAVITY_PROVIDER_ID, antigravityExtensionEntryPath, antigravitySessionIsolationAvailable, getAntigravityCatalogStatus, hasAntigravityAuth, loadAntigravityProviderInto, } from "./antigravity-extension.js";
+import { cancelAntigravityLogin, getAntigravityLoginStatus, logoutAntigravity, startAntigravityLogin, waitAntigravityLogin, } from "./antigravity-login.js";
+import { runInBoundAntigravitySession, stripAntigravitySessionEntriesFromSessionFile, } from "./antigravity-session-binding.js";
 import { inspectCanvasShare, shareCanvasWork } from "./canvas-share.js";
+import { CLAUDE_BRIDGE_PROVIDER_ID, claudeBridgeIsolatedExtensionPath, claudeBridgeSessionIsolationAvailable, getClaudeBridgeCatalogStatus, hasClaudeBridgeAuth, loadClaudeBridgeProviderInto, } from "./claude-bridge-extension.js";
+import { cancelClaudeBridgeLogin, getClaudeBridgeLoginStatus, logoutClaudeBridge, startClaudeBridgeLogin, waitClaudeBridgeLogin, } from "./claude-bridge-login.js";
+import { applyClaudeBridgeRuntimeEnv, getClaudeBridgeRuntimeStatus, requireClaudeBridgeRuntimeReady, } from "./claude-bridge-runtime.js";
+import { runInBoundClaudeBridgeSession, stripClaudeBridgeSessionEntriesFromSessionFile, } from "./claude-bridge-session-binding.js";
 import { expandHome, loadConfig, modelToString, preview, structuredToolArgs, toolTextPreview, } from "./config.js";
 import { CURSOR_PROVIDER_ID, cursorExtensionPath, cursorSessionIsolationAvailable, getCursorCatalogStatus, hasRealCursorKey, loadCursorProviderInto, rewriteCursorError, } from "./cursor-extension.js";
 import { runInBoundCursorSession, stripCursorResumeEntriesFromSessionFile } from "./cursor-session-binding.js";
 import { CardExtensionUiBridge } from "./extension-ui.js";
 import { fileExists, noteFiles, readTextFile, resolveInside, searchFiles } from "./files.js";
 import { fuzzyScore } from "./fuzzy.js";
+import { melonAskQuestionExtensionPath } from "./melon-ask-question.js";
 import { createDeltaPump, createNoteJob, emitNoteJob, getNoteJob } from "./note-jobs.js";
 import { createManual, hashBody, isValidNoteId, listNotes, listTrashedNotes, loadNote, newNoteId, notePath, parseNote, renameNoteFile, restoreNote, saveNote, slugifyTitle, snapshotRevision, trashNote, uniqueHandoffFileName, wireIsStale, } from "./notes.js";
-import { abortCurrentCursorTurn, beginCursorTurn, isCurrentCursorTurn, isCursorSession, isCursorTurnAborted, queueDisplays, SessionRegistry, } from "./session-registry.js";
+import { abortCurrentIsolationTurn, beginIsolationTurn, isCurrentIsolationTurn, isIsolationSensitiveSession, isIsolationTurnAborted, queueDisplays, SessionRegistry, } from "./session-registry.js";
 import { clearProviderDenylist, denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel, } from "./settings.js";
 import { deleteSkill, loadSkills, materializeSkills, readSkill, saveSkill } from "./skills.js";
 import { isMutationTool, mutationDiffOutput, readFileSnapshot, resolveToolPath } from "./tool-diff.js";
@@ -46,6 +54,21 @@ function splitModel(model) {
 }
 function httpError(statusCode, message) {
     return Object.assign(new Error(message), { statusCode });
+}
+/** Providers that need Melon per-card isolation (Cursor, Claude Code, Antigravity). */
+function isIsolationProviderId(provider) {
+    const id = provider.toLowerCase();
+    return id === CURSOR_PROVIDER_ID || id === CLAUDE_BRIDGE_PROVIDER_ID || id === ANTIGRAVITY_PROVIDER_ID;
+}
+function providerLabel(provider) {
+    const id = provider.toLowerCase();
+    if (id === CURSOR_PROVIDER_ID)
+        return "Cursor";
+    if (id === CLAUDE_BRIDGE_PROVIDER_ID)
+        return "Claude Code";
+    if (id === ANTIGRAVITY_PROVIDER_ID)
+        return "Antigravity";
+    return provider;
 }
 /**
  * Product version shown in Settings and stamped into release artifacts.
@@ -71,8 +94,8 @@ let _modelRuntime;
 async function getModelRuntime() {
     if (!_modelRuntime) {
         _modelRuntime = await ModelRuntime.create();
-        // Register bundled extension providers (cursor) so the GUI pickers see
-        // them. Fail-open — builtin providers must work even if this fails.
+        // Register bundled extension providers (cursor, claude-bridge) so the GUI
+        // pickers see them. Fail-open — builtin providers must work even if this fails.
         try {
             await loadCursorProviderInto(_modelRuntime);
         }
@@ -84,87 +107,146 @@ async function getModelRuntime() {
                 console.warn("[melon] cursor: unexpected load failure:", message);
             }
         }
+        try {
+            await loadClaudeBridgeProviderInto(_modelRuntime);
+        }
+        catch (e) {
+            const message = e?.message ?? String(e);
+            console.error("[melon] claude-bridge provider load failed (continuing without it):", message);
+            if (!getClaudeBridgeCatalogStatus().issues.some((i) => i.includes(message))) {
+                console.warn("[melon] claude-bridge: unexpected load failure:", message);
+            }
+        }
+        try {
+            await loadAntigravityProviderInto(_modelRuntime);
+        }
+        catch (e) {
+            const message = e?.message ?? String(e);
+            console.error("[melon] antigravity provider load failed (continuing without it):", message);
+            if (!getAntigravityCatalogStatus().issues.some((i) => i.includes(message))) {
+                console.warn("[melon] antigravity: unexpected load failure:", message);
+            }
+        }
     }
     return _modelRuntime;
 }
+/** Bundled provider extensions for session runtimes (picker + session catalogs match). */
+function bundledSessionExtensionPaths() {
+    const paths = [];
+    const askQuestion = melonAskQuestionExtensionPath();
+    if (askQuestion)
+        paths.push(askQuestion);
+    if (cursorSessionIsolationAvailable() && cursorExtensionPath()) {
+        paths.push(cursorExtensionPath());
+    }
+    if (claudeBridgeSessionIsolationAvailable()) {
+        const isolated = claudeBridgeIsolatedExtensionPath();
+        if (isolated)
+            paths.push(isolated);
+    }
+    if (antigravitySessionIsolationAvailable()) {
+        const entry = antigravityExtensionEntryPath();
+        if (entry)
+            paths.push(entry);
+    }
+    return paths;
+}
 export async function buildApp(deps = {}) {
     const config = loadConfig(deps.config);
+    // Claude Code: GUI PATH is often thin — lift ~/.local/bin etc. and inject Melon OAuth.
+    applyClaudeBridgeRuntimeEnv();
     // Canvas PUT sends the full card transcript as one JSON body. Fastify's
     // default 1 MiB bodyLimit returns 413 once a canvas grows past that.
     const CANVAS_BODY_LIMIT = 10 * 1024 * 1024; // 10 MiB
     const app = Fastify({ logger: false, bodyLimit: CANVAS_BODY_LIMIT });
     await app.register(cors, { origin: true });
     const registry = new SessionRegistry();
-    const cursorAttachLocks = new Map();
-
-    // Watch for manual document changes and broadcast to all sessions
-    try {
-        const { watch, statSync } = await import("node:fs");
-        const manualsDir = join(getAgentDir(), "melon", "notes", "manual");
-        let manualWatcher = null;
-        let debounceTimer = null;
-        let pendingFiles = new Set();
-
-        function flushManualChanges() {
-            if (pendingFiles.size === 0) return;
-            const files = Array.from(pendingFiles);
-            pendingFiles.clear();
-            console.log("[melon] manual file watcher: detected changes in", files);
-            for (const filename of files) {
-                const filePath = join(manualsDir, filename);
-                let mtimeMs = 0;
-                try {
-                    mtimeMs = statSync(filePath).mtimeMs;
-                } catch {
-                    // File deleted or renamed — skip
-                    continue;
-                }
-                // Broadcast to all sessions
-                for (const session of registry.sessions.values()) {
-                    for (const client of session.clients) {
-                        try {
-                            client.raw.write(`data: ${JSON.stringify({
-                                type: "manual_updated",
-                                path: ".melon/notes/manual/" + filename,
-                                mtimeMs: mtimeMs
-                            })}\n\n`);
-                        } catch {
-                            // Client gone — ignore
-                        }
+    const sessionAttachLocks = new Map();
+    // Watch each OPEN FOLDER's .melon/notes/manual for changes and broadcast to
+    // all sessions. Manual documents are per-folder (the folder or its worktree)
+    // — a single watcher on <agentDir>/melon/notes/manual never saw real edits,
+    // because nothing ever writes there.
+    const manualWatchers = new Map(); // cwd -> FSWatcher
+    const manualDebounces = new Map();
+    function flushManualChanges(cwd) {
+        const d = manualDebounces.get(cwd);
+        if (!d || d.pending.size === 0)
+            return;
+        const files = Array.from(d.pending);
+        d.pending.clear();
+        d.timer = null;
+        console.log(`[melon] manual watcher (${cwd}) detected:`, files);
+        const dir = join(cwd, ".melon", "notes", "manual");
+        for (const filename of files) {
+            let mtimeMs = 0;
+            try {
+                mtimeMs = statSync(join(dir, filename)).mtimeMs;
+            }
+            catch {
+                // Deleted or renamed — skip
+                continue;
+            }
+            const payload = JSON.stringify({
+                type: "manual_updated",
+                cwd,
+                path: `.melon/notes/manual/${filename}`,
+                mtimeMs,
+            });
+            for (const [, session] of registry.entries()) {
+                for (const client of session.clients) {
+                    try {
+                        client.raw.write(`data: ${payload}\n\n`);
+                    }
+                    catch {
+                        // Client gone — ignore
                     }
                 }
             }
+            console.log(`[melon] manual_updated broadcast for ${cwd}: ${filename} (${mtimeMs})`);
         }
-
-        try {
-            if (!existsSync(manualsDir)) mkdirSync(manualsDir, { recursive: true });
-            manualWatcher = watch(manualsDir, { persistent: true }, (eventType, filename) => {
-                if (!filename || !filename.endsWith(".md")) return;
-                pendingFiles.add(filename);
-                if (debounceTimer) clearTimeout(debounceTimer);
-                debounceTimer = setTimeout(flushManualChanges, 100);
-            });
-        } catch (err) {
-            console.error("[melon] manual file watcher failed:", err.message);
-        }
-    } catch (err) {
-        console.error("[melon] manual file watcher setup failed:", err.message);
     }
-    async function withCursorAttachLocks(keys, run) {
+    function ensureManualWatcher(cwd) {
+        if (!cwd || manualWatchers.has(cwd))
+            return;
+        const dir = join(cwd, ".melon", "notes", "manual");
+        try {
+            if (!existsSync(dir))
+                mkdirSync(dir, { recursive: true });
+            const w = watch(dir, { persistent: true }, (_eventType, filename) => {
+                if (!filename || !filename.endsWith(".md"))
+                    return;
+                let d = manualDebounces.get(cwd);
+                if (!d) {
+                    d = { timer: null, pending: new Set() };
+                    manualDebounces.set(cwd, d);
+                }
+                d.pending.add(filename);
+                if (d.timer)
+                    clearTimeout(d.timer);
+                d.timer = setTimeout(() => flushManualChanges(cwd), 100);
+            });
+            manualWatchers.set(cwd, w);
+            console.log(`[melon] manual watcher ready: ${dir}`);
+        }
+        catch (err) {
+            console.error(`[melon] manual watcher failed for ${dir}:`, err.message);
+        }
+    }
+    async function withSessionAttachLocks(keys, run) {
         const releases = [];
         for (const key of [...new Set(keys)].sort()) {
-            const previous = cursorAttachLocks.get(key) ?? Promise.resolve();
+            const previous = sessionAttachLocks.get(key) ?? Promise.resolve();
             let release;
             const current = new Promise((resolve) => {
                 release = resolve;
             });
             const queued = previous.then(() => current);
-            cursorAttachLocks.set(key, queued);
+            sessionAttachLocks.set(key, queued);
             await previous;
             releases.push(() => {
                 release();
-                if (cursorAttachLocks.get(key) === queued)
-                    cursorAttachLocks.delete(key);
+                if (sessionAttachLocks.get(key) === queued)
+                    sessionAttachLocks.delete(key);
             });
         }
         try {
@@ -174,6 +256,22 @@ export async function buildApp(deps = {}) {
             for (const release of releases.reverse())
                 release();
         }
+    }
+    /** Cursor ALS host session and/or Claude bridge re-bind before prompt(). */
+    async function runInBoundIsolationSession(runtime, options, run) {
+        const provider = (runtime.session.model?.provider ?? "").toLowerCase();
+        if (provider === CURSOR_PROVIDER_ID) {
+            return runInBoundCursorSession(runtime, options, run);
+        }
+        if (provider === CLAUDE_BRIDGE_PROVIDER_ID) {
+            // Inject Melon OAuth + PATH so Claude Code spawn uses Melon login.
+            applyClaudeBridgeRuntimeEnv();
+            return runInBoundClaudeBridgeSession(runtime, options, run);
+        }
+        if (provider === ANTIGRAVITY_PROVIDER_ID) {
+            return runInBoundAntigravitySession(runtime, options, run);
+        }
+        return run();
     }
     /**
      * Drain a card's server-owned prompt queue. Queued prompts never enter
@@ -186,7 +284,7 @@ export async function buildApp(deps = {}) {
         if (!s || s.draining || s.promptQueue.length === 0)
             return;
         s.draining = true;
-        let lastCursorTurnId;
+        let lastIsolationTurnId;
         const run = async () => {
             while (s.promptQueue.length > 0) {
                 const next = s.promptQueue.shift();
@@ -196,20 +294,21 @@ export async function buildApp(deps = {}) {
                 // event is the moment the text actually reaches the model. The
                 // user bubble shows the DISPLAY text (model directives stay hidden).
                 registry.broadcast(cardId, { type: "user_message", text: next.display ?? next.text });
-                const cursorTurnId = beginCursorTurn(s);
-                lastCursorTurnId = cursorTurnId ?? lastCursorTurnId;
-                if (cursorTurnId === undefined)
+                const isolationTurnId = beginIsolationTurn(s);
+                lastIsolationTurnId = isolationTurnId ?? lastIsolationTurnId;
+                if (isolationTurnId === undefined)
                     s.busy = true;
                 try {
                     // Inject context for queued prompts too
                     if (next.context) {
-                        await s.runtime.session.sendCustomMessage(
-                            { customType: "context", content: [{ type: "text", text: next.context }], display: false },
-                            { deliverAs: "nextTurn" },
-                        );
+                        await s.runtime.session.sendCustomMessage({
+                            customType: "context",
+                            content: [{ type: "text", text: next.context }],
+                            display: false,
+                        }, { deliverAs: "nextTurn" });
                     }
-                    await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => s.runtime.session.prompt(next.text, { streamingBehavior: "followUp" }));
-                    if (cursorTurnId !== undefined && isCursorTurnAborted(s, cursorTurnId))
+                    await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => s.runtime.session.prompt(next.text, { streamingBehavior: "followUp" }));
+                    if (isolationTurnId !== undefined && isIsolationTurnAborted(s, isolationTurnId))
                         return;
                 }
                 catch (e) {
@@ -225,9 +324,9 @@ export async function buildApp(deps = {}) {
         };
         void run().finally(() => {
             s.draining = false;
-            // A newer Cursor turn may already own the card after agent_end. An
-            // older queue drain must not mark that newer turn idle.
-            if (lastCursorTurnId === undefined || isCurrentCursorTurn(s, lastCursorTurnId))
+            // A newer isolation-sensitive turn may already own the card after agent_end.
+            // An older queue drain must not mark that newer turn idle.
+            if (lastIsolationTurnId === undefined || isCurrentIsolationTurn(s, lastIsolationTurnId))
                 s.busy = false;
         });
     }
@@ -244,6 +343,8 @@ export async function buildApp(deps = {}) {
         "- If a task seems to require changing Melon itself (rare), ask the user first.",
         "",
         "Asking the user a question (always apply — ask_question, select, confirm, options, Cursor questions):",
+        "- On Claude Code / Antigravity / other non-Cursor cards: call the ask_question tool so Melon shows the card question panel. Do not invent a silent default when a material choice is needed.",
+        "- On Cursor cards: use pi__cursor_ask_question / cursor_ask_question when exposed.",
         "- Write like you're talking to a smart friend who is new here. Short. Everyday words. No AI-slop.",
         "- Question: one clear sentence. Ask what you need them to pick — not a design review.",
         "- Option labels: what happens if they pick it, in plain words (about a dozen words max).",
@@ -283,16 +384,15 @@ export async function buildApp(deps = {}) {
             // Keep the agent OUT of its own installation. One-time system-prompt
             // addition (not per-prompt, no context bloat).
             const appendSystemPromptOverride = (base) => [...base, MELON_GUARDRAIL];
+            const bundledExtensions = bundledSessionExtensionPaths();
             const services = await createAgentSessionServices({
                 cwd,
                 resourceLoaderOptions: {
                     skillsOverride,
                     appendSystemPromptOverride,
-                    // Bundled provider extensions (cursor) — same extension the GUI
-                    // runtime loads, so session model lists match the picker.
-                    ...(cursorSessionIsolationAvailable() && cursorExtensionPath()
-                        ? { additionalExtensionPaths: [cursorExtensionPath()] }
-                        : {}),
+                    // Bundled provider extensions (cursor, claude-bridge isolated) —
+                    // session model lists match the GUI pickers.
+                    ...(bundledExtensions.length > 0 ? { additionalExtensionPaths: bundledExtensions } : {}),
                 },
             });
             return {
@@ -330,68 +430,91 @@ export async function buildApp(deps = {}) {
     }
     async function attachSession(cardId, sessionManager, explicitModel, skills = [], mode = "replace", explicitThinkingLevel) {
         const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
-        const wantsCursor = splitModel(wanted)[0].toLowerCase() === CURSOR_PROVIDER_ID;
-        const existingIsCursor = (registry.get(cardId)?.runtime.session.model?.provider ?? "").toLowerCase() === CURSOR_PROVIDER_ID;
-        if (!wantsCursor && !existingIsCursor) {
+        const wantedProvider = splitModel(wanted)[0].toLowerCase();
+        const existingProvider = (registry.get(cardId)?.runtime.session.model?.provider ?? "").toLowerCase();
+        const needsIsolationLocks = isIsolationProviderId(wantedProvider) || isIsolationProviderId(existingProvider);
+        if (!needsIsolationLocks) {
             return attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode, explicitThinkingLevel);
         }
         const sessionFile = sessionManager.getSessionFile?.();
-        return withCursorAttachLocks([`card:${cardId}`, ...(sessionFile ? [`session:${sessionFile}`] : [])], () => attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode, explicitThinkingLevel));
+        return withSessionAttachLocks([`card:${cardId}`, ...(sessionFile ? [`session:${sessionFile}`] : [])], () => attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode, explicitThinkingLevel));
     }
     async function attachSessionUnlocked(cardId, sessionManager, explicitModel, skills = [], mode = "replace", explicitThinkingLevel) {
         const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
         const [wantedProvider, wantedId] = splitModel(wanted);
         const wantsCursor = wantedProvider.toLowerCase() === CURSOR_PROVIDER_ID;
+        const wantsClaudeBridge = wantedProvider.toLowerCase() === CLAUDE_BRIDGE_PROVIDER_ID;
+        const wantsAntigravity = wantedProvider.toLowerCase() === ANTIGRAVITY_PROVIDER_ID;
+        const wantsIsolation = wantsCursor || wantsClaudeBridge || wantsAntigravity;
         if (wantsCursor && !cursorSessionIsolationAvailable()) {
             throw httpError(503, "Cursor is unavailable because its per-card isolation patch is missing. Reinstall desktop dependencies and restart Melon.");
         }
+        if (wantsClaudeBridge) {
+            try {
+                requireClaudeBridgeRuntimeReady();
+            }
+            catch (e) {
+                const message = e instanceof Error ? e.message : String(e);
+                throw httpError(503, message);
+            }
+        }
+        if (wantsAntigravity && !antigravitySessionIsolationAvailable()) {
+            throw httpError(503, "Antigravity is unavailable because its bundled extension entry is missing. Reinstall desktop dependencies and restart Melon.");
+        }
         const incomingSessionFile = sessionManager.getSessionFile?.();
         const existing = registry.get(cardId);
-        const existingIsCursor = (existing?.runtime.session.model?.provider ?? "").toLowerCase() === CURSOR_PROVIDER_ID;
+        const existingProvider = (existing?.runtime.session.model?.provider ?? "").toLowerCase();
+        const existingIsCursor = existingProvider === CURSOR_PROVIDER_ID;
+        const existingIsClaudeBridge = existingProvider === CLAUDE_BRIDGE_PROVIDER_ID;
+        const existingIsAntigravity = existingProvider === ANTIGRAVITY_PROVIDER_ID;
+        const existingIsIsolation = existingIsCursor || existingIsClaudeBridge || existingIsAntigravity;
         const existingSessionFile = existing?.runtime.session.sessionManager.getSessionFile?.();
-        // SSE reconnects call /sessions/resume. For a live Cursor card this must
-        // reconnect to the existing runtime, not create a second runtime writing
-        // the same jsonl and broadcasting under the same card id.
+        // SSE reconnects call /sessions/resume. For a live isolation-sensitive card
+        // this must reconnect to the existing runtime, not create a second runtime
+        // writing the same jsonl and broadcasting under the same card id.
         if (existing &&
-            existingIsCursor &&
-            wantsCursor &&
+            existingIsIsolation &&
+            wantsIsolation &&
+            existingProvider === wantedProvider.toLowerCase() &&
             (mode === "create" || existingSessionFile === incomingSessionFile)) {
             return existing.runtime;
         }
-        // A Cursor SDK agent pool and bridge are keyed by session file. Two live
-        // cards owning the same file would therefore defeat per-card isolation.
+        // Cursor / Claude bridge sessions are keyed by session file. Two live
+        // cards owning the same file would defeat per-card isolation.
         // Check first so a rejected move leaves this card's current runtime alive.
-        if (wantsCursor && incomingSessionFile) {
+        if (wantsIsolation && incomingSessionFile) {
             for (const [ownerCardId, attached] of registry.entries()) {
                 if (ownerCardId === cardId)
                     continue;
-                const ownerIsCursor = (attached.runtime.session.model?.provider ?? "").toLowerCase() === CURSOR_PROVIDER_ID;
+                const ownerProvider = (attached.runtime.session.model?.provider ?? "").toLowerCase();
+                if (ownerProvider !== wantedProvider.toLowerCase())
+                    continue;
                 const ownerSessionFile = attached.runtime.session.sessionManager.getSessionFile?.();
-                if (ownerIsCursor && ownerSessionFile === incomingSessionFile) {
-                    throw httpError(409, `Cursor session is already open in card ${ownerCardId}`);
+                if (ownerSessionFile === incomingSessionFile) {
+                    throw httpError(409, `${providerLabel(wantedProvider)} session is already open in card ${ownerCardId}`);
                 }
             }
         }
-        // Only change replacement behavior when Cursor is involved. Other
-        // providers retain their existing attach/resume semantics.
-        if (existing && (existingIsCursor || wantsCursor)) {
+        // Only change replacement behavior when an isolation-sensitive provider
+        // is involved. Other providers retain their existing attach/resume semantics.
+        if (existing && (existingIsIsolation || wantsIsolation)) {
             existing.extensionUi?.cancelAll();
             if (existing.busy) {
                 try {
                     await existing.runtime.session.abort();
                 }
                 catch (e) {
-                    console.error(`[${cardId}] Cursor runtime replacement abort failed:`, e.message);
+                    console.error(`[${cardId}] ${providerLabel(existingProvider || wantedProvider)} runtime replacement abort failed:`, e.message);
                 }
             }
             await existing.runtime.dispose();
             if (registry.get(cardId) === existing)
                 registry.delete(cardId);
         }
-        // Load the GUI ModelRuntime (Cursor provider catalog) before the session
+        // Load the GUI ModelRuntime (bundled provider catalogs) before the session
         // extension factory so picker models are ready. Session load registers
-        // that card's pi tool bridge; Melon's multicard SDK patch keeps sibling
-        // bridges alive when later cards also load Cursor.
+        // that card's extension runner; Cursor's multicard patch / Claude's isolated
+        // entry keep sibling cards from sharing process-global bridge state.
         await getModelRuntime();
         const { runtime, extensionUi } = await createRuntimeFor(sessionManager, skills, cardId);
         try {
@@ -726,6 +849,7 @@ export async function buildApp(deps = {}) {
             ? body.skills.filter((x) => typeof x === "string")
             : [];
         const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model, skills, "create", typeof body?.thinkingLevel === "string" ? body.thinkingLevel : undefined);
+        ensureManualWatcher(dir);
         return {
             cardId,
             sessionId: runtime.session.sessionId,
@@ -756,11 +880,14 @@ export async function buildApp(deps = {}) {
             }
         }
         const runtime = await attachSession(cardId, SessionManager.open(sessionFile, undefined, cwdOverride), body?.model, skills, "resume", typeof body?.thinkingLevel === "string" ? body.thinkingLevel : undefined);
+        const resumedCwd = String(runtime.session.sessionManager.getCwd?.() ?? "");
+        if (resumedCwd)
+            ensureManualWatcher(resumedCwd);
         return {
             cardId,
             sessionId: runtime.session.sessionId,
             sessionFile,
-            cwd: runtime.session.sessionManager.getCwd(),
+            cwd: resumedCwd,
             model: modelToString(runtime.session.model),
             thinkingLevel: runtime.session.thinkingLevel,
             thinkingLevels: runtime.session.getAvailableThinkingLevels(),
@@ -817,10 +944,11 @@ export async function buildApp(deps = {}) {
     // Child becomes a live session under newCardId; the parent keeps its own
     // runtime re-opened on its original file.
     //
-    // Cursor: the branched jsonl copies `cursor-sdk-agent-resume` handles. In
-    // Melon's multi-card process those make the child resume the parent's
-    // Cursor agent. Strip them, then reopen both cards as distinct runtimes so
-    // the child bootstraps a NEW Cursor agent from the inherited transcript.
+    // Cursor: the branched jsonl copies `cursor-sdk-agent-resume` handles.
+    // Claude bridge: copies `claude-bridge-session` markers. In Melon's multi-
+    // card process those make the child resume the parent's remote agent.
+    // Strip them, then reopen both cards as distinct runtimes so the child
+    // bootstraps a NEW agent from the inherited transcript.
     app.post("/sessions/:cardId/fork", async (req, reply) => {
         const parentCardId = req.params.cardId;
         const body = req.body;
@@ -847,6 +975,7 @@ export async function buildApp(deps = {}) {
         const leaf = s.runtime.session.sessionManager.getLeafEntry();
         const parentModel = modelToString(s.runtime.session.model);
         const parentSkills = s.activeSkills ?? [];
+        const parentProvider = splitModel(parentModel)[0].toLowerCase();
         const res = await s.runtime.fork(leaf?.id ?? "", { position: "at" });
         if (res.cancelled)
             return reply.code(409).send({ error: "fork cancelled" });
@@ -854,14 +983,22 @@ export async function buildApp(deps = {}) {
         if (!childSessionFile) {
             return reply.code(500).send({ error: "fork produced no child session file" });
         }
-        const stripped = stripCursorResumeEntriesFromSessionFile(childSessionFile);
-        if (stripped > 0) {
-            console.log(`[melon] fork ${parentCardId}→${newCardId}: stripped ${stripped} cursor resume handle(s) from child session`);
+        const strippedCursor = stripCursorResumeEntriesFromSessionFile(childSessionFile);
+        if (strippedCursor > 0) {
+            console.log(`[melon] fork ${parentCardId}→${newCardId}: stripped ${strippedCursor} cursor resume handle(s) from child session`);
+        }
+        const strippedClaude = stripClaudeBridgeSessionEntriesFromSessionFile(childSessionFile);
+        if (strippedClaude > 0) {
+            console.log(`[melon] fork ${parentCardId}→${newCardId}: stripped ${strippedClaude} claude-bridge session marker(s) from child session`);
+        }
+        const strippedAntigravity = stripAntigravitySessionEntriesFromSessionFile(childSessionFile);
+        if (strippedAntigravity > 0) {
+            console.log(`[melon] fork ${parentCardId}→${newCardId}: stripped ${strippedAntigravity} antigravity session marker(s) from child session`);
         }
         // fork() leaves this runtime attached to the child file. Dispose that
-        // temporary Cursor owner before creating the child's permanent runtime,
-        // otherwise two bridges and two writers briefly own the same session.
-        if (splitModel(parentModel)[0].toLowerCase() === CURSOR_PROVIDER_ID) {
+        // temporary isolation-sensitive owner before creating the child's permanent
+        // runtime, otherwise two bridges and two writers briefly own the same session.
+        if (isIsolationProviderId(parentProvider)) {
             s.extensionUi?.cancelAll();
             await s.runtime.dispose();
             if (registry.get(parentCardId) === s)
@@ -880,7 +1017,9 @@ export async function buildApp(deps = {}) {
             thinkingLevels: childRuntime.runtime.session.getAvailableThinkingLevels(),
             forkedFromEntryId: leaf?.id,
             parentSessionFile,
-            strippedCursorResumeEntries: stripped,
+            strippedCursorResumeEntries: strippedCursor,
+            strippedClaudeBridgeSessionEntries: strippedClaude,
+            strippedAntigravitySessionEntries: strippedAntigravity,
         };
     });
     // ── Canvas persistence: <folder>/.melon/canvases/<id>.json ──
@@ -1431,6 +1570,34 @@ export async function buildApp(deps = {}) {
         const rel = `.melon/notes/manual/${name}`;
         console.log(`[notes] renamed manual ${relPath} -> ${rel}`);
         return { ok: true, relPath: rel, content: updated, mtimeMs: statSync(join(dirAbs, name)).mtimeMs };
+    });
+    // Delete a manual document FILE (X on a document card). Removing the file is
+    // what keeps @-mentions from resurrecting a deleted document: mentions list
+    // files from disk, so a file that's gone is gone.
+    app.post("/notes/manual/delete", async (req, reply) => {
+        const body = req.body;
+        let dir;
+        try {
+            dir = assertCwd(body?.cwd);
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        const relPath = String(body?.path ?? "");
+        if (!/^\.melon\/notes\/manual\/[A-Za-z0-9][A-Za-z0-9._-]*\.md$/.test(relPath)) {
+            return reply.code(400).send({ error: "invalid manual path" });
+        }
+        const abs = resolveInside(dir, relPath);
+        if (!abs)
+            return reply.code(404).send({ error: "manual not found" });
+        try {
+            rmSync(abs, { force: true });
+        }
+        catch (e) {
+            return reply.code(500).send({ error: `could not delete manual: ${e.message}` });
+        }
+        console.log(`[notes] deleted manual ${relPath}`);
+        return { ok: true };
     });
     // ── @-mention files: fuzzy search, existence batch, guarded read ──
     app.get("/files", async (req, reply) => {
@@ -2704,13 +2871,38 @@ export async function buildApp(deps = {}) {
         const denied = new Set((loadSettings().denylistedModels ?? []).map((x) => x));
         const filtered = all.filter((m) => !denied.has(m.label));
         const models = provider ? filtered.filter((m) => m.provider === provider) : filtered;
-        const wantsCursor = !provider || provider.toLowerCase() === CURSOR_PROVIDER_ID;
+        const providerKey = provider.toLowerCase();
+        const wantsCursor = !provider || providerKey === CURSOR_PROVIDER_ID;
+        const wantsClaudeBridge = !provider || providerKey === CLAUDE_BRIDGE_PROVIDER_ID;
+        const wantsAntigravity = !provider || providerKey === ANTIGRAVITY_PROVIDER_ID;
         const cursor = wantsCursor ? getCursorCatalogStatus() : undefined;
-        // Empty Cursor list is almost always a load/isolation/auth issue — surface it.
-        const error = provider.toLowerCase() === CURSOR_PROVIDER_ID && models.length === 0
-            ? (cursor?.issues[0] ?? "No Cursor models available")
+        const claudeBridgeCatalog = wantsClaudeBridge ? getClaudeBridgeCatalogStatus() : undefined;
+        const claudeBridgeRuntime = wantsClaudeBridge ? getClaudeBridgeRuntimeStatus() : undefined;
+        const claudeBridge = claudeBridgeCatalog
+            ? {
+                ...claudeBridgeCatalog,
+                runtime: claudeBridgeRuntime,
+            }
             : undefined;
-        return { models, total: models.length, ...(cursor ? { cursor } : {}), ...(error ? { error } : {}) };
+        const antigravity = wantsAntigravity ? getAntigravityCatalogStatus() : undefined;
+        // Empty Cursor / Claude / Antigravity lists are almost always load/isolation/auth — surface it.
+        const error = providerKey === CURSOR_PROVIDER_ID && models.length === 0
+            ? (cursor?.issues[0] ?? "No Cursor models available")
+            : providerKey === CLAUDE_BRIDGE_PROVIDER_ID && models.length === 0
+                ? (claudeBridgeCatalog?.issues[0] ?? "No Claude Code models available")
+                : providerKey === CLAUDE_BRIDGE_PROVIDER_ID && claudeBridgeRuntime && !claudeBridgeRuntime.ready
+                    ? claudeBridgeRuntime.issues[0]
+                    : providerKey === ANTIGRAVITY_PROVIDER_ID && models.length === 0
+                        ? (antigravity?.issues[0] ?? "No Antigravity models available")
+                        : undefined;
+        return {
+            models,
+            total: models.length,
+            ...(cursor ? { cursor } : {}),
+            ...(claudeBridge ? { claudeBridge } : {}),
+            ...(antigravity ? { antigravity } : {}),
+            ...(error ? { error } : {}),
+        };
     });
     // Liveness probe — the frontend polls this to clear the "reconnecting" banner.
     // `version` is the same identity stamped into DMG/AppImage/exe filenames.
@@ -2945,9 +3137,14 @@ export async function buildApp(deps = {}) {
             allProviderIds.add(m.provider);
         for (const pid of Object.keys(authEntries))
             allProviderIds.add(pid);
-        // Always list Cursor so a failed catalog load is visible in the picker.
+        // Always list bundled providers so a failed catalog load is visible in the picker.
         allProviderIds.add(CURSOR_PROVIDER_ID);
+        allProviderIds.add(CLAUDE_BRIDGE_PROVIDER_ID);
+        allProviderIds.add(ANTIGRAVITY_PROVIDER_ID);
         const cursorStatus = getCursorCatalogStatus();
+        const claudeBridgeStatus = getClaudeBridgeCatalogStatus();
+        const claudeBridgeRuntime = getClaudeBridgeRuntimeStatus();
+        const antigravityStatus = getAntigravityCatalogStatus();
         const result = [];
         for (const pid of [...allProviderIds].sort()) {
             const status = mr.getProviderAuthStatus(pid);
@@ -2966,9 +3163,37 @@ export async function buildApp(deps = {}) {
                 keyPreview = maskKey(melonKey);
                 authType = "api_key";
             }
-            // The cursor extension registers a literal placeholder apiKey, so the
-            // generic status reports "configured" with no real key. Report the truth.
-            const configured = pid === CURSOR_PROVIDER_ID ? hasRealCursorKey(authEntries, melonKeys) : !!status.configured;
+            else if (pid === CLAUDE_BRIDGE_PROVIDER_ID && hasClaudeBridgeAuth(authEntries)) {
+                // Shared Anthropic Pro/Max OAuth counts as Claude Code credentials.
+                const anthropic = authEntries.anthropic;
+                if (anthropic?.type === "oauth" && typeof anthropic.access === "string") {
+                    keyPreview = maskKey(anthropic.access);
+                    authType = "oauth";
+                }
+            }
+            // Cursor / Claude / Antigravity — report Melon-owned auth, not placeholder keys.
+            const configured = pid === CURSOR_PROVIDER_ID
+                ? hasRealCursorKey(authEntries, melonKeys)
+                : pid === CLAUDE_BRIDGE_PROVIDER_ID
+                    ? hasClaudeBridgeAuth(authEntries)
+                    : pid === ANTIGRAVITY_PROVIDER_ID
+                        ? hasAntigravityAuth(authEntries)
+                        : !!status.configured;
+            const error = pid === CURSOR_PROVIDER_ID && (!cursorStatus.loaded || cursorStatus.issues.length > 0)
+                ? cursorStatus.issues[0]
+                : pid === CLAUDE_BRIDGE_PROVIDER_ID &&
+                    (!claudeBridgeStatus.loaded || claudeBridgeStatus.issues.length > 0)
+                    ? claudeBridgeStatus.issues[0]
+                    : pid === CLAUDE_BRIDGE_PROVIDER_ID && !configured
+                        ? "Log in with Claude in the browser"
+                        : pid === CLAUDE_BRIDGE_PROVIDER_ID && configured && !claudeBridgeRuntime.ready
+                            ? claudeBridgeRuntime.issues[0]
+                            : pid === ANTIGRAVITY_PROVIDER_ID &&
+                                (!antigravityStatus.loaded || antigravityStatus.issues.length > 0)
+                                ? antigravityStatus.issues[0]
+                                : pid === ANTIGRAVITY_PROVIDER_ID && !configured
+                                    ? "Log in with Google for Antigravity"
+                                    : undefined;
             result.push({
                 id: pid,
                 provider: pid,
@@ -2976,9 +3201,7 @@ export async function buildApp(deps = {}) {
                 source: status.source ?? undefined,
                 keyPreview,
                 authType,
-                ...(pid === CURSOR_PROVIDER_ID && (!cursorStatus.loaded || cursorStatus.issues.length > 0)
-                    ? { error: cursorStatus.issues[0] }
-                    : {}),
+                ...(error ? { error } : {}),
             });
         }
         result.sort((a, b) => {
@@ -2990,6 +3213,16 @@ export async function buildApp(deps = {}) {
     });
     app.post("/auth/:provider/key", async (req, reply) => {
         const provider = req.params.provider;
+        if (provider === CLAUDE_BRIDGE_PROVIDER_ID) {
+            return reply.code(400).send({
+                error: "Claude Code uses browser login. Use POST /auth/claude-bridge/login instead of an API key.",
+            });
+        }
+        if (provider === ANTIGRAVITY_PROVIDER_ID) {
+            return reply.code(400).send({
+                error: "Antigravity uses browser login. Use POST /auth/antigravity/login instead of an API key.",
+            });
+        }
         const key = req.body?.key;
         if (!key)
             return reply.code(400).send({ error: "key required" });
@@ -3030,8 +3263,82 @@ export async function buildApp(deps = {}) {
             return reply.code(500).send({ error: e.message });
         }
     });
+    // Claude Code: browser OAuth (Claude Pro/Max). Returns the authorize URL;
+    // completion is tracked via /auth/claude-bridge/login/status.
+    app.post("/auth/claude-bridge/login", async (_req, reply) => {
+        try {
+            const { url } = await startClaudeBridgeLogin(getModelRuntime);
+            return { ok: true, url, status: getClaudeBridgeLoginStatus() };
+        }
+        catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            return reply.code(500).send({ error: message, status: getClaudeBridgeLoginStatus() });
+        }
+    });
+    app.get("/auth/claude-bridge/login/status", async () => getClaudeBridgeLoginStatus());
+    app.post("/auth/claude-bridge/login/wait", async (_req, reply) => {
+        try {
+            const status = await waitClaudeBridgeLogin();
+            if (status.phase === "error") {
+                return reply.code(500).send({ error: status.error ?? "Claude login failed", status });
+            }
+            if (status.phase === "done") {
+                applyClaudeBridgeRuntimeEnv();
+            }
+            return { ok: status.phase === "done", status, runtime: getClaudeBridgeRuntimeStatus() };
+        }
+        catch (e) {
+            return reply.code(500).send({
+                error: e instanceof Error ? e.message : String(e),
+                status: getClaudeBridgeLoginStatus(),
+            });
+        }
+    });
+    app.post("/auth/claude-bridge/login/cancel", async () => {
+        cancelClaudeBridgeLogin();
+        return { ok: true, status: getClaudeBridgeLoginStatus() };
+    });
+    // Antigravity: Google OAuth in the system browser.
+    app.post("/auth/antigravity/login", async (_req, reply) => {
+        try {
+            const { url } = await startAntigravityLogin(getModelRuntime);
+            return { ok: true, url, status: getAntigravityLoginStatus() };
+        }
+        catch (e) {
+            const message = e instanceof Error ? e.message : String(e);
+            return reply.code(500).send({ error: message, status: getAntigravityLoginStatus() });
+        }
+    });
+    app.get("/auth/antigravity/login/status", async () => getAntigravityLoginStatus());
+    app.post("/auth/antigravity/login/wait", async (_req, reply) => {
+        try {
+            const status = await waitAntigravityLogin();
+            if (status.phase === "error") {
+                return reply.code(500).send({ error: status.error ?? "Antigravity login failed", status });
+            }
+            return { ok: status.phase === "done", status };
+        }
+        catch (e) {
+            return reply.code(500).send({
+                error: e instanceof Error ? e.message : String(e),
+                status: getAntigravityLoginStatus(),
+            });
+        }
+    });
+    app.post("/auth/antigravity/login/cancel", async () => {
+        cancelAntigravityLogin();
+        return { ok: true, status: getAntigravityLoginStatus() };
+    });
     app.delete("/auth/:provider", async (req) => {
         const provider = req.params.provider;
+        if (provider === CLAUDE_BRIDGE_PROVIDER_ID) {
+            await logoutClaudeBridge(getModelRuntime);
+            return { ok: true };
+        }
+        if (provider === ANTIGRAVITY_PROVIDER_ID) {
+            await logoutAntigravity(getModelRuntime);
+            return { ok: true };
+        }
         await (await getModelRuntime()).removeRuntimeApiKey(provider);
         // Keep auth.json in sync with the runtime override removal.
         try {
@@ -3205,7 +3512,7 @@ export async function buildApp(deps = {}) {
             reply.send({ ok: true, queued: true });
             return;
         }
-        const cursorTurnId = beginCursorTurn(s);
+        const isolationTurnId = beginIsolationTurn(s);
         reply.send({ ok: true });
         console.log(`[${cardId}] prompt:start "${String(req.body?.text).slice(0, 60)}"`);
         registry.broadcast(cardId, { type: "raw", text: "\u2b07 prompt received by server" });
@@ -3215,12 +3522,13 @@ export async function buildApp(deps = {}) {
             // Inject diagram directives and file contents as custom context
             // messages (not user text) so the model doesn't echo them back.
             if (context) {
-                await s.runtime.session.sendCustomMessage(
-                    { customType: "context", content: [{ type: "text", text: context }], display: false },
-                    { deliverAs: "nextTurn" },
-                );
+                await s.runtime.session.sendCustomMessage({
+                    customType: "context",
+                    content: [{ type: "text", text: context }],
+                    display: false,
+                }, { deliverAs: "nextTurn" });
             }
-            await runInBoundCursorSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => s.runtime.session.prompt(text));
+            await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => s.runtime.session.prompt(text));
             console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
         }
         catch (e) {
@@ -3230,17 +3538,17 @@ export async function buildApp(deps = {}) {
             registry.broadcast(cardId, { type: "status", status: "error" });
         }
         finally {
-            if (cursorTurnId === undefined) {
-                // Preserve existing behavior for non-Cursor providers.
+            if (isolationTurnId === undefined) {
+                // Preserve existing behavior for ordinary providers.
                 drainPromptQueue(cardId);
             }
-            else if (registry.get(cardId) === s && isCurrentCursorTurn(s, cursorTurnId)) {
+            else if (registry.get(cardId) === s && isCurrentIsolationTurn(s, isolationTurnId)) {
                 // agent_end may already have started the next queued turn. Only
                 // the current owner can release busy or drain, and an explicit
                 // Stop keeps queued prompts paused.
                 if (!s.draining)
                     s.busy = false;
-                if (!isCursorTurnAborted(s, cursorTurnId))
+                if (!isIsolationTurnAborted(s, isolationTurnId))
                     drainPromptQueue(cardId);
             }
         }
@@ -3323,7 +3631,7 @@ export async function buildApp(deps = {}) {
         const s = registry.get(req.params.cardId);
         if (!s)
             return reply.code(404).send({ error: "unknown card" });
-        abortCurrentCursorTurn(s);
+        abortCurrentIsolationTurn(s);
         registry.broadcast(req.params.cardId, { type: "raw", text: "⏹ stop requested (server)" });
         // Unblock any open question panel immediately (don't wait for agent_end).
         s.extensionUi?.cancelAll();
@@ -3336,26 +3644,28 @@ export async function buildApp(deps = {}) {
         }
         return { ok: true };
     });
-    // Cursor owns process-level SDK resources (agent pool, bridge, scoped
-    // resume state). Deleting a Cursor card must emit session_shutdown and
-    // remove that ownership; the existing non-Cursor delete behavior is left
-    // unchanged.
+    // Isolation-sensitive providers (Cursor, Claude Code) own process-level
+    // resources (agent pool / Claude session / bridge). Deleting such a card
+    // must emit session_shutdown and remove that ownership; ordinary providers
+    // keep their previous delete behavior.
     app.delete("/sessions/:cardId", async (req, reply) => {
         const cardId = req.params.cardId;
         const s = registry.get(cardId);
         if (!s)
             return { ok: true };
-        if (!isCursorSession(s)) {
-            return reply.code(409).send({ error: "session teardown is only enabled for Cursor cards" });
+        if (!isIsolationSensitiveSession(s)) {
+            return reply.code(409).send({
+                error: "session teardown is only enabled for Cursor and Claude Code cards",
+            });
         }
         s.extensionUi?.cancelAll();
-        abortCurrentCursorTurn(s);
+        abortCurrentIsolationTurn(s);
         if (s.busy) {
             try {
                 await s.runtime.session.abort();
             }
             catch (e) {
-                console.error(`[${cardId}] Cursor teardown abort failed:`, e.message);
+                console.error(`[${cardId}] isolation-sensitive teardown abort failed:`, e.message);
             }
         }
         await s.runtime.dispose();
