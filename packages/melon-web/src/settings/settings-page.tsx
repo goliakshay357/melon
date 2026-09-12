@@ -1,17 +1,19 @@
 import { useEffect, useRef, useState } from 'react';
 import { SkillsManager, SkillEditor, type SkillPrefill } from '@/components/skills-manager';
 import { AgentsManager, AgentEditor, type AgentPrefill } from '@/components/agents-manager';
+import { ProvidersSection } from '@/settings/providers-section';
 import { confirmAction } from '@/components/dialogs';
 import { THEMES } from '@/theme/themes';
 import { useThemeStore } from '@/theme/theme-store';
 import { useCanvasStore, type AppView } from '@/store/canvas-store';
 import { cn } from '@/lib/utils';
 
-type SettingsSection = 'agents' | 'skills' | 'themes';
+type SettingsSection = 'agents' | 'skills' | 'themes' | 'providers';
 
 function sectionFromView(view: AppView): SettingsSection {
     if (view === 'agents') return 'agents';
     if (view === 'themes') return 'themes';
+    if (view === 'providers') return 'providers';
     return 'skills';
 }
 
@@ -165,6 +167,10 @@ export function SettingsPage() {
                             />
                         </div>
                     )
+                ) : section === 'providers' ? (
+                    <div className="mx-auto flex h-full w-full max-w-3xl flex-col p-5">
+                        <ProvidersSection />
+                    </div>
                 ) : (
                     <div className="mx-auto h-full w-full max-w-3xl overflow-y-auto p-5">
                         <div className="space-y-1" role="radiogroup" aria-label="Theme">

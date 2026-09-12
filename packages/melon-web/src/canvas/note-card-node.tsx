@@ -1,5 +1,4 @@
 import { memo as ReactMemo, useCallback, useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { Handle, Node, NodeProps, NodeResizer, Position } from '@xyflow/react';
 import { BookMarked, Copy, Loader2, Minimize2, Plus, RefreshCw, RotateCcw, Send, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
@@ -8,7 +7,8 @@ import { MarkdownBlock } from '@/components/markdown-block';
 import { confirmAction } from '@/components/dialogs';
 import { cn } from '@/lib/utils';
 import { MinimizedCardBar } from './minimized-card-bar';
-import { CanvasBoxesSideNav, MaximizeIcon } from './canvas-boxes-side-nav';
+import { MaximizeIcon } from './canvas-boxes-side-nav';
+import { FullscreenExitButton, FullscreenShell } from './fullscreen-shell';
 
 export type NoteCardNodeType = Node<{ cardId: string }, 'noteCard'>;
 
@@ -113,7 +113,7 @@ function NoteCardNodeInner({ id, selected }: NodeProps<NoteCardNodeType>) {
 		<div
 			className={cn(
 				'flex shrink-0 items-center gap-2 border-b border-border',
-				fullscreen ? 'px-5 py-3 sm:px-8' : 'px-3 py-2',
+				fullscreen ? 'h-14 px-4' : 'px-3 py-2',
 			)}
 		>
 			<span
@@ -229,18 +229,7 @@ function NoteCardNodeInner({ id, selected }: NodeProps<NoteCardNodeType>) {
 				<Plus className="size-4" />
 			</button>
 			{fullscreen ? (
-				<button
-					type="button"
-					className="nodrag flex items-center gap-1.5 rounded-md border border-border/80 px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-					onClick={(e) => {
-						e.stopPropagation();
-						setMaximized(false);
-					}}
-					title="Back to canvas (Esc)"
-				>
-					<Minimize2 className="size-3.5" />
-					Canvas
-				</button>
+				<FullscreenExitButton onExit={() => setMaximized(false)} />
 			) : (
 				<>
 					<button
@@ -502,27 +491,24 @@ function NoteCardNodeInner({ id, selected }: NodeProps<NoteCardNodeType>) {
 				)}
 			</div>
 
-			{maximized &&
-				createPortal(
-					<div
-						className="fixed inset-0 z-[999] flex flex-col bg-card"
-						role="dialog"
-						aria-modal="true"
-						aria-label={card.title || 'Note'}
-					>
-						{header(true)}
-						{wiresBar}
-						{errorBar}
-						<div className="flex min-h-0 flex-1 overflow-hidden">
-							<CanvasBoxesSideNav currentCardId={id} />
-							<div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-								{mainBody}
-								{readyEditor ? refineBar : null}
-							</div>
-						</div>
-					</div>,
-					document.body,
-				)}
+			{maximized && (
+				<FullscreenShell
+					cardId={id}
+					ariaLabel={card.title || 'Note'}
+					header={header(true)}
+					banners={
+						<>
+							{wiresBar}
+							{errorBar}
+						</>
+					}
+				>
+					<div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+						{mainBody}
+						{readyEditor ? refineBar : null}
+					</div>
+				</FullscreenShell>
+			)}
 		</>
 	);
 }

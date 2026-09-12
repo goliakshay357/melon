@@ -35,6 +35,8 @@ export interface ChatMessage {
 	thinking?: string;
 	/** Tool executions that happened during this turn. */
 	tools?: ToolRun[];
+	/** pi session entry id — the fork point for "branch from here". */
+	entryId?: string;
 }
 
 /**

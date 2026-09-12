@@ -6,6 +6,7 @@ import { boxMailLog, buildBoxMailBrief, buildHandoffDistillContext, stripMention
 import { expandDiagramCommand, expandMentions, parseInput } from "@/lib/input-parser";
 import {
 	clampIntoView,
+	findFreeSpot,
 	findOpenSpot,
 	type ScreenRect,
 	SIDEBAR_COLLAPSED_WIDTH,
@@ -459,13 +460,22 @@ export interface CanvasMeta {
 	worktreeName?: string;
 }
 
-export type AppView = "canvas" | "agents" | "skills" | "themes";
+export type AppView = "canvas" | "agents" | "skills" | "themes" | "providers";
 
 interface CanvasState {
 	cards: SessionCard[];
 	/** Which page fills the content area. Canvas stays mounted underneath. */
 	activeView: AppView;
 	setActiveView: (v: AppView) => void;
+	/**
+	 * Canvas-level inbox. When open it replaces the content area on canvas, or
+	 * the card body in fullscreen. `inboxFilterCardId` narrows the list to a
+	 * single box when opened from that box; null shows every box.
+	 */
+	inboxOpen: boolean;
+	inboxFilterCardId: string | null;
+	openInbox: (cardId?: string | null) => void;
+	closeInbox: () => void;
 	/** Navbar collapse state — the settings page offsets by the navbar width. */
 	sidebarCollapsed: boolean;
 	setSidebarCollapsed: (v: boolean) => void;
@@ -581,7 +591,13 @@ interface CanvasState {
 	dismissBoxInbox: (cardId: string, mailId: string) => Promise<boolean>;
 	/** Pull inbox snapshot from the server into the card. */
 	syncBoxInbox: (cardId: string) => Promise<void>;
-	forkCard: (parentId: string) => Promise<string>;
+	forkCard: (parentId: string, atEntryId?: string) => Promise<string>;
+	/**
+	 * Edit a user message in place: revert the session to just before that entry,
+	 * then send the edited text so the conversation continues from there and every
+	 * turn below it leaves the active branch.
+	 */
+	editUserMessage: (cardId: string, entryId: string, text: string, beforeIndex?: number) => Promise<boolean>;
 	moveCard: (id: string, position: { x: number; y: number }) => void;
 	updateCard: (id: string, patch: Partial<SessionCard>) => void;
 	setModel: (id: string, model: string) => void;
@@ -841,7 +857,7 @@ export function detachAgentProfileFromCards(profileId: string): number {
 			agentInstanceName: undefined,
 			title: short ? `Chat — ${short}`.slice(0, 44) : "Chat",
 		});
-		pushLog(c.id, `• agent profile "${id}" deleted — box is general now`);
+		pushLog(c.id, `• agent profile "${id}" deleted — node is general now`);
 	}
 	void syncBoxPeers();
 	return n;
@@ -852,7 +868,7 @@ async function pickBoxAmong(title: string, candidates: SessionCard[]): Promise<s
 	if (candidates.length === 1) return candidates[0]!.id;
 	return askChoice({
 		title,
-		description: "Several boxes match — pick which one gets the mail.",
+		description: "Several nodes match — pick which one gets the mail.",
 		options: candidates.map((c) => ({
 			value: c.id,
 			label: boxMentionLabel(c),
@@ -881,7 +897,7 @@ async function handleBoxMailIntent(data: {
 	if (!toCardId && data.toProfileId) {
 		const matches = state.cards.filter((c) => (c.kind ?? "chat") === "chat" && c.agentProfileId === data.toProfileId);
 		if (matches.length > 1) {
-			toCardId = (await pickBoxAmong(`Send to which "${data.toProfileId}" box?`, matches)) ?? "";
+			toCardId = (await pickBoxAmong(`Send to which "${data.toProfileId}" node?`, matches)) ?? "";
 		} else if (matches.length === 1) {
 			toCardId = matches[0]!.id;
 		} else {
@@ -890,7 +906,7 @@ async function handleBoxMailIntent(data: {
 		}
 	}
 	if (!toCardId) {
-		pushLog(data.fromCardId, `✗ box mail: could not resolve target ${data.toProfileId ?? "?"}`);
+		pushLog(data.fromCardId, `✗ node mail: could not resolve target ${data.toProfileId ?? "?"}`);
 		return;
 	}
 	const ok = await state.sendBoxMail(data.fromCardId, toCardId, data.body, {
@@ -909,7 +925,7 @@ async function handleBoxMailIntent(data: {
 		pushLog(data.fromCardId, `• agent mailed inbox → ${toCardId}`);
 		void syncBoxPeers();
 	} else {
-		pushLog(data.fromCardId, "✗ box mail: failed to enqueue");
+		pushLog(data.fromCardId, "✗ node mail: failed to enqueue");
 	}
 }
 
@@ -924,7 +940,7 @@ async function slashSend(cardId: string, message: string): Promise<boolean> {
 	if (from.kind === "note" || from.kind === "document") {
 		patchCardInStore(cardId, (c) => ({
 			...c,
-			messages: [...c.messages, { role: "system", text: "send only works from chat boxes" }],
+			messages: [...c.messages, { role: "system", text: "send only works from chat nodes" }],
 		}));
 		return true;
 	}
@@ -937,7 +953,7 @@ async function slashSend(cardId: string, message: string): Promise<boolean> {
 				...c.messages,
 				{
 					role: "system",
-					text: "no other chat boxes on this canvas — spawn one first (right-click → Agents)",
+					text: "no other chat nodes on this canvas — spawn one first (right-click → Agents)",
 				},
 			],
 		}));
@@ -960,14 +976,14 @@ async function slashSend(cardId: string, message: string): Promise<boolean> {
 			toCardId = matched[0]!.id;
 			body = rest.slice(first.length).trim();
 		} else if (matched.length > 1) {
-			toCardId = await pickBoxAmong(`Send to which "${first}" box?`, matched);
+			toCardId = await pickBoxAmong(`Send to which "${first}" node?`, matched);
 			if (toCardId) body = rest.slice(first.length).trim();
 		}
 	}
 
 	if (!toCardId) {
 		toCardId = await askChoice({
-			title: "Send to which box?",
+			title: "Send to which node?",
 			description: "Mail lands in their inbox — Approve there before the agent reads it.",
 			options: targets.map((c) => {
 				const st =
@@ -995,7 +1011,7 @@ async function slashSend(cardId: string, message: string): Promise<boolean> {
 			(await askText({
 				title: "Message to send",
 				initial: "",
-				placeholder: "What should the other box do?",
+				placeholder: "What should the other node do?",
 			})) ?? "";
 	}
 	if (!body.trim()) return true;
@@ -1956,6 +1972,7 @@ function ensureCardEventStream(cardId: string): void {
 						`[state] idle roles=${JSON.stringify(dbg?.messages.map((m) => m.role))} pending=${st!.pendingPatch ? "yes" : "no"}`,
 					);
 					useCanvasStore.getState().updateCard(cardId, { status: "idle" });
+					void maybeAutonameCanvas();
 					return;
 				}
 				if (data.status === "streaming") {
@@ -2019,7 +2036,7 @@ function ensureCardEventStream(cardId: string): void {
 				useCanvasStore.getState().updateCard(cardId, {
 					messages: [...cur.messages, { role: "user", text: bm.text }],
 				});
-				pushLog(cardId, `✓ box mail ← ${bm.fromCardId ?? "?"}`);
+				pushLog(cardId, `✓ node mail ← ${bm.fromCardId ?? "?"}`);
 			} else if ((data as { type: string }).type === "box_mail_outbound") {
 				const bm = data as { text: string; toCardId?: string };
 				const cur = findCard(cardId);
@@ -2028,7 +2045,7 @@ function ensureCardEventStream(cardId: string): void {
 				useCanvasStore.getState().updateCard(cardId, {
 					messages: [...cur.messages, { role: "assistant", text: bm.text }],
 				});
-				pushLog(cardId, `✓ box mail → ${bm.toCardId ?? "?"}`);
+				pushLog(cardId, `✓ node mail → ${bm.toCardId ?? "?"}`);
 			} else if ((data as { type: string }).type === "box_mail_intent") {
 				const intent = data as unknown as {
 					fromCardId: string;
@@ -2144,10 +2161,60 @@ function ensureCardEventStream(cardId: string): void {
 	}
 }
 
+/** Canvas ids we already tried to auto-name, so a turn end does not re-ask. */
+const autonameAttempted = new Set<string>();
+
+/**
+ * Name a placeholder canvas from its first exchange. Runs once per canvas, only
+ * while the name is still "Untitled" / "Canvas N", so a manual rename wins.
+ */
+async function maybeAutonameCanvas(): Promise<void> {
+	const s = useCanvasStore.getState();
+	const { canvasId, folder, canvasName } = s;
+	if (!canvasId || !folder) return;
+	if (autonameAttempted.has(canvasId)) return;
+	const current = (canvasName ?? "").trim();
+	if (current && !/^(untitled|canvas\s*\d+)$/i.test(current)) return;
+	const chat = s.cards.find((c) => (c.kind ?? "chat") === "chat" && c.sessionFile);
+	if (!chat) return;
+	autonameAttempted.add(canvasId);
+	try {
+		const res = await fetch(`/canvases/${canvasId}/autoname?cwd=${encodeURIComponent(folder)}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ cwd: folder }),
+		});
+		if (!res.ok) return;
+		const d = (await res.json()) as { name?: string; skipped?: boolean };
+		const name = typeof d.name === "string" ? d.name.trim() : "";
+		if (d.skipped || !name) return;
+		useCanvasStore.setState((st) => ({
+			canvasName: st.canvasId === canvasId ? name : st.canvasName,
+			canvasTreeRev: st.canvasTreeRev + 1,
+		}));
+		const cached = workspaces.get(canvasId);
+		if (cached) workspaces.set(canvasId, { ...cached, name, touchedAt: Date.now() });
+		pushLog(chat.id, `✓ canvas named "${name}"`);
+	} catch {
+		// Transient failure: allow a later turn to retry.
+		autonameAttempted.delete(canvasId);
+	}
+}
+
 export const useCanvasStore = create<CanvasState>((set, get) => ({
 	cards: [],
 	activeView: "canvas" as AppView,
 	setActiveView: (v) => set({ activeView: v }),
+	inboxOpen: false,
+	inboxFilterCardId: null,
+	openInbox(cardId = null) {
+		// Leave settings if open; the inbox takes the content area. Do NOT touch
+		// maximizedCardId — in fullscreen the same state replaces the card body.
+		set({ inboxOpen: true, inboxFilterCardId: cardId ?? null, activeView: "canvas" });
+	},
+	closeInbox() {
+		set({ inboxOpen: false, inboxFilterCardId: null });
+	},
 	sidebarCollapsed: false,
 	setSidebarCollapsed: (v) => set({ sidebarCollapsed: v }),
 	folder: loc.folder,
@@ -3260,10 +3327,18 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		pushUndo(get().cards);
 		const parent = parentId ? get().cards.find((c) => c.id === parentId) : undefined;
 		const cardSize = size ?? currentSpawnSize();
+		// Never drop a new card on top of an existing one. `findFreeSpot` keeps the
+		// requested position when it is free and nudges only when occupied.
+		const placed = findFreeSpot(
+			get().cards,
+			spawnPosition(position, cardSize),
+			cardSize.width,
+			cardSize.height,
+		);
 		const card: SessionCard = {
 			id: forcedId ?? newCardId(),
 			title: parent ? `↳ ${parent.title}`.slice(0, 44) : "New card",
-			position: spawnPosition(position, cardSize),
+			position: placed,
 			parentId,
 			kind,
 			status: "idle",
@@ -3377,7 +3452,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			if (!res.ok) {
 				const d = (await res.json().catch(() => ({}))) as { error?: string };
 				boxMailLog("sendBoxMail HTTP error", { status: res.status, error: d.error });
-				pushLog(fromCardId, `✗ box mail: ${d.error ?? res.status}`);
+				pushLog(fromCardId, `✗ node mail: ${d.error ?? res.status}`);
 				return false;
 			}
 			const d = (await res.json()) as {
@@ -3421,7 +3496,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			}
 			return true;
 		} catch (e) {
-			pushLog(fromCardId, `✗ box mail: ${e instanceof Error ? e.message : String(e)}`);
+			pushLog(fromCardId, `✗ node mail: ${e instanceof Error ? e.message : String(e)}`);
 			return false;
 		}
 	},
@@ -3545,7 +3620,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}
 	},
 
-	async forkCard(parentId) {
+	async forkCard(parentId, atEntryId) {
 		if (get().serverOffline) return "";
 		// addCard pushes undo — do not push twice or one Cmd+Z is a no-op.
 		const parent = get().cards.find((c) => c.id === parentId);
@@ -3568,12 +3643,18 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				body: JSON.stringify({
 					newCardId: childCardId,
 					sessionFile: parent?.sessionFile,
+					...(atEntryId ? { atEntryId } : {}),
 				}),
 			});
 			if (!res.ok) throw new Error(await res.text());
 			sessionInfo = await res.json();
 			attached.add(childCardId);
-			pushLog(childCardId, `✓ FORKED from ${parentId} — full transcript inherited`);
+			pushLog(
+				childCardId,
+				atEntryId
+					? `✓ FORKED from ${parentId} at message branch — transcript up to the branch point inherited`
+					: `✓ FORKED from ${parentId} — full transcript inherited`,
+			);
 		} catch (e) {
 			pushLog(
 				parentId,
@@ -3593,6 +3674,52 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		});
 		if (sessionInfo?.sessionFile) await get().hydrateMessages(childCardId, sessionInfo.sessionFile);
 		return childCardId;
+	},
+
+	async editUserMessage(cardId, entryId, text, beforeIndex) {
+		const card = findCard(cardId);
+		const trimmed = text.trim();
+		if (!card || !trimmed) return false;
+		console.log(`[melon] edit:start card=${cardId} entry=${entryId} chars=${trimmed.length}`);
+		try {
+			const res = await fetch(`/sessions/${encodeURIComponent(cardId)}/tree`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ entryId, sessionFile: card.sessionFile }),
+			});
+			if (!res.ok) {
+				const d = (await res.json().catch(() => ({}))) as { error?: string };
+				console.error(`[melon] edit:tree failed card=${cardId} status=${res.status} error=${d.error ?? ""}`);
+				pushLog(cardId, `✗ edit: ${d.error ?? res.status}`);
+				useCanvasStore.setState({ canvasNotice: `Could not edit this message: ${d.error ?? res.status}` });
+				return false;
+			}
+		} catch (e) {
+			console.error(`[melon] edit:tree threw card=${cardId}`, e);
+			pushLog(cardId, `✗ edit: ${e instanceof Error ? e.message : String(e)}`);
+			useCanvasStore.setState({ canvasNotice: "Could not reach the server to edit this message." });
+			return false;
+		}
+		// Drop the edited message and everything below it immediately, so the UI
+		// shows the branch before the network round-trip can disagree.
+		const afterRevert = findCard(cardId);
+		if (afterRevert) {
+			const cut =
+				typeof beforeIndex === "number"
+					? Math.max(0, Math.min(beforeIndex, afterRevert.messages.length))
+					: afterRevert.messages.length;
+			get().updateCard(cardId, {
+				messages: afterRevert.messages.slice(0, cut),
+				status: "idle",
+				error: undefined,
+			});
+		}
+		const sent = await get().sendMessage(cardId, trimmed);
+		console.log(
+			`[melon] edit:sent card=${cardId} messagesAfterRevert=${findCard(cardId)?.messages.length ?? -1} sendOk=${sent}`,
+		);
+		pushLog(cardId, "✓ edited message — new branch from here");
+		return sent;
 	},
 
 	moveCard(id, position) {
@@ -4339,6 +4466,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					text: m.text ?? "",
 					thinking: m.thinking,
 					tools: m.tools,
+					entryId: m.entryId,
 				})),
 			});
 			pushLog(cardId, `✓ transcript hydrated (${msgs.length} messages from .jsonl)`);

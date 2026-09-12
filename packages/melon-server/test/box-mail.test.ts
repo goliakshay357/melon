@@ -13,9 +13,9 @@ describe("box-mail helpers", () => {
 			toCardId: "card_abc",
 			body: "  please run the suite  ",
 		});
-		expect(text).toContain("Box mail → Pipeline — swift-otter (card_abc)");
+		expect(text).toContain("Node mail → Pipeline — swift-otter (card_abc)");
 		expect(text).toContain("please run the suite");
-		expect(text.startsWith("[Box mail →")).toBe(true);
+		expect(text.startsWith("[Node mail →")).toBe(true);
 	});
 
 	it("formats inbound with sender title and id", () => {
@@ -24,7 +24,7 @@ describe("box-mail helpers", () => {
 			fromCardId: "card_from",
 			body: "hi",
 		});
-		expect(text).toBe("[Box mail from General (card_from)]\n\nhi");
+		expect(text).toBe("[Node mail from General (card_from)]\n\nhi");
 	});
 
 	it("wake cue names the sender and keeps the body", () => {
@@ -37,6 +37,6 @@ describe("box-mail helpers", () => {
 		expect(text).toContain("General (id: card_from)");
 		expect(text).toContain("do the thing");
 		expect(text).toContain("Optional");
-		expect(boxMailWakeDisplay("General")).toBe("[box mail from General]");
+		expect(boxMailWakeDisplay("General")).toBe("[node mail from General]");
 	});
 });

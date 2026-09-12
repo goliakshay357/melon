@@ -57,7 +57,7 @@ export function stripMentionToken(text: string, token: string): string {
  * User-visible transcript keeps the original @ line; this drives distill → send_to_box.
  */
 export function buildHandoffDistillContext(opts: { from: SessionCard; to: SessionCard; userText: string }): string {
-	const request = opts.userText.trim() || "(no extra instruction — infer from this box's conversation)";
+	const request = opts.userText.trim() || "(no extra instruction — infer from this node's conversation)";
 	const targetLabel = opts.to.title || opts.to.id;
 	const instance = opts.to.agentInstanceName?.trim();
 	const profile = opts.to.agentProfileId?.trim();
@@ -67,16 +67,16 @@ export function buildHandoffDistillContext(opts: { from: SessionCard; to: Sessio
 		requestChars: request.length,
 	});
 	return [
-		"[melon-handoff] The user wants you to hand work to ANOTHER Melon canvas box.",
+		"[melon-handoff] The user wants you to hand work to ANOTHER Melon canvas node.",
 		"Do not answer the user's request yourself as the final deliverable — prepare a handoff and mail it.",
 		"",
-		"## Target box",
+		"## Target node",
 		`- title: ${targetLabel}`,
 		`- cardId: ${opts.to.id}  (prefer this as send_to_box target)`,
 		instance ? `- instance: ${instance}` : null,
 		profile ? `- profile: ${profile}` : null,
 		"",
-		"## User request (for the other box)",
+		"## User request (for the other node)",
 		request,
 		"",
 		"## Your job this turn",
@@ -114,7 +114,7 @@ export async function buildBoxMailBrief(opts: {
 	const filesBlock =
 		opts.fileMentions.length > 0 ? await expandMentions("## Attached files", opts.fileMentions, opts.cwds) : "";
 	const parts = [
-		`[Task mail from box "${opts.from.title || opts.from.id}" → "${opts.to.title || opts.to.id}"]`,
+		`[Task mail from node "${opts.from.title || opts.from.id}" → "${opts.to.title || opts.to.id}"]`,
 		"",
 		"## Request",
 		"",
@@ -122,7 +122,7 @@ export async function buildBoxMailBrief(opts: {
 		"",
 		"## Why / context",
 		"",
-		"The recipient box is a separate session. Below is recent conversation from the sender so you know what to do and why.",
+		"The recipient node is a separate session. Below is recent conversation from the sender so you know what to do and why.",
 		"",
 		"## Recent conversation (sender)",
 		"",

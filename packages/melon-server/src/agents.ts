@@ -204,7 +204,7 @@ export function formatAgentStandingInstructions(profile: {
 	return [
 		`[Melon agent profile: ${profile.name} (id: ${profile.id})]`,
 		roleLine,
-		"Standing instructions for THIS box — follow them every turn in this session:",
+		"Standing instructions for THIS node — follow them every turn in this session:",
 		"",
 		body,
 	]

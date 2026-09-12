@@ -1,5 +1,4 @@
 import { memo as ReactMemo, useCallback, useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { Handle, Node, NodeProps, Position, NodeResizer } from '@xyflow/react';
 import { Minimize2, Plus, RefreshCw, X } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
@@ -7,7 +6,8 @@ import { DocumentEditor } from '@/components/document-editor';
 import { confirmAction } from '@/components/dialogs';
 import { cn } from '@/lib/utils';
 import { MinimizedCardBar } from './minimized-card-bar';
-import { CanvasBoxesSideNav, MaximizeIcon } from './canvas-boxes-side-nav';
+import { MaximizeIcon } from './canvas-boxes-side-nav';
+import { FullscreenBreadcrumb, FullscreenExitButton, FullscreenShell } from './fullscreen-shell';
 
 export type DocumentCardNodeType = Node<{ cardId: string }, 'documentCard'>;
 
@@ -205,7 +205,7 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
 		<div
 			className={cn(
 				'flex shrink-0 items-center gap-2 border-b border-border',
-				fullscreen ? 'px-5 py-3 sm:px-8' : 'px-3 py-2',
+				fullscreen ? 'h-14 px-4' : 'px-3 py-2',
 			)}
 		>
 			{editingTitle ? (
@@ -231,6 +231,23 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
 					}}
 					onClick={(e) => e.stopPropagation()}
 					onMouseDown={(e) => e.stopPropagation()}
+				/>
+			) : fullscreen ? (
+				<FullscreenBreadcrumb
+					title={card.title}
+					titleNode={
+						<span
+							className="min-w-0 cursor-text truncate font-medium text-card-foreground"
+							title="Double-click to rename"
+							onDoubleClick={(e) => {
+								e.stopPropagation();
+								setEditingTitle(true);
+							}}
+						>
+							{card.mailDraft ? '✉ ' : '📄 '}
+							{card.title}
+						</span>
+					}
 				/>
 			) : (
 				<span
@@ -272,18 +289,7 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
 				<Plus className="size-4" />
 			</button>
 			{fullscreen ? (
-				<button
-					type="button"
-					className="nodrag flex items-center gap-1.5 rounded-md border border-border/80 px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-					onClick={(e) => {
-						e.stopPropagation();
-						setMaximized(false);
-					}}
-					title="Back to canvas (Esc)"
-				>
-					<Minimize2 className="size-3.5" />
-					Canvas
-				</button>
+				<FullscreenExitButton onExit={() => setMaximized(false)} />
 			) : (
 				<>
 					<button
@@ -372,24 +378,13 @@ function DocumentCardNodeInner({ id, selected }: NodeProps<DocumentCardNodeType>
 				{!maximized ? <div className="min-h-0 flex-1 overflow-hidden">{editor}</div> : <div className="min-h-0 flex-1" />}
 			</div>
 
-			{maximized &&
-				createPortal(
-					<div
-						className="fixed inset-0 z-[999] flex flex-col bg-card"
-						role="dialog"
-						aria-modal="true"
-						aria-label={card.title || 'Document'}
-					>
-						{header(true)}
-						<div className="flex min-h-0 flex-1 overflow-hidden">
-							<CanvasBoxesSideNav currentCardId={id} />
-							<div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden px-5 sm:px-8 lg:px-10">
-								{editor}
-							</div>
-						</div>
-					</div>,
-					document.body,
-				)}
+			{maximized && (
+				<FullscreenShell cardId={id} ariaLabel={card.title || 'Document'} header={header(true)}>
+					<div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col overflow-hidden px-5 md:px-8">
+						{editor}
+					</div>
+				</FullscreenShell>
+			)}
 		</>
 	);
 }

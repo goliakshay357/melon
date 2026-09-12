@@ -4,11 +4,11 @@ import type { SessionRegistry } from "./session-registry.ts";
 import { queueDisplays } from "./session-registry.ts";
 
 export function boxMailOutboundText(args: { toTitle: string; toCardId: string; body: string }): string {
-	return `[Box mail → ${args.toTitle} (${args.toCardId})]\n\n${args.body.trim()}`;
+	return `[Node mail → ${args.toTitle} (${args.toCardId})]\n\n${args.body.trim()}`;
 }
 
 export function boxMailInboundText(args: { fromTitle: string; fromCardId: string; body: string }): string {
-	return `[Box mail from ${args.fromTitle} (${args.fromCardId})]\n\n${args.body.trim()}`;
+	return `[Node mail from ${args.fromTitle} (${args.fromCardId})]\n\n${args.body.trim()}`;
 }
 
 export function boxMailWakeText(args: {
@@ -19,9 +19,9 @@ export function boxMailWakeText(args: {
 	envelope?: BoxMailEnvelope;
 }): string {
 	const lines = [
-		"[box-mail] A message just arrived from another box on this canvas (via inbox).",
+		"[box-mail] A message just arrived from another node on this canvas (via inbox).",
 		`From: ${args.fromTitle} (id: ${args.fromCardId}).`,
-		"This is another Melon chat box reaching out — not the user typing here.",
+		"This is another Melon chat node reaching out — not the user typing here.",
 		"",
 		args.body.trim(),
 		"",
@@ -30,14 +30,14 @@ export function boxMailWakeText(args: {
 		lines.push(...formatEnvelopeWakeLines(args.envelope, args.mailId));
 	} else {
 		lines.push(
-			"Handle it under your standing instructions. Do the work in this box. Optional: one send_to_box back to the sender only if truly needed (with replyReason). No further ping-pong.",
+			"Handle it under your standing instructions. Do the work in this node. Optional: one send_to_box back to the sender only if truly needed (with replyReason). No further ping-pong.",
 		);
 	}
 	return lines.join("\n");
 }
 
 export function boxMailWakeDisplay(fromTitle: string): string {
-	return `[box mail from ${fromTitle}]`;
+	return `[node mail from ${fromTitle}]`;
 }
 
 /** True when the session is mid-LLM-run (not merely a sticky Melon busy flag). */

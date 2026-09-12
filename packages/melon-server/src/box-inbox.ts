@@ -154,7 +154,7 @@ export function enqueueBoxMail(args: {
 	if (!parent && autoLink) {
 		parent = findLikelyParentMail(args.fromCardId, args.toCardId);
 		if (!parent) {
-			throw Object.assign(new Error("replyReason set but no prior mail from that box to reply to"), {
+			throw Object.assign(new Error("replyReason set but no prior mail from that node to reply to"), {
 				statusCode: 400,
 			});
 		}
@@ -187,7 +187,7 @@ export function enqueueBoxMail(args: {
 			if (!threadClosed) {
 				throw Object.assign(
 					new Error(
-						"already mailed that box once — no second A→B; they may optionally reply B→A, then you can @ again",
+						"already mailed that node once — no second A→B; they may optionally reply B→A, then you can @ again",
 					),
 					{ statusCode: 400 },
 				);

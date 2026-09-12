@@ -13,14 +13,14 @@ export const MELON_SEND_TO_BOX_TOOL_NAME = "send_to_box";
 const SendToBoxParamsSchema = Type.Object({
 	target: Type.String({
 		description:
-			"Who to message: another box's cardId, agent profile id, or instance short name (from the canvas boxes list in your system prompt).",
+			"Who to message: another node's cardId, agent profile id, or instance short name (from the canvas nodes list in your system prompt).",
 	}),
 	message: Type.String({
 		description: "What to send. Short, purposeful — like texting a teammate. No courtesy-only acks.",
 	}),
 	replyReason: Type.Optional(
 		Type.String({
-			description: `Only when replying to a box that mailed you: ${BOX_MAIL_REPLY_REASONS.join(" | ")}. Omit for a new A→B handoff.`,
+			description: `Only when replying to a node that mailed you: ${BOX_MAIL_REPLY_REASONS.join(" | ")}. Omit for a new A→B handoff.`,
 		}),
 	),
 	inReplyToMailId: Type.Optional(
@@ -41,7 +41,7 @@ function resolveFromCardId(ctx: ExtensionContext): string | undefined {
 function describePeers(cardId: string): string {
 	const peers = getBoxPeers(cardId);
 	if (peers.length === 0) {
-		return "No other chat boxes are known on this canvas yet.";
+		return "No other chat nodes are known on this canvas yet.";
 	}
 	return peers
 		.map((p) => {
@@ -64,14 +64,14 @@ function textResult(text: string) {
 export default function melonSendToBoxExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: MELON_SEND_TO_BOX_TOOL_NAME,
-		label: "Send to box",
+		label: "Send to node",
 		description:
-			"Send a message to ANOTHER Melon canvas box (async inbox, Approve by default). Pattern: hand off A→B once; optional single reply B→A with replyReason. Do not mail back and forth further. No courtesy acks.",
-		promptSnippet: "Message another canvas box (A→B once; optional one B→A reply)",
+			"Send a message to ANOTHER Melon canvas node (async inbox, Approve by default). Pattern: hand off A→B once; optional single reply B→A with replyReason. Do not mail back and forth further. No courtesy acks.",
+		promptSnippet: "Message another canvas node (A→B once; optional one B→A reply)",
 		executionMode: "sequential",
 		parameters: SendToBoxParamsSchema,
 		promptGuidelines: [
-			"Use send_to_box to pass work to another box; do not invent shared transcripts.",
+			"Use send_to_box to pass work to another node; do not invent shared transcripts.",
 			"A→B once per handoff. Optional B→A reply only with replyReason + inReplyToMailId from the wake.",
 			"Do not send a second A→B after they reply. Do not send thanks/ack-only mail.",
 			"Address by cardId when possible.",
@@ -118,7 +118,7 @@ export default function melonSendToBoxExtension(pi: ExtensionAPI): void {
 			if (ambiguous.length > 1) {
 				return textResult(
 					[
-						`Several boxes use profile "${target}" — pick one cardId:`,
+						`Several nodes use profile "${target}" — pick one cardId:`,
 						...ambiguous.map(
 							(peer) => `- ${peer.title} (cardId: ${peer.cardId}, instance: ${peer.agentInstanceName ?? "—"})`,
 						),
@@ -130,8 +130,8 @@ export default function melonSendToBoxExtension(pi: ExtensionAPI): void {
 				if (!readAgentProfile(resolved.profileOnly)) {
 					return textResult(
 						[
-							`No box or agent profile matched target "${target}".`,
-							"Known boxes:",
+							`No node or agent profile matched target "${target}".`,
+							"Known nodes:",
 							describePeers(fromCardId),
 						].join("\n"),
 					);
@@ -149,8 +149,8 @@ export default function melonSendToBoxExtension(pi: ExtensionAPI): void {
 
 			return textResult(
 				[
-					`No box matched target "${target}".`,
-					"Known boxes:",
+					`No node matched target "${target}".`,
+					"Known nodes:",
 					describePeers(fromCardId),
 					"Or pass a Settings → Agents profile id to spawn one automatically.",
 				].join("\n"),

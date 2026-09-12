@@ -79,12 +79,12 @@ export function getBoxPeers(cardId: string): BoxPeer[] {
 export function formatBoxDirectory(peers: readonly BoxPeer[]): string {
 	if (peers.length === 0) {
 		return [
-			"Canvas boxes you can message with send_to_box:",
+			"Canvas nodes you can message with send_to_box:",
 			"(none yet — the user can spawn specialized boxes via right-click → Agents)",
 		].join("\n");
 	}
 	const lines = [
-		"Canvas boxes you can message with send_to_box (async; lands in their inbox for human approve by default):",
+		"Canvas nodes you can message with send_to_box (async; lands in their inbox for human approve by default):",
 		"Pass target as card id, profile id, or instance short name.",
 		"Pattern: A→B once; optional one B→A with replyReason + inReplyToMailId. No second A→B.",
 	];
@@ -138,7 +138,7 @@ export function emitBoxMailIntent(args: {
 }): string {
 	const binding = byCardId.get(args.fromCardId);
 	if (!binding || binding.broadcast === undefined) {
-		throw new Error("Box mail host is not bound for this card.");
+		throw new Error("Node mail host is not bound for this card.");
 	}
 	const body = args.body.trim();
 	if (!body) throw new Error("Message was empty; nothing was drafted.");

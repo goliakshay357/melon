@@ -222,3 +222,52 @@ export function findOpenSpot(cards: SpawnCardLike[], sourceId: string, w: number
 	}
 	return { x: src.position.x + spawnCardWidth(src) + gap, y: src.position.y };
 }
+
+/**
+ * Nearest free position so a new card never lands on top of another.
+ *
+ * `desired` is returned untouched when it is already free, so explicit
+ * placements (right-click point, the right-of-parent column) stay exactly where
+ * they were. Only an occupied spot is nudged, scanning outward with a
+ * right/down bias so cards prefer to flow right, then down.
+ */
+export function findFreeSpot(
+	cards: SpawnCardLike[],
+	desired: { x: number; y: number },
+	w: number,
+	h: number,
+	gap = 24,
+): { x: number; y: number } {
+	const occupied: SpawnBox[] = cards.map((c) => ({
+		left: c.position.x,
+		right: c.position.x + spawnCardWidth(c),
+		top: c.position.y,
+		bottom: c.position.y + spawnCardHeight(c),
+	}));
+	const isFree = (x: number, y: number): boolean => {
+		const box: SpawnBox = { left: x, right: x + w, top: y, bottom: y + h };
+		return !occupied.some((o) => boxesOverlap(box, o));
+	};
+	if (isFree(desired.x, desired.y)) return desired;
+
+	const stepX = w + gap;
+	const stepY = h + gap;
+	const span = 12;
+	const candidates: Array<{ x: number; y: number; rank: number }> = [];
+	for (let iy = -span; iy <= span; iy++) {
+		for (let ix = -span; ix <= span; ix++) {
+			if (ix === 0 && iy === 0) continue;
+			// Right column first, then the same column, then left. Within a column,
+			// nearer cells win and below is preferred over above (mind-map flow).
+			const column = ix > 0 ? 0 : ix === 0 ? 1 : 2;
+			const rank =
+				column * 1_000_000 + Math.abs(ix) * 10_000 + Math.abs(iy) * 100 + (iy < 0 ? 1 : 0);
+			candidates.push({ x: desired.x + ix * stepX, y: desired.y + iy * stepY, rank });
+		}
+	}
+	candidates.sort((a, b) => a.rank - b.rank);
+	for (const c of candidates) {
+		if (isFree(c.x, c.y)) return { x: c.x, y: c.y };
+	}
+	return { x: desired.x + stepX * (span + 1), y: desired.y };
+}

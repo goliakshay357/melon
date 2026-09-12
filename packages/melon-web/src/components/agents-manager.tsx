@@ -85,8 +85,8 @@ export function AgentsManager({
             title: `Delete agent "${row.name}"?`,
             description:
                 using.length > 0
-                    ? `${using.length} open box${using.length === 1 ? '' : 'es'} use this profile. Transcripts stay; those boxes become general (no standing instructions).`
-                    : 'Removes the profile from Settings. Open boxes keep their transcripts; they become general.',
+                    ? `${using.length} open node${using.length === 1 ? '' : 's'} use this profile. Transcripts stay; those nodes become general (no standing instructions).`
+                    : 'Removes the profile from Settings. Open nodes keep their transcripts; they become general.',
         });
         if (!ok) return;
         const res = await fetch(`/agents/${row.id}`, { method: 'DELETE' }).catch(() => null);
@@ -111,7 +111,7 @@ export function AgentsManager({
             <div className="mb-3 shrink-0 rounded-lg border border-border px-3 py-2">
                 <div className="flex items-center justify-between gap-3">
                     <div className="min-w-0">
-                        <p className="text-xs font-medium text-card-foreground">Box mail auto-approve</p>
+                        <p className="text-xs font-medium text-card-foreground">Node mail auto-approve</p>
                         <p className="text-[10px] text-muted-foreground">
                             Off: mail waits in the inbox until you Approve. On: skip Approve and deliver to the agent (after its queue).
                         </p>
@@ -418,7 +418,7 @@ export function AgentEditor({
                         value={descriptionMd}
                         onChange={(e) => setDescriptionMd(e.target.value)}
                         placeholder={
-                            'Standing instructions (description.md)…\n\nInjected every turn when a box uses this profile.'
+                            'Standing instructions (description.md)…\n\nInjected every turn when a node uses this profile.'
                         }
                         spellCheck={false}
                         className="mt-2 min-h-[140px] flex-1 resize-none rounded-md border border-input bg-background px-3 py-2 font-mono text-xs leading-relaxed outline-none focus:border-ring"

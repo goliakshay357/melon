@@ -1342,7 +1342,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		if (!parentSessionFile) {
 			return reply.code(400).send({ error: "nothing to fork yet — send a message first" });
 		}
-		const leaf = s.runtime.session.sessionManager.getLeafEntry();
+		const leaf = typeof body?.atEntryId === "string" && body.atEntryId.trim()
+			? s.runtime.session.sessionManager.getEntry(body.atEntryId.trim())
+			: s.runtime.session.sessionManager.getLeafEntry();
+		if (typeof body?.atEntryId === "string" && body.atEntryId.trim() && !leaf) {
+			return reply.code(400).send({ error: "unknown fork entry" });
+		}
 		const parentModel = modelToString(s.runtime.session.model);
 		const parentSkills = s.activeSkills ?? [];
 		const parentProvider = splitModel(parentModel)[0].toLowerCase();
@@ -1401,6 +1406,59 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			strippedClaudeBridgeSessionEntries: strippedClaude,
 			strippedAntigravitySessionEntries: strippedAntigravity,
 		};
+	});
+
+	/**
+	 * Edit/revert in place (no new card). pi's `navigateTree` moves the active leaf:
+	 * a user-message target reverts to just before it and returns its text for the
+	 * composer; any other target truncates after that entry.
+	 */
+	app.post("/sessions/:cardId/tree", async (req, reply) => {
+		const cardId = (req.params as any).cardId;
+		const body = req.body as any;
+		const entryId = typeof body?.entryId === "string" ? body.entryId.trim() : "";
+		if (!entryId) return reply.code(400).send({ error: "entryId required" });
+
+		let s = registry.get(cardId);
+		const wasLive = Boolean(s);
+		if (!s && typeof body?.sessionFile === "string" && body.sessionFile) {
+			const opened = await createRuntimeFor(SessionManager.open(body.sessionFile), [], cardId);
+			s = {
+				runtime: opened.runtime,
+				clients: new Set(),
+				busy: false,
+				promptQueue: [],
+			};
+		}
+		if (!s) return reply.code(404).send({ error: "unknown card" });
+		if (s.busy) return reply.code(409).send({ error: "card is streaming" });
+
+		const sessionFile = s.runtime.session.sessionFile as string | undefined;
+		const model = modelToString(s.runtime.session.model);
+		const skills = s.activeSkills ?? [];
+		try {
+			const result = await s.runtime.session.navigateTree(entryId, { summarize: false });
+			if (result.cancelled) return reply.code(409).send({ error: "navigation cancelled" });
+			// RCA: navigateTree only moves the IN-MEMORY leaf. Nothing is written to the
+			// session file, so /transcript (which reopens the file) and any re-attach
+			// snap the leaf back to the old tail and the next prompt continues from the
+			// wrong place. Persist the new leaf with a hidden entry that does not enter
+			// LLM context, so reopen/transcript/attach all follow the new branch.
+			s.runtime.session.sessionManager.appendCustomEntry("melon.branch");
+			console.log(
+				`[${cardId}] tree:navigate entry=${entryId} live=${wasLive} -> leaf=${s.runtime.session.sessionManager.getLeafId()}`,
+			);
+			// A reopened runtime is a temporary owner: hand the navigated session to the
+			// registry so the next prompt continues on the new branch.
+			if (!wasLive && sessionFile) {
+				await s.runtime.dispose();
+				await attachSession(cardId, SessionManager.open(sessionFile), model, skills);
+			}
+			return { ok: true, editorText: result.editorText ?? "" };
+		} catch (e) {
+			console.error(`[${cardId}] tree:navigate failed`, (e as Error).stack);
+			return reply.code(400).send({ error: (e as Error).message });
+		}
 	});
 
 	// ── Canvas persistence: <folder>/.melon/canvases/<id>.json ──
@@ -1964,6 +2022,107 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		ws.modified = new Date().toISOString();
 		writeFileSync(join(cvDir2, `${ws.id}.json`), JSON.stringify(ws));
 		return { ok: true };
+	});
+
+	/**
+	 * Name a fresh canvas from its first exchange. Only runs while the canvas still
+	 * has a placeholder name ("Untitled" / "Canvas N"), so a manual rename wins.
+	 */
+	app.post("/canvases/:id/autoname", async (req, reply) => {
+		const body = (req.body ?? {}) as { cwd?: string };
+		let dir: string;
+		try {
+			dir = assertCwd(body.cwd);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		const id = (req.params as { id: string }).id;
+		const file = join(canvasesDir(dir), `${id}.json`);
+		let canvas: any;
+		try {
+			canvas = JSON.parse(readFileSync(file, "utf8"));
+		} catch {
+			return reply.code(404).send({ error: "canvas not found" });
+		}
+		const current = typeof canvas.name === "string" ? canvas.name.trim() : "";
+		if (current && !/^(untitled|canvas\s*\d+)$/i.test(current)) {
+			return { skipped: true, name: current };
+		}
+		const card = (canvas.cards ?? []).find((c: any) => typeof c?.sessionFile === "string");
+		if (!card?.sessionFile) return { skipped: true, reason: "no chat yet" };
+
+		let firstUser = "";
+		let firstAssistant = "";
+		try {
+			const sm = SessionManager.open(card.sessionFile);
+			const ctx = sm.buildContextEntries() as any[];
+			const textOf = (content: any): string =>
+				(Array.isArray(content) ? content : [])
+					.filter((b: any) => b.type === "text")
+					.map((b: any) => b.text)
+					.join("");
+			for (const e of ctx) {
+				if (e.type !== "message") continue;
+				const m: any = e.message;
+				if (m.role === "user" && !firstUser) firstUser = textOf(m.content).trim();
+				else if (m.role === "assistant" && firstUser && !firstAssistant) {
+					const t = textOf(m.content).trim();
+					if (t) firstAssistant = t;
+				}
+				if (firstUser && firstAssistant) break;
+			}
+		} catch {
+			/* unreadable session — fall through to a generic skip */
+		}
+		if (!firstUser) return { skipped: true, reason: "no user message" };
+
+		let name = "";
+		try {
+			const mr = await getModelRuntime();
+			const [providerId, modelId] = splitModel(String(card.model ?? ""));
+			const model =
+				(providerId && modelId ? mr.getModel(providerId, modelId) : undefined) ??
+				mr.getAvailableSnapshot()[0];
+			if (!model) return { skipped: true, reason: "no model available" };
+			const res = await mr.completeSimple(
+				model,
+				{
+					systemPrompt:
+						"You name chat workspaces. Reply with ONLY a short title of 2 to 5 words, Title Case. No quotes, no ending punctuation, no explanation.",
+					messages: [
+						{
+							role: "user" as const,
+							content: [
+								{
+									type: "text" as const,
+									text: `First user message:\n${firstUser.slice(0, 1500)}\n\nFirst reply:\n${firstAssistant.slice(0, 1500) || "(not answered yet)"}`,
+								},
+							],
+							timestamp: Date.now(),
+						},
+					],
+				},
+				{ maxTokens: 32 },
+			);
+			name = res.content
+				.filter((b: any) => b.type === "text")
+				.map((b: any) => b.text)
+				.join(" ");
+		} catch (e) {
+			return { skipped: true, reason: (e as Error).message };
+		}
+
+		name = name
+			.replace(/["'`]/g, "")
+			.replace(/\s+/g, " ")
+			.trim()
+			.replace(/[.!,;:]+$/, "")
+			.slice(0, 48);
+		if (!name) return { skipped: true, reason: "empty title" };
+		canvas.name = name;
+		canvas.modified = new Date().toISOString();
+		writeFileSync(file, JSON.stringify(canvas));
+		return { name };
 	});
 
 	// Rename a manual: file follows the name; a leading H1 is rewritten too.
@@ -3269,7 +3428,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			name: string;
 			worktreeMode?: "isolated" | "local";
 			worktreeName?: string;
-			sessions: Array<{ file: string; title?: string }>;
+			sessions: Array<{ file: string; title?: string; cardId?: string }>;
 		}> = [];
 		try {
 			for (const f of readdirSync(cvDir)) {
@@ -3280,7 +3439,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 						.filter((c: any) => c.sessionFile)
 						.map((c: any) => {
 							bound.add(c.sessionFile);
-							return { file: c.sessionFile, title: c.title };
+							return { file: c.sessionFile, title: c.title, cardId: c.id };
 						});
 					const iso = isolationMeta(cv, dir);
 					canvases.push({
@@ -3379,7 +3538,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const all = mr.getModels().map((m: any) => ({
 			label: `${m.provider}/${m.id}`,
 			provider: m.provider,
+			providerName: mr.getProvider(m.provider)?.name ?? providerLabel(m.provider),
 			id: m.id,
+			name: typeof m.name === "string" && m.name.trim() ? m.name : m.id,
 		}));
 		const denied = new Set((loadSettings().denylistedModels ?? []).map((x) => x));
 		const filtered = all.filter((m) => !denied.has(m.label));
@@ -3604,10 +3765,10 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		});
 		if (!fromCardId || !toCardId) return reply.code(400).send({ error: "fromCardId and toCardId required" });
 		if (!mailBody) return reply.code(400).send({ error: "body required" });
-		if (fromCardId === toCardId) return reply.code(400).send({ error: "cannot mail a box to itself" });
+		if (fromCardId === toCardId) return reply.code(400).send({ error: "cannot mail a node to itself" });
 
-		const fromTitle = String(body?.fromTitle ?? "Box").trim() || "Box";
-		const toTitle = String(body?.toTitle ?? "Box").trim() || "Box";
+		const fromTitle = String(body?.fromTitle ?? "Node").trim() || "Node";
+		const toTitle = String(body?.toTitle ?? "Node").trim() || "Node";
 		const createdBy = body?.createdBy === "agent" ? "agent" : "user";
 
 		const envelopeInput: Record<string, unknown> =
@@ -4030,6 +4191,13 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			}
 			next.boxMailAutoSend = body.boxMailAutoSend;
 		}
+		if ("favoriteModels" in body) {
+			const raw = body.favoriteModels;
+			if (!Array.isArray(raw) || raw.some((m: unknown) => typeof m !== "string" || !m.trim())) {
+				return reply.code(400).send({ error: "favoriteModels must be an array of non-empty strings" });
+			}
+			next.favoriteModels = [...new Set(raw.map((m: string) => m.trim()))].slice(0, 50);
+		}
 		saveSettings(next);
 		return { ok: true, settings: next };
 	});
@@ -4070,8 +4238,13 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const result: Array<{
 			id: string;
 			provider: string;
+			name: string;
 			configured: boolean;
+			connected: boolean;
+			disconnectable: boolean;
+			authTypes: Array<"api_key" | "oauth">;
 			source?: string;
+			sourceLabel?: string;
 			keyPreview?: string;
 			authType?: string;
 			error?: string;
@@ -4128,11 +4301,41 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 										? "Log in with Google for Antigravity"
 										: undefined;
 
+			const name = mr.getProvider(pid)?.name ?? providerLabel(pid);
+			const authTypes: Array<"api_key" | "oauth"> =
+				pid === CLAUDE_BRIDGE_PROVIDER_ID || pid === ANTIGRAVITY_PROVIDER_ID
+					? ["oauth"]
+					: ["api_key"];
+			// Only credentials Melon itself stored can be removed from the UI.
+			// Environment / config / models.json sources are managed elsewhere.
+			const stored =
+				pid === CLAUDE_BRIDGE_PROVIDER_ID
+					? hasClaudeBridgeAuth(authEntries)
+					: pid === ANTIGRAVITY_PROVIDER_ID
+						? hasAntigravityAuth(authEntries)
+						: Boolean(entry || melonKey);
+			const sourceLabel = !configured
+				? undefined
+				: stored
+					? authTypes[0] === "oauth"
+						? "Subscription"
+						: "API key"
+					: status.source === "environment"
+						? ((status as any).label ?? "Environment variable")
+						: status.source === "runtime"
+							? "Runtime override"
+							: "Configured externally";
+
 			result.push({
 				id: pid,
 				provider: pid,
+				name,
 				configured,
+				connected: configured,
+				disconnectable: stored,
+				authTypes,
 				source: (status as any).source ?? undefined,
+				sourceLabel,
 				keyPreview,
 				authType,
 				...(error ? { error } : {}),
@@ -4317,7 +4520,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					const cm = e as any;
 					if (cm.display !== false) {
 						const text = clean(textOf(cm.content));
-						if (text) messages.push({ role: "user", text, injected: cm.customType === "melon.handoff" });
+						if (text) messages.push({ role: "user", text, injected: cm.customType === "melon.handoff", entryId: e.id });
 					}
 					continue;
 				}
@@ -4325,7 +4528,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				const m: any = e.message;
 				if (m.role === "user") {
 					const text = clean(textOf(m.content));
-					if (text) messages.push({ role: "user", text });
+					if (text) messages.push({ role: "user", text, entryId: e.id });
 				} else if (m.role === "assistant") {
 					let text = "";
 					let thinking = "";
@@ -4345,6 +4548,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 							role: "assistant",
 							text: text.trim(),
 							thinking: thinking.trim() || undefined,
+							entryId: e.id,
 						});
 				} else if (m.role === "toolResult") {
 					const lastA = [...messages].reverse().find((x) => x.role === "assistant");
@@ -4362,6 +4566,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 								argsStructured,
 								args: argsStructured ? preview(argsStructured) : undefined,
 							});
+							// Fork point must include the tool result, so track the last entry
+							// that belongs to this UI message.
+							lastA.entryId = e.id;
 						}
 					}
 				}

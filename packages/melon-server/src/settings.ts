@@ -5,6 +5,8 @@ import { getAgentDir } from "@earendil-works/pi-coding-agent";
 export interface MelonSettings {
 	lastModel?: string;
 	recentModels?: string[];
+	/** Starred models (provider/id) shown first in the model picker. */
+	favoriteModels?: string[];
 	defaultThinkingLevel?: string;
 	providerKeys?: Record<string, string>;
 	/** Models the provider rejected ("not supported") — hidden from the picker. */

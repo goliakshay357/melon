@@ -25,6 +25,7 @@ import { useCanvasStore, currentSpawnSize, syncBoxPeers } from '@/store/canvas-s
 import { focusViewport, isFullyVisible, SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH, type WorldRect } from '@/lib/spawn';
 import { useActiveTheme } from '@/theme/theme-store';
 import { SettingsPage } from '@/settings/settings-page';
+import { InboxView } from '@/components/inbox-view';
 import { isTypingTarget } from '@/lib/utils';
 import { DEFAULT_CARD_SIZE, MINIMIZED_CARD_HEIGHT, type SessionCard } from '@/types/session-card';
 
@@ -49,6 +50,21 @@ export function Canvas() {
     const saveCanvas = useCanvasStore((s) => s.saveCanvas);
     const storedViewport = useCanvasStore((s) => s.viewport);
     const maximizedCardId = useCanvasStore((s) => s.maximizedCardId);
+    // Defer the expensive part of entering fullscreen by one frame. Flipping
+    // `onlyRenderVisibleElements` off mounts EVERY card's editor at once, and the
+    // maximized card's editor remounts into the portal. If that heavy commit runs
+    // before the opaque fullscreen shell paints, the canvas is visible for the
+    // whole commit (the "canvas flashes for a second" bug). Stage it: the shell
+    // paints first, then the heavy content mounts behind it.
+    const [renderAllNodes, setRenderAllNodes] = useState(false);
+    useEffect(() => {
+        if (!maximizedCardId) {
+            setRenderAllNodes(false);
+            return;
+        }
+        const id = requestAnimationFrame(() => setRenderAllNodes(true));
+        return () => cancelAnimationFrame(id);
+    }, [maximizedCardId]);
     const hydrated = useCanvasStore((s) => s.hydrated);
     const serverOffline = useCanvasStore((s) => s.serverOffline);
     const canvasOpening = useCanvasStore((s) => s.canvasOpening);
@@ -62,7 +78,13 @@ export function Canvas() {
     const wrapperRef = useRef<HTMLDivElement>(null);
     const flowLayerRef = useRef<HTMLDivElement>(null);
     const activeView = useCanvasStore((s) => s.activeView);
+    const inboxOpen = useCanvasStore((s) => s.inboxOpen);
+    const inboxFilterCardId = useCanvasStore((s) => s.inboxFilterCardId);
+    const closeInbox = useCanvasStore((s) => s.closeInbox);
     const sidebarCollapsed = useCanvasStore((s) => s.sidebarCollapsed);
+    // The inbox hosts itself in whichever frame is active: the fullscreen shell
+    // owns it when a card is maximized, the canvas content area otherwise.
+    const showCanvasInbox = inboxOpen && !maximizedCardId;
 
     // Reopen last session of work on refresh.
     const restoredRef = useRef(false);
@@ -79,12 +101,21 @@ export function Canvas() {
     );
     const edgeTypes = useMemo(() => ({ fork: ForkEdge }), []);
 
-	// Autosave workspace (debounced).
+	// Autosave workspace (debounced) + a subtle save indicator.
+	const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
 	useEffect(() => {
 		if (!canvasId || !folder) return;
-		const t = setTimeout(() => saveCanvas(), 800);
+		setSaveState('saving');
+		const t = setTimeout(() => {
+			void Promise.resolve(saveCanvas()).then(() => setSaveState('saved'));
+		}, 800);
 		return () => clearTimeout(t);
-	}, [cards, storedViewport, canvasId, folder]);
+	}, [cards, storedViewport, canvasId, folder, saveCanvas]);
+	useEffect(() => {
+		if (saveState !== 'saved') return;
+		const t = setTimeout(() => setSaveState('idle'), 1600);
+		return () => clearTimeout(t);
+	}, [saveState]);
 
 	// Keep send_to_box peer directories in sync with canvas chat boxes.
 	useEffect(() => {
@@ -242,6 +273,14 @@ export function Canvas() {
         useCanvasStore.getState().requestFocusCard(null);
         const card = cards.find((c) => c.id === focusCardId);
         if (!card) return;
+        // Select the focused node so opening it from the sidebar reads as selection,
+        // not just a viewport nudge.
+        setNodes((nds) =>
+            nds.map((n) => {
+                const selected = n.id === focusCardId;
+                return n.selected === selected ? n : { ...n, selected };
+            }),
+        );
         const box = cardBox(card);
         const rect: WorldRect = {
             left: card.position.x,
@@ -428,11 +467,11 @@ export function Canvas() {
                 Clip the navbar strip so cards/editors never paint over it. */}
             <div
                 ref={flowLayerRef}
-                className={`absolute inset-0 ${activeView !== 'canvas' ? 'invisible' : ''}`}
+                className={`absolute inset-0 ${activeView !== 'canvas' || showCanvasInbox ? 'invisible' : ''}`}
                 style={{ clipPath: `inset(0 0 0 ${sidebarWidth}px)` }}
             >
             <ReactFlow
-                onlyRenderVisibleElements={!maximizedCardId}
+                onlyRenderVisibleElements={!renderAllNodes}
                 nodes={nodes}
                 edges={edges}
                 onNodesChange={onNodesChange}
@@ -492,6 +531,15 @@ export function Canvas() {
             )}
 
             <CanvasNoticeBanner />
+
+            {saveState !== 'idle' && (
+                <div
+                    className="pointer-events-none absolute right-3 top-3 z-10 rounded-md border border-border bg-card/90 px-2 py-0.5 text-[10px] text-muted-foreground backdrop-blur"
+                    aria-live="polite"
+                >
+                    {saveState === 'saving' ? 'Saving…' : 'Saved'}
+                </div>
+            )}
 
             {/* <TopBar /> DISABLED — re-enable later */}
             {cards.length > 0 && <Toolbar />}
@@ -574,13 +622,21 @@ export function Canvas() {
                 promoted iframe node from any card; auto-closes off-canvas. */}
             <VizFullscreenLayer />
 
-            {/* Settings PAGE (never a dialog) — fills the content area right of the navbar */}
-            {activeView !== 'canvas' && (
+            {/* Content-area PAGE (never a dialog) right of the navbar: inbox or settings. */}
+            {(showCanvasInbox || activeView !== 'canvas') && (
                 <div
                     className="absolute inset-y-0 right-0 transition-[left] duration-200"
                     style={{ left: sidebarCollapsed ? 48 : 260 }}
                 >
-                    <SettingsPage />
+                    {showCanvasInbox ? (
+                        <InboxView
+                            filterCardId={inboxFilterCardId}
+                            closeLabel="Back to canvas"
+                            onClose={closeInbox}
+                        />
+                    ) : (
+                        <SettingsPage />
+                    )}
                 </div>
             )}
         </div>

@@ -1,3 +1,4 @@
+import { SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH } from '@/lib/spawn';
 import { useCanvasStore } from '@/store/canvas-store';
 
 /** Top-of-canvas notice for isolation/save issues. */
@@ -15,9 +16,15 @@ export function CanvasNoticeBanner() {
 	return (
 		<div
 			className="pointer-events-none absolute top-3 z-20 transition-[left] duration-200"
-			style={{ left: sidebarCollapsed ? 56 : 268, right: 12 }}
+			style={{
+				left: (sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH) + 8,
+				right: 12,
+			}}
 		>
-			<div className="pointer-events-auto flex max-w-xl items-start gap-2 rounded-lg border border-border bg-card/95 px-3 py-2 text-xs shadow-sm backdrop-blur">
+			<div
+				role="status"
+				className="pointer-events-auto flex max-w-xl items-start gap-2 rounded-lg border border-border bg-card/95 px-3 py-2 text-xs shadow-sm backdrop-blur"
+			>
 				<p className="min-w-0 flex-1 leading-relaxed text-card-foreground">
 					{notice ??
 						'Isolated checkout is missing. Continue in Local mode or restore the worktree.'}

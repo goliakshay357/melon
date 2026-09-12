@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
 import { ModelPicker } from '@/components/model-picker';
-import { ProviderPicker } from '@/components/provider-picker';
 import { SkillsPicker } from '@/components/skills-picker';
 import { ThinkingPicker } from '@/components/thinking-picker';
 import { boxMentionLabel } from '@/lib/agent-names';
@@ -18,7 +17,7 @@ import { cn } from '@/lib/utils';
 
 export type ComposerPermission = 'full' | 'readonly';
 
-const CARD_TEXT = 'text-xs leading-relaxed';
+const CARD_TEXT = 'text-[length:var(--text-chat)] leading-5';
 const HERO_TEXT = 'text-sm leading-relaxed';
 
 type MentionItem =
@@ -111,13 +110,13 @@ export function PromptComposer({
 }) {
     const hero = size === 'hero';
     const maxHeight = hero ? 220 : 120;
-    const [openPicker, setOpenPicker] = useState<'model' | 'provider' | 'skills' | 'thinking' | null>(null);
+    const [openPicker, setOpenPicker] = useState<'model' | 'skills' | 'thinking' | null>(null);
 
     // ── slash commands ──
     const COMMANDS = [
         {
             name: 'send',
-            hint: 'mail another box — lands in their inbox for Approve',
+            hint: 'mail another node — lands in their inbox for Approve',
         },
         {
             name: 'handoff',
@@ -591,7 +590,7 @@ export function PromptComposer({
             </div>
             <div
                 className={cn(
-                    'flex items-center gap-1',
+                    'flex flex-wrap items-center gap-1',
                     hero ? 'px-3 pb-3 pt-1' : 'px-2 pb-1.5 pt-1',
                 )}
             >
@@ -601,19 +600,11 @@ export function PromptComposer({
                     open={openPicker === 'skills'}
                     onOpenChange={(open) => setOpenPicker(open ? 'skills' : null)}
                 />
-                <ProviderPicker
-                    model={model}
-                    onChange={onModelChange}
-                    open={openPicker === 'provider'}
-                    onOpenChange={(open) => setOpenPicker(open ? 'provider' : null)}
-                    cardId={cardId}
-                />
                 <ModelPicker
                     value={model}
                     onChange={onModelChange}
                     open={openPicker === 'model'}
                     onOpenChange={(open) => setOpenPicker(open ? 'model' : null)}
-                    cardId={cardId}
                 />
                 {onThinkingChange && (
                     <ThinkingPicker
@@ -625,8 +616,9 @@ export function PromptComposer({
                     />
                 )}
                 <select
-                    className="cursor-pointer rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none hover:text-foreground"
+                    className="cursor-pointer rounded-md bg-secondary px-1.5 py-0.5 text-[10px] text-muted-foreground outline-none hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                     title="Workspace permissions"
+                    aria-label="Workspace permissions"
                     value={permission}
                     onChange={(e) => onPermissionChange(e.target.value as ComposerPermission)}
                     onClick={(e) => e.stopPropagation()}
@@ -645,6 +637,7 @@ export function PromptComposer({
                               : 'cursor-not-allowed bg-secondary text-muted-foreground',
                     )}
                     title={sending ? 'Stop' : 'Send'}
+                    aria-label={sending ? 'Stop generating' : 'Send message'}
                     onClick={(e) => {
                         e.stopPropagation();
                         if (sending) onStop?.();

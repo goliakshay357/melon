@@ -175,7 +175,7 @@ export function formatEnvelopeWakeLines(envelope: BoxMailEnvelope, mailId: strin
 		`Mail envelope: policy=${envelope.replyPolicy}; thread=${envelope.threadId}; hop=${envelope.hop}; mailId=${mailId}.`,
 	];
 	if (envelope.replyPolicy === "never") {
-		lines.push("Do NOT send_to_box back to the sender. Finish in this box and end the turn (no courtesy ack).");
+		lines.push("Do NOT send_to_box back to the sender. Finish in this node and end the turn (no courtesy ack).");
 	} else if (envelope.replyPolicy === "always_result") {
 		lines.push(
 			"When finished, you may send ONE result back via send_to_box.",

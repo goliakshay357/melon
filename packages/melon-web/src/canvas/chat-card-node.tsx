@@ -8,18 +8,18 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { BookMarked, Bug, ChevronDown, ChevronUp, Copy, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, Shrink, X } from 'lucide-react';
+import { BookMarked, Bug, Check, ChevronDown, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, Shrink, X } from 'lucide-react';
 import { askChoice } from '@/components/dialogs';
 import { useCanvasStore } from '@/store/canvas-store';
 import { boxMailLog } from '@/lib/box-mail-brief';
-import { BoxInboxPanel } from '@/components/box-inbox-panel';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { PromptComposer } from '@/components/prompt-composer';
 import { QuestionPanel } from '@/components/question-panel';
 import { ToolRunBlock } from '@/components/tool-run-block';
 import { DEFAULT_CARD_SIZE, type TraceEvent } from '@/types/session-card';
 import { MinimizedCardBar } from './minimized-card-bar';
-import { CanvasBoxesSideNav, MaximizeIcon } from './canvas-boxes-side-nav';
+import { MaximizeIcon } from './canvas-boxes-side-nav';
+import { FullscreenExitButton, FullscreenShell } from './fullscreen-shell';
 import {
     mentionExists,
     mentionPaths,
@@ -104,10 +104,15 @@ function Spinner() {
 }
 
 // ── 💭 Thinking ──────────────────────────────────────────────────────────
+/** Edit-in-place is disabled for now. Flip to true to re-enable the Edit action. */
+const EDIT_MESSAGE_ENABLED = false;
+
 type MessageShape = {
     role: string;
     text: string;
     thinking?: string;
+    /** pi session entry id — lets a message be a fork point. */
+    entryId?: string;
     tools?: Array<{
         callId: string;
         name: string;
@@ -121,6 +126,76 @@ type MessageShape = {
 // MODULE-LEVEL + memoized: a stable component identity means React reconciles
 // messages on re-render instead of REMOUNTING them (which reloaded viz iframes
 // and made the chat bounce up/down while typing).
+/**
+ * Message action row, Supernova-style: sits under the message and is hidden until
+ * the message is hovered. Copy is always available; Fork and Edit only while the
+ * card is idle.
+ */
+function MessageActions({
+    align,
+    text,
+    onFork,
+    onEdit,
+}: {
+    align: 'start' | 'end';
+    text: string;
+    onFork?: () => void;
+    onEdit?: () => void;
+}) {
+    const [copied, setCopied] = useState(false);
+    const canCopy = text.trim().length > 0;
+    if (!canCopy && !onFork && !onEdit) return null;
+    return (
+        <div
+            className={cn(
+                'mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100',
+                align === 'end' && 'justify-end',
+                copied && 'opacity-100',
+            )}
+        >
+            {canCopy ? (
+                <button
+                    type="button"
+                    title={copied ? 'Copied' : 'Copy message'}
+                    aria-label="Copy message"
+                    className="grid size-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                    onClick={() => {
+                        if (copied) return;
+                        void navigator.clipboard.writeText(text).then(() => {
+                            setCopied(true);
+                            window.setTimeout(() => setCopied(false), 1000);
+                        });
+                    }}
+                >
+                    {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                </button>
+            ) : null}
+            {onFork ? (
+                <button
+                    type="button"
+                    title="Fork from here"
+                    aria-label="Fork from here"
+                    className="grid size-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                    onClick={onFork}
+                >
+                    <GitBranch className="size-3.5" />
+                </button>
+            ) : null}
+            {onEdit ? (
+                <button
+                    type="button"
+                    title="Edit from here"
+                    aria-label="Edit from here"
+                    className="grid size-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                    onClick={onEdit}
+                >
+                    <Pencil className="size-3.5" />
+                </button>
+            ) : null}
+        </div>
+    );
+}
+
 const MessageBlocks = ReactMemo(function MessageBlocks({
     m,
     index,
@@ -130,6 +205,8 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     highlighted,
     findQuery,
     findActive,
+    onFork,
+    onEditSubmit,
 }: {
     m: MessageShape;
     index: number;
@@ -139,8 +216,14 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     highlighted?: boolean;
     findQuery?: string;
     findActive?: boolean;
+    /** Fork the conversation up to this message index. */
+    onFork?: (index: number) => void;
+    /** Revert to before this user message and send the edited text from there. */
+    onEditSubmit?: (index: number, text: string) => void;
 }) {
     const q = findQuery?.trim() ?? '';
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState('');
     if (m.role === 'system') {
         const bad = m.text.startsWith('✗');
         return (
@@ -161,22 +244,73 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
         );
     }
     if (m.role === 'user') {
+        if (editing) {
+            const submitEdit = () => {
+                const text = draft.trim();
+                if (!text) return;
+                setEditing(false);
+                onEditSubmit?.(index, text);
+            };
+            return (
+                <div
+                    className="group/msg flex flex-col items-end"
+                    data-msg-index={index}
+                    data-user-prompt="true"
+                >
+                    <div className="w-full max-w-[92%] rounded-xl border border-ring bg-background px-3 py-2">
+                        <textarea
+                            autoFocus
+                            rows={Math.min(10, Math.max(1, draft.split('\n').length))}
+                            value={draft}
+                            onChange={(e) => setDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                                e.stopPropagation();
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                    e.preventDefault();
+                                    submitEdit();
+                                } else if (e.key === 'Escape') {
+                                    e.preventDefault();
+                                    setEditing(false);
+                                }
+                            }}
+                            className="nodrag nowheel block w-full resize-none bg-transparent text-[length:var(--text-chat)] leading-relaxed text-foreground outline-none"
+                        />
+                        <p className="mt-1 text-right text-[10px] text-muted-foreground">
+                            Enter to send · Esc to cancel
+                        </p>
+                    </div>
+                </div>
+            );
+        }
         return (
             <div
                 className={cn(
-                    'flex justify-end rounded-xl transition-colors duration-500',
+                    'group/msg flex flex-col items-end rounded-xl transition-colors duration-500',
                     highlighted && 'ring-2 ring-primary/50 ring-offset-2 ring-offset-card',
                 )}
                 data-msg-index={index}
                 data-user-prompt="true"
             >
-                <div className="max-w-[92%] overflow-hidden rounded-xl bg-primary/10 px-3 py-1.5 text-xs leading-relaxed text-primary whitespace-pre-wrap break-words">
+                <div className="max-w-[92%] overflow-hidden rounded-xl bg-primary/10 px-3 py-1.5 text-[length:var(--text-chat)] leading-relaxed text-primary whitespace-pre-wrap break-words">
                     {q ? (
                         <HighlightedPlainText text={m.text} query={q} current={findActive} />
                     ) : (
                         <UserTextWithMentions text={m.text} />
                     )}
                 </div>
+                <MessageActions
+                    align="end"
+                    text={m.text}
+                    onFork={!streaming && onFork ? () => onFork(index) : undefined}
+                    onEdit={
+                        !streaming && onEditSubmit
+                            ? () => {
+                                  setDraft(m.text);
+                                  setEditing(true);
+                              }
+                            : undefined
+                    }
+                />
             </div>
         );
     }
@@ -188,7 +322,7 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     return (
         <div
             className={cn(
-                'min-w-0 space-y-2 pl-1 rounded-lg transition-colors duration-500',
+                'group/msg min-w-0 space-y-2 pl-1 rounded-lg transition-colors duration-500',
                 highlighted && 'ring-2 ring-primary/40 ring-offset-2 ring-offset-card',
             )}
             data-msg-index={index}
@@ -218,7 +352,7 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
                 />
             ))}
             {(isStreamingTail ? m.text.length > 0 : m.text.trim()) ? (
-                <div className="rounded-lg bg-secondary/40 px-3 py-2">
+                <div>
                     {q ? (
                         <FindHighlightHost query={q} current={findActive}>
                             <MarkdownBlock content={m.text} streaming={isStreamingTail} />
@@ -228,6 +362,11 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
                     )}
                 </div>
             ) : null}
+            <MessageActions
+                align="start"
+                text={m.text}
+                onFork={!streaming && onFork ? () => onFork(index) : undefined}
+            />
         </div>
     );
 });
@@ -1186,7 +1325,6 @@ function ChatCardNodeInner({
         },
         [id],
     );
-    const [inboxOpen, setInboxOpen] = useState(false);
     const [view, setView] = useState<'chat' | 'trajectory'>('chat');
     const [editingTitle, setEditingTitle] = useState(false);
     const [highlightedIndex, setHighlightedIndex] = useState(-1);
@@ -1388,6 +1526,12 @@ function ChatCardNodeInner({
                 return;
             }
             if (e.key === 'Escape') {
+                if (useCanvasStore.getState().inboxOpen) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    useCanvasStore.getState().closeInbox();
+                    return;
+                }
                 if (findOpen) {
                     e.preventDefault();
                     e.stopPropagation();
@@ -1474,17 +1618,71 @@ function ChatCardNodeInner({
         if (!ok) setDraft((prev) => (prev ? `${prev}\n\n${text}` : text));
     };
 
-    const forkThis = () => {
+    /** Reveal a freshly forked card next to its parent. */
+    const revealNewCard = (newId: string) => {
+        const child = useCanvasStore.getState().cards.find((c) => c.id === newId);
+        if (!child) return;
+        const w = child.size?.width ?? DEFAULT_CARD_SIZE.width;
+        const h = child.size?.height ?? DEFAULT_CARD_SIZE.height;
+        setCenter(child.position.x + w / 2, child.position.y + h / 2, {
+            zoom: getZoom(),
+            duration: 320,
+        });
+    };
+
+    /** Fork the whole card, or a branch up to one pi entry. */
+    const forkAt = (atEntryId?: string) => {
         void (async () => {
-            const newId = await forkCard(id);
-            const child = useCanvasStore.getState().cards.find((c) => c.id === newId);
-            if (!child) return;
-            const w = child.size?.width ?? DEFAULT_CARD_SIZE.width;
-            const h = child.size?.height ?? DEFAULT_CARD_SIZE.height;
-            setCenter(child.position.x + w / 2, child.position.y + h / 2, {
-                zoom: getZoom(),
-                duration: 320,
-            });
+            const newId = await forkCard(id, atEntryId);
+            revealNewCard(newId);
+        })();
+    };
+
+    const forkThis = () => forkAt();
+
+    /**
+     * Fork up to one message. Streamed messages do not carry pi entry ids, so
+     * hydrate the transcript once on demand and then read the entry for that
+     * index. Falls back to a whole-card fork if the entry cannot be resolved.
+     */
+    const forkAtMessage = (index: number) => {
+        void (async () => {
+            const cardNow = () => useCanvasStore.getState().cards.find((c) => c.id === id);
+            let msgs = cardNow()?.messages ?? [];
+            if (!msgs[index]?.entryId) {
+                await useCanvasStore.getState().hydrateMessages(id);
+                msgs = cardNow()?.messages ?? [];
+            }
+            const newId = await forkCard(id, msgs[index]?.entryId);
+            revealNewCard(newId);
+        })();
+    };
+
+    /**
+     * Send an edited user message from its own position: revert the session to
+     * just before it, then send the new text so every later turn is dropped from
+     * the active branch.
+     */
+    const editMessage = (index: number, text: string) => {
+        void (async () => {
+            const cardNow = () => useCanvasStore.getState().cards.find((c) => c.id === id);
+            let msgs = cardNow()?.messages ?? [];
+            if (!msgs[index]?.entryId) {
+                await useCanvasStore.getState().hydrateMessages(id);
+                msgs = cardNow()?.messages ?? [];
+            }
+            const entryId = msgs[index]?.entryId;
+            if (!entryId) {
+                console.error(
+                    `[melon] edit: no entryId for message ${index} — the server transcript has no entry ids. Restart melon-server.`,
+                );
+                useCanvasStore.setState({
+                    canvasNotice:
+                        'Could not edit: the server did not provide a message id. Restart melon-server and reload.',
+                });
+                return;
+            }
+            await useCanvasStore.getState().editUserMessage(id, entryId, text, index);
         })();
     };
 
@@ -1533,7 +1731,7 @@ function ChatCardNodeInner({
         <div
             className={cn(
                 'flex shrink-0 items-center gap-2 border-b border-border',
-                isMax ? 'px-5 py-2.5' : 'rounded-t-xl px-3 py-2',
+                isMax ? 'h-14 px-4' : 'rounded-t-xl px-3 py-2',
             )}
         >
             <span className={cn('size-2 shrink-0 rounded-full', statusDot[card.status])} />
@@ -1599,28 +1797,6 @@ function ChatCardNodeInner({
                             {contextPct}%
                         </span>
                     )}
-                    <button
-                        type="button"
-                        className={cn(
-                            'nodrag relative rounded-md p-1.5 transition-colors',
-                            inboxOpen
-                                ? 'bg-primary/15 text-primary'
-                                : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-                        )}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            setInboxOpen((v) => !v);
-                            void useCanvasStore.getState().syncBoxInbox(id);
-                        }}
-                        title="Box inbox"
-                    >
-                        <Inbox className="size-4" />
-                        {(card.boxInboxPending ?? 0) > 0 ? (
-                            <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-500 px-0.5 text-[9px] font-semibold text-white">
-                                {(card.boxInboxPending ?? 0) > 9 ? '9+' : card.boxInboxPending}
-                            </span>
-                        ) : null}
-                    </button>
                     {historyEntries.length > 0 ? (
                         <button
                             type="button"
@@ -1669,18 +1845,7 @@ function ChatCardNodeInner({
                             useCanvasStore.getState().updateCard(id, { debug: !card.debug })
                         }
                     />
-                    <button
-                        type="button"
-                        className="nodrag flex items-center gap-1.5 rounded-md border border-border/80 px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            setMaximized(false);
-                        }}
-                        title="Back to canvas (Esc)"
-                    >
-                        <Minimize2 className="size-3.5" />
-                        Canvas
-                    </button>
+                    <FullscreenExitButton onExit={() => setMaximized(false)} />
                 </>
             ) : (
                 <>
@@ -1727,18 +1892,12 @@ function ChatCardNodeInner({
                         </button>
                     )}
                     <button
-                        className={cn(
-                            'nodrag relative flex items-center gap-0.5 rounded-md p-1 transition-colors',
-                            inboxOpen
-                                ? 'bg-primary/15 text-primary'
-                                : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-                        )}
+                        className="nodrag relative flex items-center gap-0.5 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
                         onClick={(e) => {
                             e.stopPropagation();
-                            setInboxOpen((v) => !v);
-                            void useCanvasStore.getState().syncBoxInbox(id);
+                            useCanvasStore.getState().openInbox(id);
                         }}
-                        title="Box inbox"
+                        title="Node inbox"
                     >
                         <Inbox className="size-4" />
                         {(card.boxInboxPending ?? 0) > 0 ? (
@@ -1908,7 +2067,7 @@ function ChatCardNodeInner({
                     className={cn(
                         'space-y-4',
                         opts?.roomy &&
-                            'mx-auto w-full max-w-[72rem] px-5 sm:px-8 lg:px-10',
+                            'mx-auto w-full max-w-3xl px-5 md:px-8',
                     )}
                 >
                     {displayMessages.length === 0 && !streaming && (
@@ -1927,13 +2086,17 @@ function ChatCardNodeInner({
                             highlighted={highlightedIndex === i}
                             findQuery={findOpen ? findQuery : ''}
                             findActive={findOpen && highlightedIndex === i}
+                            onFork={viewingHistory ? undefined : forkAtMessage}
+                            onEditSubmit={
+                                viewingHistory || !EDIT_MESSAGE_ENABLED ? undefined : editMessage
+                            }
                         />
                     ))}
                 </div>
             </div>
             {showDown && (
                 <button
-                    className="nodrag absolute bottom-3 right-3 z-10 flex size-7 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
+                    className="nodrag absolute bottom-3 left-1/2 z-10 flex size-7 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
                     onClick={(e) => {
                         e.stopPropagation();
                         goToBottom();
@@ -2073,15 +2236,6 @@ function ChatCardNodeInner({
                 <Handle type="source" position={Position.Right} className="!opacity-0" />
 
                 {header(false)}
-                {inboxOpen ? (
-                    <div className="relative z-20 shrink-0 border-b border-border px-2 py-2">
-                        <BoxInboxPanel
-                            cardId={id}
-                            items={card.boxInbox ?? []}
-                            onClose={() => setInboxOpen(false)}
-                        />
-                    </div>
-                ) : null}
                 {card.error && (
                     <div className="nodrag flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-3 py-2">
                         <span className="shrink-0 text-xs">⚠️</span>
@@ -2135,122 +2289,111 @@ function ChatCardNodeInner({
                 {footerInput}
             </div>
 
-            {maximized &&
-                createPortal(
-                    <div
-                        className="fixed inset-0 z-[999] flex flex-col bg-card"
-                        role="dialog"
-                        aria-modal="true"
-                        aria-label={card.title || 'Chat'}
-                    >
-                        {header(true)}
-                        {inboxOpen ? (
-                            <div className="relative z-30 mx-auto w-full max-w-xl px-4 pt-2">
-                                <BoxInboxPanel
-                                    cardId={id}
-                                    items={card.boxInbox ?? []}
-                                    onClose={() => setInboxOpen(false)}
-                                />
-                            </div>
-                        ) : null}
-                        {card.error && (
-                            <div className="nodrag flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-5 py-2">
-                                <span className="shrink-0 text-xs">⚠️</span>
-                                <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-red-300">
-                                    {card.error}
-                                </span>
-                                <button
-                                    className="nodrag shrink-0 rounded p-0.5 text-red-400 transition-colors hover:bg-red-500/20 hover:text-red-200"
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        useCanvasStore.getState().clearCardError(id);
-                                    }}
-                                    title="Dismiss error"
-                                >
-                                    <X className="size-3.5" />
-                                </button>
+            {maximized && (
+                <FullscreenShell
+                    cardId={id}
+                    ariaLabel={card.title || 'Chat'}
+                    header={header(true)}
+                    banners={
+                        <>
+                            {card.error && (
+                                <div className="nodrag flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-5 py-2">
+                                    <span className="shrink-0 text-xs">⚠️</span>
+                                    <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-red-300">
+                                        {card.error}
+                                    </span>
+                                    <button
+                                        className="nodrag shrink-0 rounded p-0.5 text-red-400 transition-colors hover:bg-red-500/20 hover:text-red-200"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            useCanvasStore.getState().clearCardError(id);
+                                        }}
+                                        title="Dismiss error"
+                                    >
+                                        <X className="size-3.5" />
+                                    </button>
+                                </div>
+                            )}
+                            {card.compactOfferOpen && !card.compacting ? (
+                                <div className="nodrag flex flex-wrap items-center px-5 pt-2">
+                                    <div className="flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 py-1 pl-3 pr-1.5 text-[11px] text-amber-200">
+                                        <span className="tabular-nums">Context ~{contextPct ?? 90}% full</span>
+                                        <button
+                                            type="button"
+                                            className="nodrag rounded-full bg-amber-500/20 px-2 py-0.5 font-medium text-amber-100 transition-colors hover:bg-amber-500/30 disabled:opacity-40"
+                                            disabled={serverOffline}
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                useCanvasStore.getState().dismissCompactOffer(id);
+                                                void useCanvasStore.getState().createCompact(id);
+                                            }}
+                                        >
+                                            Compact
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="nodrag rounded-full p-1 text-amber-300/80 transition-colors hover:bg-amber-500/20 hover:text-amber-100"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                useCanvasStore.getState().dismissCompactOffer(id);
+                                            }}
+                                            title="Dismiss"
+                                            aria-label="Dismiss context warning"
+                                        >
+                                            <X className="size-3" />
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : null}
+                        </>
+                    }
+                >
+                    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                        {findOpen && (
+                            <div className="pointer-events-none absolute right-5 top-3 z-40 sm:right-8">
+                                <div className="pointer-events-auto">
+                                    <MaximizedFindBar
+                                        query={findQuery}
+                                        matchIndex={findMatches.length === 0 ? 0 : findMatchCursor}
+                                        matchCount={findMatches.length}
+                                        onQueryChange={onFindQueryChange}
+                                        onPrev={() => goToFindMatch(findMatchCursor - 1, findMatches)}
+                                        onNext={() => goToFindMatch(findMatchCursor + 1, findMatches)}
+                                        onClose={closeFind}
+                                        inputRef={findInputRef}
+                                    />
+                                </div>
                             </div>
                         )}
-                        {card.compactOfferOpen && !card.compacting ? (
-                            <div className="nodrag flex items-start gap-2 border-b border-amber-500/30 bg-amber-500/10 px-5 py-2">
-                                <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-amber-200">
-                                    Context is getting full (~{contextPct ?? 90}%). Compact archives this chat under Previous history and puts a handoff in the input.
-                                </span>
-                                <button
-                                    type="button"
-                                    className="nodrag shrink-0 rounded-md bg-amber-500/20 px-2 py-0.5 text-[11px] font-medium text-amber-100 transition-colors hover:bg-amber-500/30 disabled:opacity-40"
-                                    disabled={serverOffline}
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        useCanvasStore.getState().dismissCompactOffer(id);
-                                        void useCanvasStore.getState().createCompact(id);
-                                    }}
-                                >
-                                    Compact
-                                </button>
-                                <button
-                                    type="button"
-                                    className="nodrag shrink-0 rounded p-0.5 text-amber-300/80 transition-colors hover:bg-amber-500/20 hover:text-amber-100"
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        useCanvasStore.getState().dismissCompactOffer(id);
-                                    }}
-                                    title="Dismiss"
-                                >
-                                    <X className="size-3.5" />
-                                </button>
+                        {view === 'trajectory' ? (
+                            <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col px-5 md:px-8">
+                                <TrajectoryView card={card} />
                             </div>
-                        ) : null}
-                        <div className="flex min-h-0 flex-1 overflow-hidden">
-                            <CanvasBoxesSideNav currentCardId={id} />
-                            <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-                                {findOpen && (
-                                    <div className="pointer-events-none absolute right-5 top-3 z-40 sm:right-8">
-                                        <div className="pointer-events-auto">
-                                            <MaximizedFindBar
-                                                query={findQuery}
-                                                matchIndex={findMatches.length === 0 ? 0 : findMatchCursor}
-                                                matchCount={findMatches.length}
-                                                onQueryChange={onFindQueryChange}
-                                                onPrev={() => goToFindMatch(findMatchCursor - 1, findMatches)}
-                                                onNext={() => goToFindMatch(findMatchCursor + 1, findMatches)}
-                                                onClose={closeFind}
-                                                inputRef={findInputRef}
-                                            />
-                                        </div>
+                        ) : (
+                            <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+                                <UserPromptSideNav
+                                    prompts={card.messages
+                                        .map((m, index) => ({ index, text: m.text, role: m.role }))
+                                        .filter((m) => m.role === 'user' && m.text.trim().length > 0)
+                                        .map(({ index, text }) => ({ index, text }))}
+                                    activeIndex={viewportPromptIndex}
+                                    onJump={jumpToUserPrompt}
+                                />
+                                {/* Full-bleed scroll; reading column width is applied inside messagesBody. */}
+                                {messagesBody(maxScrollRef, { roomy: true })}
+                                {card.debug === true && (
+                                    <div className="mx-auto w-full max-w-3xl shrink-0 px-5 md:px-8">
+                                        <DebugConsole logs={card.logs ?? []} />
                                     </div>
                                 )}
-                                {view === 'trajectory' ? (
-                                    <div className="mx-auto flex min-h-0 w-full max-w-[72rem] flex-1 flex-col px-5 sm:px-8 lg:px-10">
-                                        <TrajectoryView card={card} />
-                                    </div>
-                                ) : (
-                                    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-                                        <UserPromptSideNav
-                                            prompts={card.messages
-                                                .map((m, index) => ({ index, text: m.text, role: m.role }))
-                                                .filter((m) => m.role === 'user' && m.text.trim().length > 0)
-                                                .map(({ index, text }) => ({ index, text }))}
-                                            activeIndex={viewportPromptIndex}
-                                            onJump={jumpToUserPrompt}
-                                        />
-                                        {/* Full-bleed scroll; reading column width is applied inside messagesBody. */}
-                                        {messagesBody(maxScrollRef, { roomy: true })}
-                                        {card.debug === true && (
-                                            <div className="mx-auto w-full max-w-[72rem] shrink-0 px-5 sm:px-8 lg:px-10">
-                                                <DebugConsole logs={card.logs ?? []} />
-                                            </div>
-                                        )}
-                                        <div className="mx-auto w-full max-w-[72rem] shrink-0 px-5 sm:px-8 lg:px-10">
-                                            {footerInput}
-                                        </div>
-                                    </div>
-                                )}
+                                <div className="mx-auto w-full max-w-3xl shrink-0 px-5 md:px-8">
+                                    {footerInput}
+                                </div>
                             </div>
-                        </div>
-                    </div>,
-                    document.body,
-                )}
+                        )}
+                    </div>
+                </FullscreenShell>
+            )}
         </>
     );
 }
