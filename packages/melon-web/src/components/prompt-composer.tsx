@@ -1,9 +1,11 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
 import { ModelPicker } from '@/components/model-picker';
 import { ProviderPicker } from '@/components/provider-picker';
 import { SkillsPicker } from '@/components/skills-picker';
 import { ThinkingPicker } from '@/components/thinking-picker';
+import { boxMentionLabel } from '@/lib/agent-names';
+import { boxMailLog } from '@/lib/box-mail-brief';
 import { useCanvasStore } from '@/store/canvas-store';
 import {
     activeMention,
@@ -19,8 +21,20 @@ export type ComposerPermission = 'full' | 'readonly';
 const CARD_TEXT = 'text-xs leading-relaxed';
 const HERO_TEXT = 'text-sm leading-relaxed';
 
-/** Backdrop span colors: file exists = sky, missing = red, unknown = dotted. */
-function MentionBackdropSpans({ spans, cwd }: { spans: MentionSpan[]; cwd: string | null }) {
+type MentionItem =
+    | { kind: 'agent'; token: string; label: string; cardId: string; status: string }
+    | { kind: 'file'; token: string; label: string; path: string; title?: string };
+
+/** Backdrop span colors: agent = sky · file exists = sky · missing = red · unknown = dotted. */
+function MentionBackdropSpans({
+    spans,
+    cwd,
+    agentTokens,
+}: {
+    spans: MentionSpan[];
+    cwd: string | null;
+    agentTokens: Set<string>;
+}) {
     return (
         <>
             {spans.map((s, i) =>
@@ -29,7 +43,7 @@ function MentionBackdropSpans({ spans, cwd }: { spans: MentionSpan[]; cwd: strin
                         key={i}
                         className={cn(
                             'rounded-sm',
-                            mentionExists(cwd, s.mention) === true
+                            agentTokens.has(s.mention.toLowerCase()) || mentionExists(cwd, s.mention) === true
                                 ? 'bg-sky-500/10 text-sky-600 dark:text-sky-400'
                                 : mentionExists(cwd, s.mention) === false
                                   ? 'bg-red-500/10 text-red-500'
@@ -102,8 +116,16 @@ export function PromptComposer({
     // ── slash commands ──
     const COMMANDS = [
         {
+            name: 'send',
+            hint: 'mail another box — lands in their inbox for Approve',
+        },
+        {
             name: 'handoff',
             hint: 'distill this conversation into a note — your message names it and steers the focus',
+        },
+        {
+            name: 'compact',
+            hint: 'archive this chat under Previous history, start fresh, put the handoff in the input',
         },
         {
             name: 'diagram',
@@ -111,17 +133,22 @@ export function PromptComposer({
         },
     ] as const;
 
-    // ── @-mentions ──
+    // ── @-mentions (agents on this canvas + files) ──
     const cwd = useCanvasStore((s) => s.worktreePath ?? s.folder);
     const folder = useCanvasStore((s) => s.folder);
+    const cards = useCanvasStore((s) => s.cards);
     const taRef = useRef<HTMLTextAreaElement | null>(null);
     const backdropRef = useRef<HTMLDivElement | null>(null);
     const [caret, setCaret] = useState(0);
     const [dismissed, setDismissed] = useState(false);
     const [cmdDismissed, setCmdDismissed] = useState(false);
     const [cmdHighlight, setCmdHighlight] = useState(0);
-    const [items, setItems] = useState<Array<{ path: string; title?: string }>>([]);
+    const [profileNames, setProfileNames] = useState<Record<string, string>>({});
+    const [fileItems, setFileItems] = useState<Array<{ path: string; title?: string }>>([]);
     const [highlight, setHighlight] = useState(0);
+    const itemsRef = useRef<MentionItem[]>([]);
+    const highlightRef = useRef(0);
+    const mentionRef = useRef<ReturnType<typeof activeMention>>(null);
 
     const mention = activeMention(value, caret);
     const mentionOpen = mention !== null && !dismissed;
@@ -133,21 +160,95 @@ export function PromptComposer({
         : [];
 
     useEffect(() => {
-        console.log(
-            `[melon-@] dropdown: open=${mention !== null && !dismissed} query="${mention?.query ?? ""}" cwd=${cwd} folder=${folder} caret=${caret}`,
-        );
-    }, [mention?.query, mention, dismissed, caret, cwd, folder]);
+        let alive = true;
+        fetch('/agents')
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d: { agents?: Array<{ id: string; name: string }> } | null) => {
+                if (!alive || !d?.agents) return;
+                const map: Record<string, string> = {};
+                for (const a of d.agents) {
+                    if (a.id && a.name) map[a.id] = a.name;
+                }
+                setProfileNames(map);
+            })
+            .catch(() => {});
+        return () => {
+            alive = false;
+        };
+    }, []);
+
+    const agentTokens = useMemo(() => {
+        const set = new Set<string>();
+        for (const c of cards) {
+            if ((c.kind ?? 'chat') !== 'chat') continue;
+            if (cardId && c.id === cardId) continue;
+            set.add(c.id.toLowerCase());
+            if (c.agentInstanceName) set.add(c.agentInstanceName.toLowerCase());
+        }
+        return set;
+    }, [cards, cardId]);
+
+    const agentItems = useMemo((): MentionItem[] => {
+        if (!mention) return [];
+        const q = mention.query.toLowerCase();
+        const out: MentionItem[] = [];
+        for (const c of cards) {
+            if ((c.kind ?? 'chat') !== 'chat') continue;
+            if (cardId && c.id === cardId) continue;
+            const profileName = c.agentProfileId ? profileNames[c.agentProfileId] : undefined;
+            const label = boxMentionLabel({
+                title: c.title,
+                agentInstanceName: c.agentInstanceName,
+                agentProfileId: c.agentProfileId,
+                profileName,
+            });
+            const token = c.agentInstanceName?.trim() || c.id;
+            const hay = `${label} ${token} ${c.title} ${c.agentProfileId ?? ''}`.toLowerCase();
+            if (q && !hay.includes(q)) continue;
+            const status =
+                c.status === 'streaming' ? 'thinking' : c.status === 'error' ? 'error' : 'idle';
+            out.push({ kind: 'agent', token, label, cardId: c.id, status });
+        }
+        return out.slice(0, 12);
+    }, [cards, cardId, mention, profileNames]);
+
+    const items = useMemo((): MentionItem[] => {
+        if (!mention) return [];
+        const files: MentionItem[] = fileItems.map((f) => ({
+            kind: 'file',
+            token: f.path,
+            label: f.title ?? f.path,
+            path: f.path,
+            title: f.title,
+        }));
+        return [...agentItems, ...files];
+    }, [mention, agentItems, fileItems]);
+
+    itemsRef.current = items;
+    highlightRef.current = highlight;
+    mentionRef.current = mention;
+
+    useEffect(() => {
+        if (!mentionOpen) return;
+        boxMailLog('dropdown open', {
+            query: mention?.query ?? '',
+            agents: agentItems.length,
+            files: fileItems.length,
+            items: items.length,
+            cardId: cardId ?? null,
+        });
+    }, [mentionOpen, mention?.query, agentItems.length, fileItems.length, items.length, cardId]);
 
     useEffect(() => {
         if (!mention) {
-            setItems([]);
+            setFileItems([]);
             return;
         }
         let alive = true;
         const t = setTimeout(async () => {
             const files = await fetchFileCandidates(cwd, mention.query, folder !== cwd ? folder : null);
             if (alive) {
-                setItems(files);
+                setFileItems(files);
                 setHighlight(0);
             }
         }, 120);
@@ -157,29 +258,45 @@ export function PromptComposer({
         };
     }, [mention?.query, cwd, folder]);
 
+    useEffect(() => {
+        setHighlight(0);
+    }, [agentItems.length, fileItems.length, mention?.query]);
+
     const syncCaret = (el: HTMLTextAreaElement | null) => {
         if (el) setCaret(el.selectionStart ?? 0);
     };
 
     const pickCandidate = useCallback(
-        (path: string) => {
-            if (!mention) return;
-            const insert = `@${path} `;
-            const next = value.slice(0, mention.start) + insert + value.slice(mention.end);
+        (token: string) => {
+            const el = taRef.current;
+            const liveCaret = el?.selectionStart ?? caret;
+            const live = activeMention(value, liveCaret) ?? mentionRef.current ?? mention;
+            if (!live || !token) {
+                boxMailLog('pick @ aborted', { token, query: live?.query ?? null, liveCaret });
+                return;
+            }
+            boxMailLog('pick @ complete', {
+                from: live.query,
+                to: token,
+                start: live.start,
+                end: live.end,
+            });
+            const insert = `@${token} `;
+            const next = value.slice(0, live.start) + insert + value.slice(live.end);
             onChange(next);
             setDismissed(true);
             requestAnimationFrame(() => {
-                const el = taRef.current;
-                if (!el) return;
-                const pos = mention.start + insert.length;
-                el.focus();
-                el.setSelectionRange(pos, pos);
+                const box = taRef.current;
+                if (!box) return;
+                const pos = live.start + insert.length;
+                box.focus();
+                box.setSelectionRange(pos, pos);
                 setCaret(pos);
-                el.style.height = 'auto';
-                el.style.height = `${Math.min(Math.max(el.scrollHeight, hero ? 112 : 0), maxHeight)}px`;
+                box.style.height = 'auto';
+                box.style.height = `${Math.min(Math.max(box.scrollHeight, hero ? 112 : 0), maxHeight)}px`;
             });
         },
-        [mention, value, onChange, hero, maxHeight],
+        [mention, value, caret, onChange, hero, maxHeight],
     );
 
     const growTextarea = useCallback(
@@ -213,7 +330,7 @@ export function PromptComposer({
                         hero ? `px-4 pt-4 pb-2 ${HERO_TEXT}` : `px-3 pt-2.5 pb-1 ${CARD_TEXT}`,
                     )}
                 >
-                    <MentionBackdropSpans spans={spans} cwd={cwd} />
+                    <MentionBackdropSpans spans={spans} cwd={cwd} agentTokens={agentTokens} />
                 </div>
                 <textarea
                     autoFocus={autoFocus}
@@ -295,21 +412,46 @@ export function PromptComposer({
                             }
                             // Enter falls through to normal submit — the command runs.
                         }
-                        // Mention autocomplete owns navigation keys while open.
-                        if (mentionOpen && items.length > 0) {
+                        // Mention autocomplete (keyboard-first).
+                        // While an @token is being typed: Enter/Tab MUST complete the
+                        // highlighted row to the FULL token (e.g. @swi → @swift-otter).
+                        // Never submit the partial @swi as a user message.
+                        const liveMention = mentionRef.current ?? mention;
+                        const liveItems = itemsRef.current;
+                        const liveOpen = liveMention !== null && !dismissed;
+                        if (liveOpen) {
                             if (e.key === 'ArrowDown') {
                                 e.preventDefault();
-                                setHighlight((h) => (h + 1) % items.length);
+                                if (liveItems.length === 0) return;
+                                setHighlight((h) => (h + 1) % liveItems.length);
                                 return;
                             }
                             if (e.key === 'ArrowUp') {
                                 e.preventDefault();
-                                setHighlight((h) => (h - 1 + items.length) % items.length);
+                                if (liveItems.length === 0) return;
+                                setHighlight((h) => (h - 1 + liveItems.length) % liveItems.length);
                                 return;
                             }
                             if (e.key === 'Enter' || e.key === 'Tab') {
                                 e.preventDefault();
-                                pickCandidate(items[highlight]?.path ?? '');
+                                const hi = highlightRef.current;
+                                const chosen =
+                                    liveItems[hi] ??
+                                    liveItems[0] ??
+                                    null;
+                                boxMailLog(e.key === 'Enter' ? 'Enter → complete @' : 'Tab → complete @', {
+                                    query: liveMention?.query,
+                                    items: liveItems.length,
+                                    highlight: hi,
+                                    chosen: chosen
+                                        ? { kind: chosen.kind, token: chosen.token, label: chosen.label }
+                                        : null,
+                                });
+                                if (!chosen?.token) {
+                                    boxMailLog('complete @ aborted: no candidate');
+                                    return;
+                                }
+                                pickCandidate(chosen.token);
                                 return;
                             }
                             if (e.key === 'Escape') {
@@ -317,11 +459,26 @@ export function PromptComposer({
                                 setDismissed(true);
                                 return;
                             }
+                            // Any other key while menu open: don't treat Enter fallthrough.
                         } else if (e.key === 'Escape' && dismissed) {
                             setDismissed(false);
                         }
                         if (e.key === 'Enter' && !e.shiftKey) {
                             e.preventDefault();
+                            // Safety: if caret is still inside an @token, never send raw partial.
+                            const still = activeMention(value, taRef.current?.selectionStart ?? caret);
+                            if (still && !dismissed) {
+                                boxMailLog('Enter blocked: still inside @token', {
+                                    query: still.query,
+                                    draftPreview: value.slice(0, 80),
+                                });
+                                return;
+                            }
+                            boxMailLog('Enter → submit', {
+                                canSubmit,
+                                draftPreview: value.slice(0, 80),
+                                cardId: cardId ?? null,
+                            });
                             if (canSubmit) onSubmit();
                         }
                     }}
@@ -372,23 +529,41 @@ export function PromptComposer({
                         <div className="nowheel max-h-56 overflow-y-auto py-1">
                             {items.length === 0 && (
                                 <p className="px-3 py-2 text-[11px] text-muted-foreground">
-                                    {mention && mention.query.length > 0 ? 'No matching files' : 'Start typing to search files…'}
+                                    {mention && mention.query.length > 0
+                                        ? 'No matching agents or files'
+                                        : 'Type to filter agents on this canvas or files…'}
                                 </p>
                             )}
                             {items.map((item, i) => (
                                 <button
-                                    key={item.path}
+                                    key={`${item.kind}:${item.token}`}
                                     className={cn(
                                         'block w-full px-3 py-1.5 text-left transition-colors',
                                         i === highlight ? 'bg-secondary' : 'hover:bg-secondary/60',
                                     )}
                                     onClick={(e) => {
                                         e.stopPropagation();
-                                        pickCandidate(item.path);
+                                        pickCandidate(item.token);
                                     }}
-                                    title={cwd ? `${cwd}/${item.path}` : item.path}
+                                    title={
+                                        item.kind === 'agent'
+                                            ? `Mail ${item.label}`
+                                            : cwd
+                                              ? `${cwd}/${item.path}`
+                                              : item.path
+                                    }
                                 >
-                                    {item.title ? (
+                                    {item.kind === 'agent' ? (
+                                        <>
+                                            <div className="truncate text-[11px] font-medium text-card-foreground">
+                                                <span className="text-sky-600 dark:text-sky-400">@</span>
+                                                {item.label}
+                                            </div>
+                                            <div className="truncate text-[10px] text-muted-foreground">
+                                                agent · {item.status} · Enter mails their inbox
+                                            </div>
+                                        </>
+                                    ) : item.title ? (
                                         <>
                                             <div className="truncate text-[11px] font-medium text-card-foreground">
                                                 <span className="text-sky-600 dark:text-sky-400">@</span>
@@ -408,7 +583,7 @@ export function PromptComposer({
                                 </button>
                             ))}
                             <p className="border-t border-border px-3 py-1 text-[9px] text-muted-foreground">
-                                ↑↓ navigate · Enter/Tab select · Esc dismiss
+                                ↑↓ navigate · Enter/Tab complete full @name · type message · Enter send
                             </p>
                         </div>
                     </div>

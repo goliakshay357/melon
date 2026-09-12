@@ -24,6 +24,8 @@ export default defineConfig({
             "/pick-folder": "http://127.0.0.1:8788",
             "/folders": "http://127.0.0.1:8788",
             "/skills": "http://127.0.0.1:8788",
+            "/agents": "http://127.0.0.1:8788",
+            "/boxes": "http://127.0.0.1:8788",
             "/viz": "http://127.0.0.1:8788",
             "/notes": "http://127.0.0.1:8788",
             "/files": "http://127.0.0.1:8788",

@@ -66,6 +66,35 @@ export interface NoteWireView {
 	stale?: boolean;
 }
 
+/** Box↔box mail intent (mirrors server BoxMailEnvelope). */
+export type BoxMailReplyPolicy = "never" | "if_needed" | "always_result";
+export type BoxMailReplyReason = "blocked" | "needs_decision" | "deliverable_ready" | "error_for_sender";
+
+export interface BoxMailEnvelope {
+	schemaVersion: number;
+	threadId: string;
+	parentMailId?: string;
+	hop: number;
+	replyPolicy: BoxMailReplyPolicy;
+	replyReason?: BoxMailReplyReason;
+}
+
+/** One box↔box mail item in a card's inbox (server-synced). */
+export interface BoxInboxItem {
+	id: string;
+	direction: "in" | "out";
+	fromCardId: string;
+	fromTitle: string;
+	toCardId: string;
+	toTitle: string;
+	body: string;
+	status: "pending" | "approved" | "delivered" | "dismissed";
+	createdBy: "user" | "agent";
+	createdAt: number;
+	autoApproved?: boolean;
+	envelope?: BoxMailEnvelope;
+}
+
 /**
  * Canvas-side state of a note node (kind: "note"). The artifact FILE at
  * `<folder>/.melon/notes/handoff/<artifactId>.md` is the source of truth;
@@ -101,6 +130,16 @@ export interface NoteState {
 	wires: NoteWireView[];
 }
 
+/** One archived chat session kept after /compact (same card, new empty session). */
+export interface CompactHistoryEntry {
+	id: string;
+	sessionFile?: string;
+	messages: ChatMessage[];
+	contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
+	label: string;
+	archivedAt: number;
+}
+
 export interface SessionCard {
 	id: string;
 	/** chat = AI conversation · document = markdown editor · note = file-backed artifact node */
@@ -120,6 +159,8 @@ export interface SessionCard {
 	documentVersion?: number;
 	/** Concurrency token for manual saves (server file mtime, ms). */
 	documentMtimeMs?: number;
+	/** Unsaved local document edits (file-backed manuals). */
+	dirty?: boolean;
 	title: string;
 	position: { x: number; y: number };
 	parentId: string | null;
@@ -150,6 +191,27 @@ export interface SessionCard {
 	contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
 	/** Active skill ids for this card (injected into prompts). Default OFF. */
 	skills?: string[];
+	/**
+	 * Specialized agent profile from Settings → Agents. Absent / null = general box.
+	 * Injected as standing instructions every turn on the server.
+	 */
+	agentProfileId?: string | null;
+	/** Word-pair instance name (e.g. swift-otter) for UI disambiguation. */
+	agentInstanceName?: string;
+	/**
+	 * @deprecated Mid-edge mail drafts removed — box mail uses per-card inbox.
+	 * Kept optional so old canvas JSON still loads.
+	 */
+	mailDraft?: {
+		fromCardId: string;
+		toCardId: string;
+		status: "draft" | "sent" | "cancelled";
+		createdBy: "user" | "agent";
+	};
+	/** Live box-mail inbox (synced from server / SSE). */
+	boxInbox?: BoxInboxItem[];
+	/** Pending inbound count for the header badge. */
+	boxInboxPending?: number;
 	/** Manual mind-map arrow: side + position along side (0..1), plus line waypoints. */
 	edgeToParent?: {
 		sourceSide?: "top" | "bottom" | "left" | "right";
@@ -166,6 +228,19 @@ export interface SessionCard {
 	queue?: string[];
 	/** Restored into the card composer when the first prompt fails to send. */
 	pendingDraft?: string;
+	/**
+	 * Archived transcripts from /compact. Live session stays current; these are
+	 * read-only via the Previous history toggle.
+	 */
+	sessionHistory?: CompactHistoryEntry[];
+	/** Which archived history is on screen; null/undefined = live session. */
+	viewingHistoryId?: string | null;
+	/** True while /compact is distilling + swapping sessions. */
+	compacting?: boolean;
+	/** Latch: already auto-offered compact for this fill cycle. */
+	compactOfferLatched?: boolean;
+	/** In-card top banner offering Compact (like the error strip). */
+	compactOfferOpen?: boolean;
 	/**
 	 * Unsent composer text. Lives here, not in the card component: React Flow
 	 * unmounts off-screen nodes (onlyRenderVisibleElements), so component state

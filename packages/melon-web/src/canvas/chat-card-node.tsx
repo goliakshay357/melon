@@ -8,14 +8,18 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { BookMarked, Bug, ChevronDown, ChevronUp, Copy, Minimize2, MoreHorizontal, Pencil, Plus, Search, X } from 'lucide-react';
+import { BookMarked, Bug, ChevronDown, ChevronUp, Copy, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, Shrink, X } from 'lucide-react';
+import { askChoice } from '@/components/dialogs';
 import { useCanvasStore } from '@/store/canvas-store';
+import { boxMailLog } from '@/lib/box-mail-brief';
+import { BoxInboxPanel } from '@/components/box-inbox-panel';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { PromptComposer } from '@/components/prompt-composer';
 import { QuestionPanel } from '@/components/question-panel';
 import { ToolRunBlock } from '@/components/tool-run-block';
 import { DEFAULT_CARD_SIZE, type TraceEvent } from '@/types/session-card';
 import { MinimizedCardBar } from './minimized-card-bar';
+import { CanvasBoxesSideNav, MaximizeIcon } from './canvas-boxes-side-nav';
 import {
     mentionExists,
     mentionPaths,
@@ -1174,7 +1178,15 @@ function ChatCardNodeInner({
         (next: string | ((prev: string) => string)) => useCanvasStore.getState().setCardDraft(id, next),
         [id],
     );
-    const [maximized, setMaximized] = useState(false);
+    const maximizedCardId = useCanvasStore((s) => s.maximizedCardId);
+    const maximized = maximizedCardId === id;
+    const setMaximized = useCallback(
+        (next: boolean) => {
+            useCanvasStore.getState().setMaximizedCardId(next ? id : null);
+        },
+        [id],
+    );
+    const [inboxOpen, setInboxOpen] = useState(false);
     const [view, setView] = useState<'chat' | 'trajectory'>('chat');
     const [editingTitle, setEditingTitle] = useState(false);
     const [highlightedIndex, setHighlightedIndex] = useState(-1);
@@ -1183,8 +1195,9 @@ function ChatCardNodeInner({
     const [findQuery, setFindQuery] = useState('');
     const [findMatchCursor, setFindMatchCursor] = useState(0);
     const findInputRef = useRef<HTMLInputElement>(null);
-    const dbg = (...args: unknown[]) => console.log('[ui-debug]', ...args);
-    useEffect(() => { dbg('card mounted', id); }, []);
+    useEffect(() => {
+        void useCanvasStore.getState().syncBoxInbox(id);
+    }, [id]);
     const scrollRef = useRef<HTMLDivElement>(null);
     const maxScrollRef = useRef<HTMLDivElement>(null);
     const atBottomRef = useRef(true); // user pinned to the newest output?
@@ -1196,7 +1209,6 @@ function ChatCardNodeInner({
 
     const handleMessagesScroll = (el: HTMLDivElement) => {
         const near = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-        dbg('scroll', `st=${el.scrollTop} sh=${el.scrollHeight} ch=${el.clientHeight} atBottom=${near}`);
         atBottomRef.current = near;
         setShowDown(!near); // React bails out when unchanged
         if (maximized) {
@@ -1205,7 +1217,6 @@ function ChatCardNodeInner({
         }
     };
     const goToBottom = () => {
-        dbg('DOWN-ARROW clicked — jumping to bottom');
         atBottomRef.current = true;
         setShowDown(false);
         const el = scrollRef.current;
@@ -1286,7 +1297,6 @@ function ChatCardNodeInner({
     // Auto-follow ONLY while the user is at the bottom. If they scroll away,
     // new output must NOT yank them down — the ↓ button returns them instead.
     useEffect(() => {
-        dbg('stream-change fired', `atBottom=${atBottomRef.current} msgs=${card?.messages.length}`);
         if (!atBottomRef.current) return; // user scrolled away — DO NOT yank
         const el = scrollRef.current;
         if (el) el.scrollTop = el.scrollHeight;
@@ -1300,9 +1310,7 @@ function ChatCardNodeInner({
     useEffect(() => {
         const attach = (el: HTMLDivElement | null) => {
             if (!el) return;
-            const ro = new ResizeObserver((entries) => {
-                const cr = entries[0]?.contentRect;
-                dbg('viewport-resize', `ch=${cr?.height?.toFixed(0)} atBottom=${atBottomRef.current} ${atBottomRef.current ? '→ snap' : '→ leave'}`);
+            const ro = new ResizeObserver(() => {
                 if (atBottomRef.current) el.scrollTop = el.scrollHeight;
             });
             ro.observe(el);
@@ -1394,7 +1402,7 @@ function ChatCardNodeInner({
             document.body.style.overflow = prevOverflow;
             window.removeEventListener('keydown', onKey);
         };
-    }, [maximized, findOpen, findQuery, findMatchCursor, closeFind, goToFindMatch, card?.messages]);
+    }, [maximized, findOpen, findQuery, findMatchCursor, closeFind, goToFindMatch, card?.messages, setMaximized]);
 
     useEffect(() => {
         if (!card?.pendingDraft) return;
@@ -1402,6 +1410,26 @@ function ChatCardNodeInner({
         setDraft((prev) => (prev ? `${prev}\n\n${card.pendingDraft}` : card.pendingDraft!));
         useCanvasStore.getState().updateCard(id, { pendingDraft: undefined });
     }, [card?.pendingDraft, id, setDraft]);
+
+    // At ~90% context, show an in-card Compact banner once per fill cycle.
+    useEffect(() => {
+        if (!card || card.kind === 'note' || card.kind === 'document') return;
+        const pct = card.contextUsage?.percent;
+        if (pct == null) return;
+        if (pct < 85 && card.compactOfferLatched) {
+            useCanvasStore.getState().clearCompactOfferLatch(id);
+            return;
+        }
+        if (pct < 90 || card.compactOfferLatched || card.compacting || serverOffline) return;
+        useCanvasStore.getState().latchCompactOffer(id);
+    }, [
+        card?.contextUsage?.percent,
+        card?.compactOfferLatched,
+        card?.compacting,
+        card?.kind,
+        id,
+        serverOffline,
+    ]);
 
     // The persisted queue is a mirror of pi's in-memory queue, which dies
     // with the server. Resync once per mount so stale chips (app restart,
@@ -1434,9 +1462,14 @@ function ChatCardNodeInner({
 
     const submit = async () => {
         const text = draft.trim();
-        if (!text) return;
+        boxMailLog('card submit', { cardId: id, textPreview: text.slice(0, 100) });
+        if (!text) {
+            boxMailLog('card submit abort: empty');
+            return;
+        }
         setDraft('');
         const ok = await sendMessage(id, text);
+        boxMailLog('card submit done', { ok });
         // Failed — hand the text back behind anything typed since, never over it.
         if (!ok) setDraft((prev) => (prev ? `${prev}\n\n${text}` : text));
     };
@@ -1452,6 +1485,40 @@ function ChatCardNodeInner({
                 zoom: getZoom(),
                 duration: 320,
             });
+        })();
+    };
+
+    const historyEntries = card.sessionHistory ?? [];
+    const viewingHistoryId = card.viewingHistoryId ?? null;
+    const viewingEntry = viewingHistoryId
+        ? historyEntries.find((h) => h.id === viewingHistoryId) ?? null
+        : null;
+    const displayMessages = viewingEntry?.messages ?? card.messages;
+    const viewingHistory = Boolean(viewingEntry);
+
+    const openPreviousHistory = () => {
+        void (async () => {
+            if (viewingHistory) {
+                useCanvasStore.getState().setViewingHistory(id, null);
+                return;
+            }
+            if (historyEntries.length === 0) return;
+            if (historyEntries.length === 1) {
+                useCanvasStore.getState().setViewingHistory(id, historyEntries[0]!.id);
+                return;
+            }
+            const choice = await askChoice({
+                title: 'Previous history',
+                description: 'Pick which archived chat to view. Your live session stays as it is.',
+                options: [...historyEntries]
+                    .reverse()
+                    .map((h) => ({
+                        value: h.id,
+                        label: h.label,
+                        description: `${h.messages.length} messages`,
+                    })),
+            });
+            if (choice) useCanvasStore.getState().setViewingHistory(id, choice);
         })();
     };
 
@@ -1496,13 +1563,25 @@ function ChatCardNodeInner({
             ) : (
                 <span
                     className="min-w-0 flex-1 cursor-text truncate text-sm font-medium tracking-tight text-card-foreground"
-                    title="Double-click to rename"
+                    title={
+                        card.agentProfileId
+                            ? `${card.title} · id ${card.id}${card.agentInstanceName ? ` · ${card.agentInstanceName}` : ''}`
+                            : 'Double-click to rename'
+                    }
                     onDoubleClick={(e) => {
                         e.stopPropagation();
                         setEditingTitle(true);
                     }}
                 >
                     {card.title}
+                </span>
+            )}
+            {card.agentProfileId && (
+                <span
+                    className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                    title={`Profile ${card.agentProfileId} · ${card.id}${card.agentInstanceName ? ` · ${card.agentInstanceName}` : ''} · ${card.status === 'streaming' ? 'thinking' : card.status === 'error' ? 'error' : 'idle'}`}
+                >
+                    agent
                 </span>
             )}
 
@@ -1520,6 +1599,69 @@ function ChatCardNodeInner({
                             {contextPct}%
                         </span>
                     )}
+                    <button
+                        type="button"
+                        className={cn(
+                            'nodrag relative rounded-md p-1.5 transition-colors',
+                            inboxOpen
+                                ? 'bg-primary/15 text-primary'
+                                : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                        )}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            setInboxOpen((v) => !v);
+                            void useCanvasStore.getState().syncBoxInbox(id);
+                        }}
+                        title="Box inbox"
+                    >
+                        <Inbox className="size-4" />
+                        {(card.boxInboxPending ?? 0) > 0 ? (
+                            <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-500 px-0.5 text-[9px] font-semibold text-white">
+                                {(card.boxInboxPending ?? 0) > 9 ? '9+' : card.boxInboxPending}
+                            </span>
+                        ) : null}
+                    </button>
+                    {historyEntries.length > 0 ? (
+                        <button
+                            type="button"
+                            className={cn(
+                                'nodrag relative rounded-md p-1.5 transition-colors',
+                                viewingHistory
+                                    ? 'bg-primary/15 text-primary'
+                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                            )}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                openPreviousHistory();
+                            }}
+                            title={viewingHistory ? 'Back to live session' : 'Previous history'}
+                        >
+                            <History className="size-4" />
+                            <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-secondary px-0.5 text-[9px] font-semibold text-muted-foreground ring-1 ring-border">
+                                {historyEntries.length > 9 ? '9+' : historyEntries.length}
+                            </span>
+                        </button>
+                    ) : null}
+                    <button
+                        type="button"
+                        className="nodrag rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                        disabled={serverOffline || Boolean(card.compacting) || viewingHistory}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            if (serverOffline || card.compacting) return;
+                            useCanvasStore.getState().dismissCompactOffer(id);
+                            void useCanvasStore.getState().createCompact(id);
+                        }}
+                        title={
+                            serverOffline
+                                ? 'Reconnecting to server…'
+                                : card.compacting
+                                  ? 'Compacting…'
+                                  : 'Compact — archive chat, fresh session, handoff in input'
+                        }
+                    >
+                        <Shrink className="size-4" />
+                    </button>
                     <CardMoreMenu
                         debug={card.debug === true}
                         contextLabel={contextLabel}
@@ -1586,6 +1728,27 @@ function ChatCardNodeInner({
                     )}
                     <button
                         className={cn(
+                            'nodrag relative flex items-center gap-0.5 rounded-md p-1 transition-colors',
+                            inboxOpen
+                                ? 'bg-primary/15 text-primary'
+                                : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                        )}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            setInboxOpen((v) => !v);
+                            void useCanvasStore.getState().syncBoxInbox(id);
+                        }}
+                        title="Box inbox"
+                    >
+                        <Inbox className="size-4" />
+                        {(card.boxInboxPending ?? 0) > 0 ? (
+                            <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-500 px-0.5 text-[9px] font-semibold text-white">
+                                {(card.boxInboxPending ?? 0) > 9 ? '9+' : card.boxInboxPending}
+                            </span>
+                        ) : null}
+                    </button>
+                    <button
+                        className={cn(
                             'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
                             card.debug === true
                                 ? 'bg-amber-500/15 text-amber-500 ring-1 ring-inset ring-amber-500/40'
@@ -1600,9 +1763,48 @@ function ChatCardNodeInner({
                         <Bug className="size-3.5" />
                         DBG
                     </button>
+                    {historyEntries.length > 0 ? (
+                        <button
+                            className={cn(
+                                'nodrag relative rounded-md p-1 transition-colors',
+                                viewingHistory
+                                    ? 'bg-primary/15 text-primary'
+                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                            )}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                openPreviousHistory();
+                            }}
+                            title={viewingHistory ? 'Back to live session' : 'Previous history'}
+                        >
+                            <History className="size-4" />
+                            <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-secondary px-0.5 text-[9px] font-semibold text-muted-foreground ring-1 ring-border">
+                                {historyEntries.length > 9 ? '9+' : historyEntries.length}
+                            </span>
+                        </button>
+                    ) : null}
                     <button
                         className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-                        disabled={serverOffline}
+                        disabled={serverOffline || Boolean(card.compacting) || viewingHistory}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            if (serverOffline || card.compacting) return;
+                            useCanvasStore.getState().dismissCompactOffer(id);
+                            void useCanvasStore.getState().createCompact(id);
+                        }}
+                        title={
+                            serverOffline
+                                ? 'Reconnecting to server…'
+                                : card.compacting
+                                  ? 'Compacting…'
+                                  : 'Compact — archive chat, fresh session, handoff in input'
+                        }
+                    >
+                        <Shrink className="size-4" />
+                    </button>
+                    <button
+                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                        disabled={serverOffline || Boolean(card.compacting)}
                         onClick={(e) => {
                             e.stopPropagation();
                             if (serverOffline) return;
@@ -1672,11 +1874,26 @@ function ChatCardNodeInner({
     // reloading viz iframes and making the chat bounce).
 
     const messagesBody = (scrollTo: React.RefObject<HTMLDivElement>, opts?: { roomy?: boolean }) => {
-        const streaming = card.status === 'streaming';
+        const streaming = !viewingHistory && card.status === 'streaming';
         // roomy (maximized): scroll surface is full-bleed so side gutters/padding
         // still receive wheel events; max-width + horizontal padding live INSIDE.
         return (
         <div className="relative min-h-0 min-w-0 flex-1">
+            {viewingHistory ? (
+                <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-secondary/40 px-3 py-1.5 text-[11px] text-muted-foreground">
+                    <span className="truncate">Previous history · {viewingEntry?.label}</span>
+                    <button
+                        type="button"
+                        className="nodrag shrink-0 rounded px-1.5 py-0.5 text-foreground hover:bg-secondary"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            useCanvasStore.getState().setViewingHistory(id, null);
+                        }}
+                    >
+                        Back to live
+                    </button>
+                </div>
+            ) : null}
             <div
                 ref={scrollTo}
                 onScroll={(e) => handleMessagesScroll(e.currentTarget)}
@@ -1694,19 +1911,19 @@ function ChatCardNodeInner({
                             'mx-auto w-full max-w-[72rem] px-5 sm:px-8 lg:px-10',
                     )}
                 >
-                    {card.messages.length === 0 && !streaming && (
+                    {displayMessages.length === 0 && !streaming && (
                         <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                            Ask something to start this thread.
+                            {viewingHistory ? 'This archive is empty.' : 'Ask something to start this thread.'}
                         </p>
                     )}
-                    {card.messages.map((m, i) => (
+                    {displayMessages.map((m, i) => (
                         <MessageBlocks
                             key={i}
                             m={m}
                             index={i}
                             cardId={id}
                             streaming={streaming}
-                            totalMessages={card.messages.length}
+                            totalMessages={displayMessages.length}
                             highlighted={highlightedIndex === i}
                             findQuery={findOpen ? findQuery : ''}
                             findActive={findOpen && highlightedIndex === i}
@@ -1807,14 +2024,18 @@ function ChatCardNodeInner({
                 onPermissionChange={(permission) =>
                     useCanvasStore.getState().updateCard(id, { permission })
                 }
-                sending={card.status === 'streaming'}
+                sending={card.status === 'streaming' || Boolean(card.compacting)}
                 onStop={abortStream}
-                disabled={serverOffline}
+                disabled={serverOffline || viewingHistory || Boolean(card.compacting)}
                 cardId={id}
                 placeholder={
                     serverOffline
                         ? 'Reconnecting to server…'
-                        : 'Ask anything…  (Enter to send, Shift+Enter for newline)'
+                        : viewingHistory
+                          ? 'Viewing previous history — switch back to live to chat'
+                          : card.compacting
+                            ? 'Compacting… handoff will land here'
+                            : 'Ask anything…  (Enter to send, Shift+Enter for newline)'
                 }
             />
         </div>
@@ -1826,7 +2047,7 @@ function ChatCardNodeInner({
         <>
             <div
                 className={cn(
-                    'flex h-full w-full flex-col rounded-xl border bg-card shadow-sm transition-shadow',
+                    'relative flex h-full w-full flex-col rounded-xl border bg-card shadow-sm transition-shadow',
                     focused ? 'border-ring shadow-md ring-2 ring-ring/30' : 'border-border',
                 )}
             >
@@ -1852,6 +2073,15 @@ function ChatCardNodeInner({
                 <Handle type="source" position={Position.Right} className="!opacity-0" />
 
                 {header(false)}
+                {inboxOpen ? (
+                    <div className="relative z-20 shrink-0 border-b border-border px-2 py-2">
+                        <BoxInboxPanel
+                            cardId={id}
+                            items={card.boxInbox ?? []}
+                            onClose={() => setInboxOpen(false)}
+                        />
+                    </div>
+                ) : null}
                 {card.error && (
                     <div className="nodrag flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-3 py-2">
                         <span className="shrink-0 text-xs">⚠️</span>
@@ -1870,6 +2100,36 @@ function ChatCardNodeInner({
                         </button>
                     </div>
                 )}
+                {card.compactOfferOpen && !card.compacting ? (
+                    <div className="nodrag flex items-start gap-2 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                        <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-amber-200">
+                            Context is getting full (~{contextPct ?? 90}%). Compact archives this chat under Previous history and puts a handoff in the input.
+                        </span>
+                        <button
+                            type="button"
+                            className="nodrag shrink-0 rounded-md bg-amber-500/20 px-2 py-0.5 text-[11px] font-medium text-amber-100 transition-colors hover:bg-amber-500/30 disabled:opacity-40"
+                            disabled={serverOffline}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                useCanvasStore.getState().dismissCompactOffer(id);
+                                void useCanvasStore.getState().createCompact(id);
+                            }}
+                        >
+                            Compact
+                        </button>
+                        <button
+                            type="button"
+                            className="nodrag shrink-0 rounded p-0.5 text-amber-300/80 transition-colors hover:bg-amber-500/20 hover:text-amber-100"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                useCanvasStore.getState().dismissCompactOffer(id);
+                            }}
+                            title="Dismiss"
+                        >
+                            <X className="size-3.5" />
+                        </button>
+                    </div>
+                ) : null}
                 {view === 'trajectory' ? trajectoryBody : messagesBody(scrollRef)}
                 {card.debug === true && <DebugConsole logs={card.logs ?? []} />}
                 {footerInput}
@@ -1884,22 +2144,15 @@ function ChatCardNodeInner({
                         aria-label={card.title || 'Chat'}
                     >
                         {header(true)}
-                        {findOpen && (
-                            <div className="pointer-events-none absolute right-5 top-14 z-40 sm:right-8 sm:top-[3.75rem]">
-                                <div className="pointer-events-auto">
-                                    <MaximizedFindBar
-                                        query={findQuery}
-                                        matchIndex={findMatches.length === 0 ? 0 : findMatchCursor}
-                                        matchCount={findMatches.length}
-                                        onQueryChange={onFindQueryChange}
-                                        onPrev={() => goToFindMatch(findMatchCursor - 1, findMatches)}
-                                        onNext={() => goToFindMatch(findMatchCursor + 1, findMatches)}
-                                        onClose={closeFind}
-                                        inputRef={findInputRef}
-                                    />
-                                </div>
+                        {inboxOpen ? (
+                            <div className="relative z-30 mx-auto w-full max-w-xl px-4 pt-2">
+                                <BoxInboxPanel
+                                    cardId={id}
+                                    items={card.boxInbox ?? []}
+                                    onClose={() => setInboxOpen(false)}
+                                />
                             </div>
-                        )}
+                        ) : null}
                         {card.error && (
                             <div className="nodrag flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-5 py-2">
                                 <span className="shrink-0 text-xs">⚠️</span>
@@ -1918,32 +2171,83 @@ function ChatCardNodeInner({
                                 </button>
                             </div>
                         )}
-                        {view === 'trajectory' ? (
-                            <div className="mx-auto flex min-h-0 w-full max-w-[72rem] flex-1 flex-col px-5 sm:px-8 lg:px-10">
-                                <TrajectoryView card={card} />
+                        {card.compactOfferOpen && !card.compacting ? (
+                            <div className="nodrag flex items-start gap-2 border-b border-amber-500/30 bg-amber-500/10 px-5 py-2">
+                                <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-amber-200">
+                                    Context is getting full (~{contextPct ?? 90}%). Compact archives this chat under Previous history and puts a handoff in the input.
+                                </span>
+                                <button
+                                    type="button"
+                                    className="nodrag shrink-0 rounded-md bg-amber-500/20 px-2 py-0.5 text-[11px] font-medium text-amber-100 transition-colors hover:bg-amber-500/30 disabled:opacity-40"
+                                    disabled={serverOffline}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        useCanvasStore.getState().dismissCompactOffer(id);
+                                        void useCanvasStore.getState().createCompact(id);
+                                    }}
+                                >
+                                    Compact
+                                </button>
+                                <button
+                                    type="button"
+                                    className="nodrag shrink-0 rounded p-0.5 text-amber-300/80 transition-colors hover:bg-amber-500/20 hover:text-amber-100"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        useCanvasStore.getState().dismissCompactOffer(id);
+                                    }}
+                                    title="Dismiss"
+                                >
+                                    <X className="size-3.5" />
+                                </button>
                             </div>
-                        ) : (
-                            <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-                                <UserPromptSideNav
-                                    prompts={card.messages
-                                        .map((m, index) => ({ index, text: m.text, role: m.role }))
-                                        .filter((m) => m.role === 'user' && m.text.trim().length > 0)
-                                        .map(({ index, text }) => ({ index, text }))}
-                                    activeIndex={viewportPromptIndex}
-                                    onJump={jumpToUserPrompt}
-                                />
-                                {/* Full-bleed scroll; reading column width is applied inside messagesBody. */}
-                                {messagesBody(maxScrollRef, { roomy: true })}
-                                {card.debug === true && (
-                                    <div className="mx-auto w-full max-w-[72rem] shrink-0 px-5 sm:px-8 lg:px-10">
-                                        <DebugConsole logs={card.logs ?? []} />
+                        ) : null}
+                        <div className="flex min-h-0 flex-1 overflow-hidden">
+                            <CanvasBoxesSideNav currentCardId={id} />
+                            <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+                                {findOpen && (
+                                    <div className="pointer-events-none absolute right-5 top-3 z-40 sm:right-8">
+                                        <div className="pointer-events-auto">
+                                            <MaximizedFindBar
+                                                query={findQuery}
+                                                matchIndex={findMatches.length === 0 ? 0 : findMatchCursor}
+                                                matchCount={findMatches.length}
+                                                onQueryChange={onFindQueryChange}
+                                                onPrev={() => goToFindMatch(findMatchCursor - 1, findMatches)}
+                                                onNext={() => goToFindMatch(findMatchCursor + 1, findMatches)}
+                                                onClose={closeFind}
+                                                inputRef={findInputRef}
+                                            />
+                                        </div>
                                     </div>
                                 )}
-                                <div className="mx-auto w-full max-w-[72rem] shrink-0 px-5 sm:px-8 lg:px-10">
-                                    {footerInput}
-                                </div>
+                                {view === 'trajectory' ? (
+                                    <div className="mx-auto flex min-h-0 w-full max-w-[72rem] flex-1 flex-col px-5 sm:px-8 lg:px-10">
+                                        <TrajectoryView card={card} />
+                                    </div>
+                                ) : (
+                                    <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
+                                        <UserPromptSideNav
+                                            prompts={card.messages
+                                                .map((m, index) => ({ index, text: m.text, role: m.role }))
+                                                .filter((m) => m.role === 'user' && m.text.trim().length > 0)
+                                                .map(({ index, text }) => ({ index, text }))}
+                                            activeIndex={viewportPromptIndex}
+                                            onJump={jumpToUserPrompt}
+                                        />
+                                        {/* Full-bleed scroll; reading column width is applied inside messagesBody. */}
+                                        {messagesBody(maxScrollRef, { roomy: true })}
+                                        {card.debug === true && (
+                                            <div className="mx-auto w-full max-w-[72rem] shrink-0 px-5 sm:px-8 lg:px-10">
+                                                <DebugConsole logs={card.logs ?? []} />
+                                            </div>
+                                        )}
+                                        <div className="mx-auto w-full max-w-[72rem] shrink-0 px-5 sm:px-8 lg:px-10">
+                                            {footerInput}
+                                        </div>
+                                    </div>
+                                )}
                             </div>
-                        )}
+                        </div>
                     </div>,
                     document.body,
                 )}
@@ -2011,13 +2315,5 @@ function DebugConsole({ logs }: { logs: string[] }) {
     );
 }
 
-function MaximizeIcon() {
-    return (
-        <svg viewBox="0 0 16 16" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d="M2 6V2h4M14 10v4h-4" strokeLinecap="round" />
-            <rect x="2" y="2" width="12" height="12" rx="2" opacity="0.35" />
-        </svg>
-    );
-}
 
 export const ChatCardNode = ReactMemo(ChatCardNodeInner);

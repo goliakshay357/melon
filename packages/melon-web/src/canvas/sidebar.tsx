@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
+    Bot,
     Check,
     ChevronRight,
     FileText,
@@ -104,7 +105,7 @@ export function Sidebar() {
     const [pickingNative, setPickingNative] = useState(false);
     const activeView = useCanvasStore((s) => s.activeView);
     const setActiveView = useCanvasStore((s) => s.setActiveView);
-    const openView = (v: 'skills' | 'themes') => {
+    const openView = (v: 'agents' | 'skills' | 'themes') => {
         setActiveView(v);
     };
     const [recent, setRecent] = useState<CanvasListItem[]>([]);
@@ -467,7 +468,7 @@ export function Sidebar() {
     return (
         <div
             className={cn(
-                'absolute left-0 top-0 z-10 flex h-full flex-col overflow-hidden border-r border-border bg-card transition-all duration-200',
+                'absolute left-0 top-0 z-50 flex h-full flex-col overflow-hidden border-r border-border bg-card transition-all duration-200',
                 collapsed ? 'w-12 items-center py-2' : 'w-[260px]',
             )}
         >
@@ -492,6 +493,16 @@ export function Sidebar() {
                     </button>
                     {activeView !== 'canvas' && (
                         <>
+                            <button
+                                className={cn(
+                                    'rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
+                                    activeView === 'agents' && 'bg-secondary text-foreground',
+                                )}
+                                title="Agents"
+                                onClick={() => openView('agents')}
+                            >
+                                <Bot className="size-4" />
+                            </button>
                             <button
                                 className={cn(
                                     'rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
@@ -970,6 +981,17 @@ export function Sidebar() {
                                 Settings
                             </p>
                             <div className="space-y-0.5">
+                                <button
+                                    onClick={() => openView('agents')}
+                                    className={cn(
+                                        'flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-xs transition-colors',
+                                        activeView === 'agents'
+                                            ? 'bg-secondary font-medium text-card-foreground'
+                                            : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                                    )}
+                                >
+                                    <Bot className="size-3.5 shrink-0" /> Agents
+                                </button>
                                 <button
                                     onClick={() => openView('skills')}
                                     className={cn(

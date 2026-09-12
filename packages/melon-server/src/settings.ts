@@ -11,6 +11,14 @@ export interface MelonSettings {
 	denylistedModels?: string[];
 	/** Melon web UI theme id (e.g. moonfly). Survives webview storage resets. */
 	theme?: string;
+	/**
+	 * When true, inbound box mail auto-approves in the recipient inbox and
+	 * delivers to the agent without a human click (TRD T1). Default / absent =
+	 * false (pending → Approve in inbox).
+	 */
+	boxMailAutoSend?: boolean;
+	/** Recently used agent profile ids (spawn / mail); drives Settings top-5. */
+	agentProfileRecentIds?: string[];
 }
 
 const settingsFile = () => join(getAgentDir(), "melon", "settings.json");
