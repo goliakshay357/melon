@@ -11,9 +11,6 @@
 
 import { mentionPaths } from "@/lib/mentions";
 
-// Build marker — the first [melon-@] line in the console proves this bundle is live.
-console.log(`[melon-@] build loaded ${__MELON_BUILD__}`);
-
 export interface ParsedInput {
 	/** Non-null only when the text begins with a /command. */
 	command: { name: string; args: string } | null;
@@ -23,17 +20,12 @@ export interface ParsedInput {
 
 export function parseInput(text: string): ParsedInput {
 	const trimmed = text.trim();
-	console.log(`[melon-@] parseInput: text="${trimmed.slice(0, 60)}"`);
 	let command: ParsedInput["command"] = null;
 	if (trimmed.startsWith("/")) {
 		const match = trimmed.match(/^\/([a-z][a-z-]*)(?:\s+([\s\S]*))?$/i);
 		if (match) command = { name: match[1].toLowerCase(), args: (match[2] ?? "").trim() };
 	}
-	const parsed = { command, mentions: [...new Set(mentionPaths(text))] };
-	console.log(
-		`[melon-@] parseInput -> command=${parsed.command ? `${parsed.command.name} "${parsed.command.args}"` : "none"} mentions=[${parsed.mentions.join(", ")}]`,
-	);
-	return parsed;
+	return { command, mentions: [...new Set(mentionPaths(text))] };
 }
 
 const MAX_FILE_CHARS = 24_000;
@@ -102,10 +94,8 @@ export async function expandMentions(text: string, mentions: string[], cwds: Arr
 		}
 		const resolved = await resolveMention(path, cwds);
 		if (resolved === null) {
-			console.log(`[melon-@] attach FAILED: "${path}" resolved to nothing (skipped)`);
 			continue;
 		}
-		console.log(`[melon-@] attach "${path}" -> "${resolved.path}" (${resolved.content.length} chars)`);
 		const clipped =
 			resolved.content.length > MAX_FILE_CHARS
 				? `${resolved.content.slice(0, MAX_FILE_CHARS)}\n… (truncated at ${MAX_FILE_CHARS} chars — ask me to read the file for more)`

@@ -2,6 +2,9 @@ import { useState } from 'react';
 import * as RadixDialog from '@radix-ui/react-dialog';
 import { useCanvasStore } from '@/store/canvas-store';
 
+/** Send-for-review is disabled for now. Flip to true to re-enable. */
+export const SHARE_FOR_REVIEW_ENABLED = false;
+
 type ShareStatus = {
     summary: string;
     canShare: boolean;

@@ -148,29 +148,17 @@ export async function fetchFileCandidates(
 	limit = 20,
 ): Promise<FileCandidate[]> {
 	if (!cwd) return [];
-	const t0 = Date.now();
 	try {
 		const url = `/files?cwd=${encodeURIComponent(cwd)}&q=${encodeURIComponent(query)}&limit=${limit}${
 			alsoCwd ? `&alsoCwd=${encodeURIComponent(alsoCwd)}` : ""
 		}`;
-		console.log(`[melon-@] fetch: ${url}`);
 		const res = await fetch(url);
 		if (!res.ok) {
-			console.log(`[melon-@] fetch FAILED: HTTP ${res.status}`);
 			return [];
 		}
 		const d = (await res.json()) as { files: FileCandidate[] };
-		console.log(
-			`[melon-@] fetch -> ${d.files.length} hits in ${Date.now() - t0}ms: ${
-				d.files
-					.slice(0, 6)
-					.map((f) => (f.title ? `${f.title} (${f.path})` : f.path))
-					.join(" | ") || "<none>"
-			}`,
-		);
 		return d.files;
 	} catch (e) {
-		console.log(`[melon-@] fetch THREW: ${e instanceof Error ? e.message : e}`);
 		return [];
 	}
 }

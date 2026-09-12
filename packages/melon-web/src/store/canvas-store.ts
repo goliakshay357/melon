@@ -1,9 +1,12 @@
 import { nanoid } from "nanoid";
 import { create } from "zustand";
-import { askText, showDiff } from "@/components/dialogs";
+import { askChoice, askText, showDiff } from "@/components/dialogs";
+import { boxMentionLabel, specializedCardTitle, uniqueWordPair } from "@/lib/agent-names";
+import { boxMailLog, buildBoxMailBrief, buildHandoffDistillContext, stripMentionToken } from "@/lib/box-mail-brief";
 import { expandDiagramCommand, expandMentions, parseInput } from "@/lib/input-parser";
 import {
 	clampIntoView,
+	findFreeSpot,
 	findOpenSpot,
 	type ScreenRect,
 	SIDEBAR_COLLAPSED_WIDTH,
@@ -12,7 +15,9 @@ import {
 	spawnSize,
 } from "@/lib/spawn";
 import {
+	type BoxInboxItem,
 	type ChatMessage,
+	type CompactHistoryEntry,
 	DEFAULT_CARD_SIZE,
 	type NoteState,
 	newCardId,
@@ -455,13 +460,22 @@ export interface CanvasMeta {
 	worktreeName?: string;
 }
 
-export type AppView = "canvas" | "skills" | "themes";
+export type AppView = "canvas" | "agents" | "skills" | "themes" | "providers";
 
 interface CanvasState {
 	cards: SessionCard[];
 	/** Which page fills the content area. Canvas stays mounted underneath. */
 	activeView: AppView;
 	setActiveView: (v: AppView) => void;
+	/**
+	 * Canvas-level inbox. When open it replaces the content area on canvas, or
+	 * the card body in fullscreen. `inboxFilterCardId` narrows the list to a
+	 * single box when opened from that box; null shows every box.
+	 */
+	inboxOpen: boolean;
+	inboxFilterCardId: string | null;
+	openInbox: (cardId?: string | null) => void;
+	closeInbox: () => void;
 	/** Navbar collapse state — the settings page offsets by the navbar width. */
 	sidebarCollapsed: boolean;
 	setSidebarCollapsed: (v: boolean) => void;
@@ -549,7 +563,41 @@ interface CanvasState {
 		/** Omit to spawn at the viewport-aware default size. */
 		size?: SpawnSize,
 	) => string;
-	forkCard: (parentId: string) => Promise<string>;
+	/**
+	 * Spawn a specialized chat box bound to a Settings → Agents profile.
+	 * Inherits model from the newest chat card with one, else leaves unset
+	 * (server uses lastModel). Touches profile recency on the server at attach.
+	 */
+	spawnAgentProfile: (profileId: string, position?: { x: number; y: number }) => Promise<string | null>;
+	/**
+	 * Send box mail into the recipient's inbox (pending until Approve, or
+	 * auto-approved when Settings boxMailAutoSend is on).
+	 */
+	sendBoxMail: (
+		fromCardId: string,
+		toCardId: string,
+		body: string,
+		opts?: {
+			createdBy?: "user" | "agent";
+			replyPolicy?: "never" | "if_needed" | "always_result";
+			replyReason?: "blocked" | "needs_decision" | "deliverable_ready" | "error_for_sender";
+			inReplyToMailId?: string;
+			envelope?: Record<string, unknown>;
+		},
+	) => Promise<boolean>;
+	/** Approve a pending inbound inbox item so the agent can read it (after queue). */
+	approveBoxInbox: (cardId: string, mailId: string) => Promise<boolean>;
+	/** Dismiss a pending inbound inbox item. */
+	dismissBoxInbox: (cardId: string, mailId: string) => Promise<boolean>;
+	/** Pull inbox snapshot from the server into the card. */
+	syncBoxInbox: (cardId: string) => Promise<void>;
+	forkCard: (parentId: string, atEntryId?: string) => Promise<string>;
+	/**
+	 * Edit a user message in place: revert the session to just before that entry,
+	 * then send the edited text so the conversation continues from there and every
+	 * turn below it leaves the active branch.
+	 */
+	editUserMessage: (cardId: string, entryId: string, text: string, beforeIndex?: number) => Promise<boolean>;
 	moveCard: (id: string, position: { x: number; y: number }) => void;
 	updateCard: (id: string, patch: Partial<SessionCard>) => void;
 	setModel: (id: string, model: string) => void;
@@ -605,6 +653,13 @@ interface CanvasState {
 	resumeSession: (sessionFile: string) => Promise<string | null>;
 	/** Distill a card's session into a handoff note artifact spawned beside it. */
 	createHandoff: (sourceCardId: string) => Promise<void>;
+	/** /compact: archive transcript, fresh session, handoff text in composer. */
+	createCompact: (sourceCardId: string) => Promise<void>;
+	/** Toggle which archived history is shown (null = live session). */
+	setViewingHistory: (cardId: string, historyId: string | null) => void;
+	latchCompactOffer: (cardId: string) => void;
+	clearCompactOfferLatch: (cardId: string) => void;
+	dismissCompactOffer: (cardId: string) => void;
 	/** Retry generation on a note card stuck in the error state. */
 	retryHandoff: (noteCardId: string) => Promise<void>;
 	/** Sync a note card with its artifact file (mount / canvas switch). */
@@ -628,6 +683,14 @@ interface CanvasState {
 	/** One-shot viewport centering request for a card id (consumed by canvas). */
 	focusCardId: string | null;
 	requestFocusCard: (id: string | null) => void;
+	/**
+	 * Which card is in the fullscreen overlay (null = none).
+	 * Shared so the left boxes strip can swap chats, docs, and notes.
+	 */
+	maximizedCardId: string | null;
+	setMaximizedCardId: (id: string | null) => void;
+	/** Flush pending doc/note edits for one card (before swap / leave fullscreen). */
+	flushCardEdits: (cardId: string) => Promise<void>;
 	/** Open a @-mentioned path on the canvas (note node or document card). */
 	openFileOnCanvas: (relPath: string) => Promise<void>;
 	/** The agent mutated a file — refresh document/note cards bound to it. */
@@ -675,6 +738,8 @@ const manualSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const jobStreams = new Map<string, EventSource>();
 /** Source cards with a handoff generation in flight (double-click guard). */
 const generatingNotes = new Set<string>();
+/** Cards mid-/compact (distill + session swap). */
+const generatingCompacts = new Set<string>();
 
 function patchNote(cardId: string, patch: Partial<NoteState>) {
 	const cur = findCard(cardId);
@@ -739,6 +804,241 @@ async function startHandoffJob(
  * generation job. The message names the artifact AND steers the focus;
  * empty message = default handoff (card title, no focus).
  */
+
+/** Push canvas chat roster to each attached session for send_to_box addressing. */
+export async function syncBoxPeers(): Promise<void> {
+	const state = useCanvasStore.getState();
+	if (state.serverOffline) return;
+	const chats = state.cards.filter((c) => (c.kind ?? "chat") === "chat");
+	if (chats.length === 0) return;
+	const peers = chats.map((c) => {
+		const isAttached = streams.has(c.id) || Boolean(c.sessionFile);
+		const status: "idle" | "thinking" | "error" | "offline" = !isAttached
+			? "offline"
+			: c.status === "streaming"
+				? "thinking"
+				: c.status === "error"
+					? "error"
+					: "idle";
+		return {
+			cardId: c.id,
+			title: c.title || c.id,
+			...(c.agentProfileId ? { agentProfileId: c.agentProfileId } : {}),
+			...(c.agentInstanceName ? { agentInstanceName: c.agentInstanceName } : {}),
+			status,
+		};
+	});
+	await Promise.all(
+		chats.map(async (c) => {
+			try {
+				await fetch(`/sessions/${encodeURIComponent(c.id)}/box-peers`, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ peers }),
+				});
+			} catch {
+				/* offline / race */
+			}
+		}),
+	);
+}
+
+/** Clear profile binding on every canvas card after Settings delete (FR-1.6). */
+export function detachAgentProfileFromCards(profileId: string): number {
+	const id = profileId.trim();
+	if (!id) return 0;
+	let n = 0;
+	for (const c of useCanvasStore.getState().cards) {
+		if (c.agentProfileId !== id) continue;
+		n += 1;
+		const short = c.agentInstanceName;
+		useCanvasStore.getState().updateCard(c.id, {
+			agentProfileId: undefined,
+			agentInstanceName: undefined,
+			title: short ? `Chat — ${short}`.slice(0, 44) : "Chat",
+		});
+		pushLog(c.id, `• agent profile "${id}" deleted — node is general now`);
+	}
+	void syncBoxPeers();
+	return n;
+}
+
+async function pickBoxAmong(title: string, candidates: SessionCard[]): Promise<string | null> {
+	if (candidates.length === 0) return null;
+	if (candidates.length === 1) return candidates[0]!.id;
+	return askChoice({
+		title,
+		description: "Several nodes match — pick which one gets the mail.",
+		options: candidates.map((c) => ({
+			value: c.id,
+			label: boxMentionLabel(c),
+			description: [
+				c.agentInstanceName ? `instance ${c.agentInstanceName}` : null,
+				c.status === "streaming" ? "thinking" : c.status === "error" ? "error" : "idle",
+				c.id,
+			]
+				.filter(Boolean)
+				.join(" · "),
+		})),
+	});
+}
+
+/** Agent send_to_box → recipient inbox (spawn profile box if needed). */
+async function handleBoxMailIntent(data: {
+	fromCardId: string;
+	toCardId?: string;
+	toProfileId?: string;
+	body: string;
+	envelope?: Record<string, unknown>;
+	inReplyToMailId?: string;
+}): Promise<void> {
+	const state = useCanvasStore.getState();
+	let toCardId = data.toCardId?.trim() || "";
+	if (!toCardId && data.toProfileId) {
+		const matches = state.cards.filter((c) => (c.kind ?? "chat") === "chat" && c.agentProfileId === data.toProfileId);
+		if (matches.length > 1) {
+			toCardId = (await pickBoxAmong(`Send to which "${data.toProfileId}" node?`, matches)) ?? "";
+		} else if (matches.length === 1) {
+			toCardId = matches[0]!.id;
+		} else {
+			const spawned = await state.spawnAgentProfile(data.toProfileId);
+			if (spawned) toCardId = spawned;
+		}
+	}
+	if (!toCardId) {
+		pushLog(data.fromCardId, `✗ node mail: could not resolve target ${data.toProfileId ?? "?"}`);
+		return;
+	}
+	const ok = await state.sendBoxMail(data.fromCardId, toCardId, data.body, {
+		createdBy: "agent",
+		envelope: data.envelope,
+		inReplyToMailId: data.inReplyToMailId,
+		replyPolicy: data.envelope?.replyPolicy as "never" | "if_needed" | "always_result" | undefined,
+		replyReason: data.envelope?.replyReason as
+			| "blocked"
+			| "needs_decision"
+			| "deliverable_ready"
+			| "error_for_sender"
+			| undefined,
+	});
+	if (ok) {
+		pushLog(data.fromCardId, `• agent mailed inbox → ${toCardId}`);
+		void syncBoxPeers();
+	} else {
+		pushLog(data.fromCardId, "✗ node mail: failed to enqueue");
+	}
+}
+
+/**
+ * /send [Target] [message] — enqueue into the other box's inbox.
+ * If Target is omitted, a picker lists open chat boxes.
+ */
+async function slashSend(cardId: string, message: string): Promise<boolean> {
+	const state = useCanvasStore.getState();
+	const from = findCard(cardId);
+	if (!from || state.serverOffline) return false;
+	if (from.kind === "note" || from.kind === "document") {
+		patchCardInStore(cardId, (c) => ({
+			...c,
+			messages: [...c.messages, { role: "system", text: "send only works from chat nodes" }],
+		}));
+		return true;
+	}
+
+	const targets = state.cards.filter((c) => (c.kind ?? "chat") === "chat" && c.id !== cardId);
+	if (targets.length === 0) {
+		patchCardInStore(cardId, (c) => ({
+			...c,
+			messages: [
+				...c.messages,
+				{
+					role: "system",
+					text: "no other chat nodes on this canvas — spawn one first (right-click → Agents)",
+				},
+			],
+		}));
+		return true;
+	}
+
+	const rest = message.trim();
+	let toCardId: string | null = null;
+	let body = rest;
+	const first = rest.split(/\s+/)[0] ?? "";
+	if (first) {
+		const lower = first.toLowerCase();
+		const byId = targets.filter((c) => c.id === first);
+		const byInstance = targets.filter((c) => c.agentInstanceName?.toLowerCase() === lower);
+		const byProfile = targets.filter((c) => c.agentProfileId?.toLowerCase() === lower);
+		const byTitle = targets.filter((c) => c.title.toLowerCase().includes(lower));
+		const matched =
+			byId.length > 0 ? byId : byInstance.length > 0 ? byInstance : byProfile.length > 0 ? byProfile : byTitle;
+		if (matched.length === 1) {
+			toCardId = matched[0]!.id;
+			body = rest.slice(first.length).trim();
+		} else if (matched.length > 1) {
+			toCardId = await pickBoxAmong(`Send to which "${first}" node?`, matched);
+			if (toCardId) body = rest.slice(first.length).trim();
+		}
+	}
+
+	if (!toCardId) {
+		toCardId = await askChoice({
+			title: "Send to which node?",
+			description: "Mail lands in their inbox — Approve there before the agent reads it.",
+			options: targets.map((c) => {
+				const st =
+					c.status === "streaming"
+						? "thinking"
+						: c.status === "error"
+							? "error"
+							: streams.has(c.id)
+								? "idle"
+								: "offline";
+				return {
+					value: c.id,
+					label: boxMentionLabel(c),
+					description: c.agentProfileId
+						? `agent · ${c.agentInstanceName ?? c.agentProfileId} · ${st}`
+						: `general · ${st}`,
+				};
+			}),
+		});
+	}
+	if (!toCardId) return true;
+
+	if (!body) {
+		body =
+			(await askText({
+				title: "Message to send",
+				initial: "",
+				placeholder: "What should the other node do?",
+			})) ?? "";
+	}
+	if (!body.trim()) return true;
+
+	const to = findCard(toCardId);
+	if (!to) return false;
+	const cwd = state.agentCwd() ?? state.folder;
+	const brief = await buildBoxMailBrief({
+		from,
+		to,
+		userText: body.trim(),
+		fileMentions: parseInput(body).mentions,
+		cwds: [cwd, state.folder !== cwd ? state.folder : null],
+	});
+	const ok = await state.sendBoxMail(cardId, toCardId, brief, { createdBy: "user" });
+	if (!ok) return false;
+	patchCardInStore(cardId, (c) => ({
+		...c,
+		draft: "",
+		messages: [
+			...c.messages,
+			{ role: "system", text: `✓ mailed ${boxMentionLabel(to)} — waiting in their inbox for Approve` },
+		],
+	}));
+	return true;
+}
+
 async function slashHandoff(cardId: string, message: string): Promise<boolean> {
 	const state = useCanvasStore.getState();
 	const src = findCard(cardId);
@@ -784,6 +1084,272 @@ async function slashHandoff(cardId: string, message: string): Promise<boolean> {
 		focus,
 	});
 	return true;
+}
+
+/**
+ * Distill the live session into a handoff body (no note card on the canvas).
+ * Streams status into the card log; optional onDelta for the composer draft.
+ */
+async function waitForHandoffBody(
+	params: {
+		cwd: string;
+		sourceCardId: string;
+		sourceTitle: string;
+		model?: string;
+		focus?: string;
+		sessionFile?: string;
+	},
+	onDelta?: (chunk: string) => void,
+	onStatus?: (message: string) => void,
+): Promise<{ body: string; artifactId: string; title: string }> {
+	const res = await fetch("/notes/generate/start", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			cwd: params.cwd,
+			sourceCardId: params.sourceCardId,
+			sourceTitle: params.sourceTitle,
+			sessionFile: params.sessionFile,
+			canvasId: useCanvasStore.getState().canvasId,
+			model: params.model,
+			focus: params.focus || undefined,
+		}),
+	});
+	if (!res.ok) {
+		const d = (await res.json().catch(() => ({}))) as { error?: string };
+		throw new Error(d.error ?? `HTTP ${res.status}`);
+	}
+	const d = (await res.json()) as { id: string; jobId: string };
+	return new Promise((resolve, reject) => {
+		let body = "";
+		const es = new EventSource(`/notes/jobs/${d.jobId}/events`);
+		es.onmessage = (ev) => {
+			const data = JSON.parse(ev.data as string) as
+				| { type: "status"; message: string }
+				| { type: "delta"; text: string }
+				| {
+						type: "done";
+						artifact: { id: string; title: string; body: string };
+				  }
+				| { type: "error"; message: string };
+			if (data.type === "status") {
+				onStatus?.(data.message);
+			} else if (data.type === "delta") {
+				body += data.text;
+				onDelta?.(data.text);
+			} else if (data.type === "done") {
+				es.close();
+				resolve({
+					body: data.artifact.body || body,
+					artifactId: data.artifact.id || d.id,
+					title: data.artifact.title || params.sourceTitle,
+				});
+			} else {
+				es.close();
+				reject(new Error(data.message));
+			}
+		};
+		es.onerror = () => {
+			es.close();
+			reject(new Error("connection lost during compact distill"));
+		};
+	});
+}
+
+/** Tear down the live SSE + server runtime so POST /sessions can create a fresh one. */
+async function tearDownLiveSession(cardId: string): Promise<void> {
+	const st = streams.get(cardId);
+	if (st) {
+		st.es.close();
+		streams.delete(cardId);
+	}
+	attached.delete(cardId);
+	const card = findCard(cardId);
+	const provider = card?.model?.split("/", 1)[0]?.toLowerCase() ?? "";
+	const isolation = provider === "cursor" || provider === "claude-bridge" || provider === "antigravity";
+	try {
+		if (isolation) {
+			await fetch(`/sessions/${encodeURIComponent(cardId)}`, { method: "DELETE" });
+		} else {
+			await fetch(`/sessions/${encodeURIComponent(cardId)}/abort`, { method: "POST" });
+		}
+	} catch {
+		/* offline / already gone */
+	}
+}
+
+/**
+ * /compact [focus] — distill this chat, archive the transcript under Previous
+ * history, start a fresh empty session on the same card, and put the handoff
+ * text in the composer so the user can edit before sending.
+ */
+async function slashCompact(cardId: string, message: string): Promise<boolean> {
+	const state = useCanvasStore.getState();
+	const src = findCard(cardId);
+	if (!src || state.serverOffline || !state.folder) return false;
+	if (src.kind === "note" || src.kind === "document") {
+		patchCardInStore(cardId, (c) => ({
+			...c,
+			messages: [...c.messages, { role: "system", text: "compact works on chat cards only" }],
+		}));
+		return true;
+	}
+	if (generatingCompacts.has(cardId) || src.compacting) {
+		patchCardInStore(cardId, (c) => ({
+			...c,
+			messages: [...c.messages, { role: "system", text: "compact already in progress" }],
+		}));
+		return true;
+	}
+	if (!src.sessionFile && src.messages.filter((m) => m.role === "user" || m.role === "assistant").length === 0) {
+		patchCardInStore(cardId, (c) => ({
+			...c,
+			messages: [...c.messages, { role: "system", text: "nothing to compact yet" }],
+		}));
+		return true;
+	}
+
+	generatingCompacts.add(cardId);
+	const focus = message.trim() || undefined;
+	const label = `History ${new Date().toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`;
+	const existingDraft = src.draft?.trim() ?? "";
+
+	patchCardInStore(cardId, (c) => ({
+		...c,
+		compacting: true,
+		viewingHistoryId: null,
+		draft: "",
+		messages: [
+			...c.messages,
+			{ role: "system", text: "Compacting… distilling this chat into a handoff for the new session" },
+		],
+	}));
+
+	// Stop any in-flight turn so the session file is stable for distill.
+	try {
+		await fetch(`/sessions/${encodeURIComponent(cardId)}/abort`, { method: "POST" });
+	} catch {
+		/* ok */
+	}
+
+	try {
+		const attachedOk = await ensureCardAttached(cardId);
+		const afterAttach = findCard(cardId) ?? src;
+		pushLog(
+			cardId,
+			`• compact start: attached=${attachedOk} sessionFile=${afterAttach.sessionFile ?? "(none)"} msgs=${afterAttach.messages.length}`,
+		);
+		if (!afterAttach.sessionFile) {
+			throw new Error("source card has no flushed session yet — send a message first");
+		}
+		const distilled = await waitForHandoffBody(
+			{
+				cwd: state.folder,
+				sourceCardId: cardId,
+				sourceTitle: (focus || src.title || "compact").slice(0, 80),
+				model: afterAttach.model ?? src.model,
+				focus,
+				sessionFile: afterAttach.sessionFile,
+			},
+			(chunk) => {
+				useCanvasStore.getState().setCardDraft(cardId, (prev) => prev + chunk);
+			},
+			(status) => pushLog(cardId, `• compact: ${status}`),
+		);
+
+		const latest = findCard(cardId);
+		if (!latest) return true;
+
+		const historyEntry: CompactHistoryEntry = {
+			id: `hist_${nanoid(8)}`,
+			sessionFile: latest.sessionFile,
+			messages: latest.messages.filter((m) => !(m.role === "system" && m.text.startsWith("Compacting…"))),
+			contextUsage: latest.contextUsage,
+			label,
+			archivedAt: Date.now(),
+		};
+
+		await tearDownLiveSession(cardId);
+
+		const cwd = state.agentCwd() ?? state.folder;
+		const res = await fetch("/sessions", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				cardId,
+				cwd,
+				model: latest.model,
+				skills: latest.skills ?? [],
+				...(latest.agentProfileId ? { agentProfileId: latest.agentProfileId } : {}),
+				...(latest.thinkingLevel ? { thinkingLevel: latest.thinkingLevel } : {}),
+			}),
+		});
+		if (!res.ok) {
+			const d = (await res.json().catch(() => ({}))) as { error?: string };
+			throw new Error(d.error ?? `fresh session HTTP ${res.status}`);
+		}
+		const info = (await res.json()) as {
+			sessionFile?: string;
+			model?: string;
+			thinkingLevel?: string;
+			thinkingLevels?: string[];
+		};
+
+		const draftBody = distilled.body.trim();
+		const draft = existingDraft ? `${draftBody}\n\n${existingDraft}` : draftBody;
+
+		useCanvasStore.getState().updateCard(cardId, {
+			sessionFile: info.sessionFile,
+			model: info.model ?? latest.model,
+			...(info.thinkingLevel ? { thinkingLevel: info.thinkingLevel } : {}),
+			...(Array.isArray(info.thinkingLevels) ? { thinkingLevels: info.thinkingLevels } : {}),
+			messages: [
+				{
+					role: "system",
+					text: `✓ compacted — previous chat saved under Previous history. Edit the handoff in the input, then send when ready.`,
+				},
+			],
+			contextUsage: undefined,
+			queue: [],
+			pendingExtensionUi: undefined,
+			error: undefined,
+			status: "idle",
+			sessionHistory: [...(latest.sessionHistory ?? []), historyEntry],
+			viewingHistoryId: null,
+			compacting: false,
+			compactOfferLatched: false,
+			compactOfferOpen: false,
+			draft,
+			pendingDraft: undefined,
+		});
+		attached.add(cardId);
+		ensureCardEventStream(cardId);
+		pushLog(
+			cardId,
+			`✓ compact done — archived as ${label}; fresh session ${info.sessionFile?.split("/").pop() ?? "?"}`,
+		);
+		return true;
+	} catch (e) {
+		const msg = e instanceof Error ? e.message : String(e);
+		const latest = findCard(cardId);
+		patchCardInStore(cardId, (c) => ({
+			...c,
+			compacting: false,
+			debug: true,
+			messages: [
+				...c.messages.filter((m) => !(m.role === "system" && m.text.startsWith("Compacting…"))),
+				{ role: "system", text: `✗ compact failed: ${msg}` },
+			],
+		}));
+		pushCursorDebug(cardId, [
+			`✗ compact failed: ${msg}`,
+			`• compact reason: ${msg}`,
+			`• compact diag: attached=${attached.has(cardId)} sessionFile=${latest?.sessionFile ?? src.sessionFile ?? "(none)"} messages=${latest?.messages.length ?? src.messages.length} model=${latest?.model ?? src.model ?? "?"}`,
+		]);
+		return false;
+	} finally {
+		generatingCompacts.delete(cardId);
+	}
 }
 
 /** Start a merge job (distill-each + synthesis, streamed live). */
@@ -1032,10 +1598,623 @@ function settleCardsAfterDisconnect(cards: SessionCard[]): SessionCard[] {
 
 const loc = loadLastLocation();
 
+/** Attach a card session if needed so SSE / approve wake have a live runtime. */
+async function ensureCardAttached(cardId: string): Promise<boolean> {
+	if (attached.has(cardId)) return true;
+	const card = findCard(cardId);
+	if (!card) return false;
+	const sessionFile = card.sessionFile;
+	const cwd = useCanvasStore.getState().agentCwd() ?? useCanvasStore.getState().folder;
+	if (!sessionFile && !cwd) return false;
+	const url = sessionFile ? `/sessions/resume` : `/sessions`;
+	try {
+		const res = await fetch(url, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(
+				sessionFile
+					? {
+							cardId,
+							sessionFile,
+							model: card.model,
+							skills: card.skills ?? [],
+							cwd,
+							...(card.agentProfileId ? { agentProfileId: card.agentProfileId } : {}),
+							...(card.thinkingLevel ? { thinkingLevel: card.thinkingLevel } : {}),
+						}
+					: {
+							cardId,
+							cwd,
+							model: card.model,
+							skills: card.skills ?? [],
+							...(card.agentProfileId ? { agentProfileId: card.agentProfileId } : {}),
+							...(card.thinkingLevel ? { thinkingLevel: card.thinkingLevel } : {}),
+						},
+			),
+		});
+		if (!res.ok) return false;
+		const info = (await res.json()) as {
+			sessionFile?: string;
+			model?: string;
+			thinkingLevel?: string;
+			thinkingLevels?: string[];
+		};
+		useCanvasStore.getState().updateCard(cardId, {
+			sessionFile: info.sessionFile ?? card.sessionFile,
+			model: info.model ?? card.model,
+			...(info.thinkingLevel ? { thinkingLevel: info.thinkingLevel } : {}),
+			...(Array.isArray(info.thinkingLevels) ? { thinkingLevels: info.thinkingLevels } : {}),
+		});
+		attached.add(cardId);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Attach EventSource for a card if missing (mail approve / wake needs live SSE). */
+function ensureCardEventStream(cardId: string): void {
+	if (streams.has(cardId)) return;
+	// ── SSE subscription (once per card) ──
+	{
+		pushLog(cardId, `→ SSE connect`);
+		const es = new EventSource(`/sessions/${cardId}/events`);
+		streams.set(cardId, {
+			es,
+			buffer: "",
+			thinkingBuffer: "",
+			segSealed: false,
+			thinkingStartTs: Date.now(),
+			toolNames: new Map(),
+		});
+		const st = streams.get(cardId)!;
+		es.onopen = () => {
+			pushLog(cardId, "✓ SSE open");
+			void syncBoxPeers();
+		};
+		es.onmessage = (ev) => {
+			const data = JSON.parse(ev.data as string) as
+				| { type: "delta"; text: string }
+				| { type: "thinking"; text: string }
+				| {
+						type: "tool_start";
+						callId: string;
+						name: string;
+						args?: string;
+						argsStructured?: Record<string, unknown>;
+				  }
+				| { type: "tool_update"; callId: string; output: string }
+				| {
+						type: "tool_end";
+						callId: string;
+						isError: boolean;
+						output: string;
+						durationMs?: number;
+						/** Abs path when this tool mutated a file (drives live doc refresh). */
+						path?: string;
+				  }
+				| { type: "raw"; text: string }
+				| { type: "turn_end"; stopReason?: string; error?: string }
+				| {
+						type: "agent_meta";
+						stopReason: string;
+						inputTokens: number | null;
+						outputTokens: number | null;
+				  }
+				| { type: "status"; status: "idle" | "streaming" | "error" }
+				| { type: "error"; message: string }
+				| { type: "context_usage"; tokens: number | null; contextWindow: number; percent: number | null }
+				| { type: "thinking_level"; level: string; thinkingLevels?: string[] }
+				| { type: "queue"; followUp: string[] }
+				| { type: "user_message"; text: string }
+				| {
+						type: "manual_updated";
+						/** Folder whose .melon/notes/manual changed. */
+						cwd?: string;
+						/** Relative path inside the folder, e.g. .melon/notes/manual/x.md. */
+						path: string;
+						mtimeMs?: number;
+				  }
+				| { type: "note_injected"; artifactId: string; revision: number; mode: string; text: string }
+				| {
+						type: "extension_ui";
+						id: string;
+						method: "select" | "confirm" | "input" | "notify";
+						title?: string;
+						options?: string[];
+						message?: string;
+						placeholder?: string;
+						notifyType?: string;
+				  }
+				| { type: "extension_ui_clear"; id?: string };
+
+			// Coalesce text/thinking patches to the next animation frame so the
+			// UI tracks the stream closely (ChatGPT-style append) without a
+			// 130ms "chunk dump". Pending state lives on the STREAM so a slow
+			// flush can't spill into the NEXT output segment.
+			const cancelFlush = () => {
+				if (st!.flushRaf != null) {
+					cancelAnimationFrame(st!.flushRaf);
+					st!.flushRaf = undefined;
+				}
+			};
+			const applyPending = () => {
+				const fn = st!.pendingPatch;
+				if (!fn) return;
+				st!.pendingPatch = undefined;
+				patchCardInStore(cardId, (c) => {
+					const msgs = [...c.messages];
+					const last = msgs[msgs.length - 1];
+					if (last?.role === "assistant") msgs[msgs.length - 1] = fn(last);
+					else msgs.push(fn({ role: "assistant", text: "" }));
+					// Mid-turn deltas must heal idle after a canvas restore that
+					// reloaded disk status while this SSE was still open.
+					const status = c.status === "idle" && streams.has(cardId) ? ("streaming" as const) : c.status;
+					return { ...c, messages: msgs, status };
+				});
+			};
+			const patchLastAssistant = (fn: (m: ChatMessage) => ChatMessage, immediate = false) => {
+				const prev = st!.pendingPatch;
+				st!.pendingPatch = prev ? (m) => fn(prev(m)) : fn;
+				if (immediate) {
+					cancelFlush();
+					applyPending();
+					return;
+				}
+				if (st!.flushRaf == null) {
+					st!.flushRaf = requestAnimationFrame(() => {
+						st!.flushRaf = undefined;
+						applyPending();
+					});
+				}
+			};
+
+			const ensureTool = (run: Partial<ToolRun> & { callId: string; name?: string }, _immediate = false) => {
+				// Direct, targeted update: find the assistant message that CONTAINS this
+				// tool by callId. Tool events can arrive AFTER a new output segment has
+				// opened — updating only the last message would leave the real tool
+				// stuck on "running" forever (the visible bug).
+				patchCardInStore(cardId, (c) => {
+					let found = false;
+					const messages = c.messages.map((m) => {
+						if (m.role !== "assistant" || found) return m;
+						if (!m.tools?.some((t) => t.callId === run.callId)) return m;
+						found = true;
+						const tools = [...m.tools];
+						const i = tools.findIndex((t) => t.callId === run.callId);
+						if (i >= 0) tools[i] = { ...tools[i], ...run } as ToolRun;
+						return { ...m, tools };
+					});
+					const status = c.status === "idle" && streams.has(cardId) ? ("streaming" as const) : c.status;
+					if (found) return { ...c, messages, status };
+					// First sighting — attach to the last assistant message (or open one).
+					const msgs = [...c.messages];
+					const last = msgs[msgs.length - 1];
+					if (last?.role === "assistant") {
+						msgs[msgs.length - 1] = {
+							...last,
+							tools: [...(last.tools ?? []), { name: "tool", status: "running", output: "", ...run } as ToolRun],
+						};
+					} else {
+						msgs.push({
+							role: "assistant",
+							text: "",
+							tools: [{ name: "tool", status: "running", output: "", ...run } as ToolRun],
+						});
+					}
+					return { ...c, messages: msgs, status };
+				});
+			};
+
+			const appendToLastAssistant = (patch: { text?: string; thinking?: string }) => {
+				patchLastAssistant((m) => ({ ...m, ...patch }));
+			};
+
+			/** Start a fresh assistant output — the previous turn's text is done. */
+			const openAssistantSegment = () => {
+				// Pending text belongs to the PREVIOUS segment — land it first.
+				cancelFlush();
+				applyPending();
+				patchCardInStore(cardId, (c) => ({
+					...c,
+					messages: [...c.messages, { role: "assistant" as const, text: "", tools: [] }],
+				}));
+			};
+
+			let __toolEvId = "";
+			if (data.type === "tool_start") {
+				__toolEvId = pushEvent(cardId, {
+					kind: "tool",
+					name: data.name,
+					detail: data.args,
+				});
+				// Immediate — the ⚙ block must appear instantly.
+				ensureTool(
+					{
+						callId: data.callId,
+						name: data.name,
+						args: data.args,
+						argsStructured: data.argsStructured,
+						output: "",
+					},
+					true,
+				);
+				// The tool call ends this assistant message — any answer that
+				// follows is a NEW output block, not a continuation.
+				st!.segSealed = true;
+				st!.toolNames!.set(data.callId, data.name);
+			} else if (data.type === "tool_update") {
+				// Snapshot — REPLACE, never append.
+				ensureTool({ callId: data.callId, output: data.output });
+			} else if (data.type === "tool_end") {
+				// Final result — replace + lock terminal state.
+				ensureTool(
+					{
+						callId: data.callId,
+						status: data.isError ? "error" : "ok",
+						output: data.output,
+					},
+					true,
+				);
+				// The AGENT just mutated a file — if a document/note card is
+				// bound to it, pull the new content in immediately.
+				if (data.path && !data.isError) {
+					void useCanvasStore.getState().refreshFileCards(data.path);
+				}
+				patchEvent(cardId, __toolEvId, {
+					durMs: data.durationMs,
+					detail: data.output.slice(0, 2000),
+					status: data.isError ? "error" : "ok",
+				});
+				const tName = st!.toolNames?.get(data.callId) ?? data.callId.slice(0, 8);
+				pushLog(
+					cardId,
+					`⚙ ${tName} ${data.isError ? "✗" : "✓"}${data.durationMs ? ` ${data.durationMs}ms` : ""}${data.isError && data.output ? ` — ${data.output.slice(0, 200)}` : ""}`,
+				);
+			} else if (data.type === "manual_updated") {
+				// External edit to a manual document — refresh any bound document cards.
+				console.log(`[manual-refresh] SSE manual_updated received:`, data);
+				if (data.path) {
+					void useCanvasStore.getState().refreshFileCards(data.path, data.cwd, data.mtimeMs);
+				}
+			} else if (data.type === "agent_meta") {
+				const meta = `stopReason=${data.stopReason} tokens in:${data.inputTokens ?? "?"} out:${data.outputTokens ?? "?"}`;
+				// Clock out any still-open thinking run.
+				if (st!.thinkingEventId) {
+					patchEvent(cardId, st!.thinkingEventId, {
+						durMs: Date.now() - (st!.thinkingStartTs ?? Date.now()),
+						status: "ok",
+						detail: st!.thinkingBuffer.slice(-8000),
+					});
+					st!.thinkingEventId = undefined;
+				}
+				// Close the latest open prompt event with total duration.
+				const evs = findCard(cardId)?.events ?? [];
+				const pe = [...evs].reverse().find((e) => e.kind === "prompt" && e.durMs == null);
+				if (pe) {
+					patchEvent(cardId, pe.id, {
+						durMs: Date.now() - pe.ts,
+						status: data.stopReason === "aborted" ? "error" : "ok",
+						detail: meta,
+					});
+				}
+				pushLog(cardId, `← agent_end ${meta}`);
+			} else if (data.type === "raw") {
+				pushEvent(cardId, { kind: "system", name: "note", detail: data.text });
+				pushLog(cardId, `• ${data.text}`);
+			} else if (data.type === "turn_end") {
+				st!.segSealed = true;
+				if (data.error) {
+					// Show the real failure reason, not just "turn_end (error)".
+					const readable = data.error.split("stack=")[0].trim().slice(0, 300);
+					pushEvent(cardId, { kind: "system", name: "error", detail: readable });
+					if (/cursor/i.test(readable)) pushCursorDebug(cardId, [readable]);
+					else pushLog(cardId, `✗ ${readable}`);
+					useCanvasStore.getState().setCardError(cardId, readable);
+					// Failed turn — clear any open question (server also cancelAlls).
+					useCanvasStore.getState().updateCard(cardId, { pendingExtensionUi: undefined });
+				}
+			} else if (data.type === "thinking") {
+				if (!st!.thinkingEventId) {
+					st!.thinkingEventId = pushEvent(cardId, {
+						kind: "thinking",
+						name: "reasoning",
+						detail: "",
+					});
+					st!.thinkingStartTs = Date.now();
+					const dbg = findCard(cardId);
+					pushLog(
+						cardId,
+						`[state] thinking-start lastRole=${dbg?.messages[dbg.messages.length - 1]?.role} pending=${st!.pendingPatch ? "yes" : "no"} segSealed=${st!.segSealed}`,
+					);
+				}
+				if (st!.segSealed) {
+					st!.buffer = "";
+					st!.thinkingBuffer = "";
+					st!.segSealed = false;
+					openAssistantSegment();
+				}
+				st!.thinkingBuffer += data.text;
+				appendToLastAssistant({ thinking: st!.thinkingBuffer });
+				// Thought process lives IN the event — inspect shows it anytime.
+				patchEvent(cardId, st!.thinkingEventId, {
+					detail: st!.thinkingBuffer.slice(-6000),
+				});
+			} else if (data.type === "delta") {
+				if (st!.thinkingEventId) {
+					// CLOCK OUT — duration + full thought process captured.
+					patchEvent(cardId, st!.thinkingEventId, {
+						durMs: Date.now() - (st!.thinkingStartTs ?? Date.now()),
+						status: "ok",
+						detail: st!.thinkingBuffer.slice(-8000),
+					});
+					st!.thinkingEventId = undefined;
+				}
+				if (st!.segSealed) {
+					st!.buffer = "";
+					st!.segSealed = false;
+					openAssistantSegment();
+				}
+				st!.buffer += data.text;
+				appendToLastAssistant({ text: st!.buffer });
+			} else if (data.type === "status") {
+				if (data.status === "idle") {
+					st!.buffer = "";
+					st!.thinkingBuffer = "";
+					st!.segSealed = false;
+					cancelFlush();
+					applyPending();
+					// Queue is server-truth ({type:"queue"} events) — do not
+					// clear or pop here; consumption is detected server-side.
+					const dbg = findCard(cardId);
+					pushLog(
+						cardId,
+						`[state] idle roles=${JSON.stringify(dbg?.messages.map((m) => m.role))} pending=${st!.pendingPatch ? "yes" : "no"}`,
+					);
+					useCanvasStore.getState().updateCard(cardId, { status: "idle" });
+					void maybeAutonameCanvas();
+					return;
+				}
+				if (data.status === "streaming") {
+					const dbg = findCard(cardId);
+					pushLog(
+						cardId,
+						`[state] streaming roles=${JSON.stringify(dbg?.messages.map((m) => m.role))} segSealed=${st!.segSealed}`,
+					);
+				}
+				useCanvasStore.getState().updateCard(cardId, {
+					status: data.status,
+				});
+			} else if ((data as { type: string }).type === "queue") {
+				// Server-truth queue sync — the server owns the queue, the card
+				// only mirrors it. No diffing, no client-side bookkeeping.
+				const q = data as { followUp?: string[] };
+				pushLog(cardId, `[queue-sync] server list=${JSON.stringify(q.followUp ?? [])}`);
+				useCanvasStore.getState().updateCard(cardId, { queue: q.followUp ?? [] });
+			} else if ((data as { type: string }).type === "user_message") {
+				// A queued message just reached the model (drain started it).
+				// Direct sends are appended optimistically — skip the echo.
+				const um = data as { text: string };
+				const cur = findCard(cardId);
+				if (!cur) return;
+				const last = cur.messages[cur.messages.length - 1];
+				pushLog(
+					cardId,
+					`[state] user_message "${um.text.slice(0, 20)}" lastRole=${last?.role} pending=${st!.pendingPatch ? "yes" : "no"} segSealed=${st!.segSealed}`,
+				);
+				if (last?.role === "user" && last.text === um.text) return;
+				useCanvasStore.getState().updateCard(cardId, {
+					messages: [...cur.messages, { role: "user", text: um.text }],
+				});
+			} else if ((data as { type: string }).type === "note_injected") {
+				// A handoff note was delivered into this card (wire from a note
+				// node, possibly from another window). Render it as a user-role
+				// block; the model sees it as a custom context message.
+				const ni = data as { text: string; revision: number };
+				const cur = findCard(cardId);
+				if (!cur) return;
+				if (cur.messages[cur.messages.length - 1]?.text === ni.text) return;
+				useCanvasStore.getState().updateCard(cardId, {
+					messages: [...cur.messages, { role: "user", text: ni.text }],
+				});
+				pushLog(cardId, `✓ handoff note injected (r${ni.revision})`);
+			} else if ((data as { type: string }).type === "box_inbox") {
+				const bi = data as {
+					items?: BoxInboxItem[];
+					pendingCount?: number;
+				};
+				useCanvasStore.getState().updateCard(cardId, {
+					boxInbox: bi.items ?? [],
+					boxInboxPending: bi.pendingCount ?? 0,
+				});
+			} else if ((data as { type: string }).type === "box_mail_injected") {
+				const bm = data as { text: string; fromCardId?: string };
+				const cur = findCard(cardId);
+				if (!cur) return;
+				if (cur.messages[cur.messages.length - 1]?.text === bm.text) return;
+				// Visible mail only — streaming starts on agent_start after wake.
+				useCanvasStore.getState().updateCard(cardId, {
+					messages: [...cur.messages, { role: "user", text: bm.text }],
+				});
+				pushLog(cardId, `✓ node mail ← ${bm.fromCardId ?? "?"}`);
+			} else if ((data as { type: string }).type === "box_mail_outbound") {
+				const bm = data as { text: string; toCardId?: string };
+				const cur = findCard(cardId);
+				if (!cur) return;
+				if (cur.messages[cur.messages.length - 1]?.text === bm.text) return;
+				useCanvasStore.getState().updateCard(cardId, {
+					messages: [...cur.messages, { role: "assistant", text: bm.text }],
+				});
+				pushLog(cardId, `✓ node mail → ${bm.toCardId ?? "?"}`);
+			} else if ((data as { type: string }).type === "box_mail_intent") {
+				const intent = data as unknown as {
+					fromCardId: string;
+					toCardId?: string;
+					toProfileId?: string;
+					body: string;
+					envelope?: Record<string, unknown>;
+					inReplyToMailId?: string;
+				};
+				void handleBoxMailIntent(intent);
+			} else if (data.type === "context_usage") {
+				useCanvasStore.getState().updateCard(cardId, {
+					contextUsage: {
+						tokens: data.tokens,
+						contextWindow: data.contextWindow,
+						percent: data.percent,
+					},
+				});
+			} else if (data.type === "thinking_level") {
+				// Server-truth sync: this client's picker change, another tab's,
+				// or a model-switch re-clamp. Server state always wins.
+				useCanvasStore.getState().updateCard(cardId, {
+					thinkingLevel: data.level,
+					...(Array.isArray(data.thinkingLevels) ? { thinkingLevels: data.thinkingLevels } : {}),
+				});
+			} else if ((data as { type: string }).type === "extension_ui") {
+				const ui = data as {
+					id: string;
+					method: string;
+					title?: string;
+					options?: string[];
+					message?: string;
+					placeholder?: string;
+					notifyType?: string;
+				};
+				if (ui.method === "notify") {
+					pushLog(cardId, `• ${ui.message ?? ""}`);
+					return;
+				}
+				if (ui.method !== "select" && ui.method !== "confirm" && ui.method !== "input") return;
+				const pending: PendingExtensionUi = {
+					id: ui.id,
+					method: ui.method,
+					title: ui.title ?? "",
+					...(ui.options ? { options: ui.options } : {}),
+					...(ui.message ? { message: ui.message } : {}),
+					...(ui.placeholder ? { placeholder: ui.placeholder } : {}),
+				};
+				pushLog(cardId, `[extension-ui] ${ui.method}: ${pending.title.slice(0, 80)}`);
+				useCanvasStore.getState().updateCard(cardId, { pendingExtensionUi: pending });
+			} else if ((data as { type: string }).type === "extension_ui_clear") {
+				const clear = data as { id?: string };
+				const cur = findCard(cardId);
+				if (!cur?.pendingExtensionUi) return;
+				if (clear.id && cur.pendingExtensionUi.id !== clear.id) return;
+				useCanvasStore.getState().updateCard(cardId, { pendingExtensionUi: undefined });
+			} else if ((data as { type: string }).type === "error") {
+				const msg = (data as { message?: string }).message;
+				if (msg && /cursor/i.test(msg)) pushCursorDebug(cardId, [`agent error: ${msg}`]);
+				else pushLog(cardId, `✗ agent error: ${msg ?? "unknown"}`);
+				if (msg) pushEvent(cardId, { kind: "system", name: "error", detail: msg.slice(0, 300) });
+				useCanvasStore.getState().setCardError(cardId, msg ?? "agent error");
+				const cur = findCard(cardId);
+				const queuedBack = cur?.queue ?? [];
+				// Turn is dead — drop any question panel so we don't look open while the agent is gone.
+				useCanvasStore.getState().updateCard(cardId, {
+					status: "error",
+					queue: [],
+					pendingExtensionUi: undefined,
+				});
+				if (queuedBack.length) {
+					// The server queue holds these too — clear it or they would
+					// execute as zombies on the next prompt. Server list wins.
+					void fetch(`/sessions/${cardId}/queue/clear`, { method: "POST" })
+						.then((r) => (r.ok ? (r.json() as Promise<{ followUp?: string[] }>) : null))
+						.then((cleared) => useCanvasStore.getState().queueToDraft(cardId, cleared?.followUp ?? queuedBack))
+						.catch(() => useCanvasStore.getState().queueToDraft(cardId, queuedBack));
+				}
+			}
+		};
+		es.onerror = () => {
+			const cur = findCard(cardId);
+			// Mid-question: keep the EventSource so the browser auto-reconnects
+			// and the server can replay the dialog. Do NOT pretend idle (Stop
+			// would vanish while the agent is still blocked on the answer).
+			if (cur?.pendingExtensionUi) {
+				if (cur.status !== "streaming") {
+					useCanvasStore.getState().updateCard(cardId, { status: "streaming" });
+				}
+				const now = Date.now();
+				if (!st!.lastPendingSseErrorLog || now - st!.lastPendingSseErrorLog > 5000) {
+					st!.lastPendingSseErrorLog = now;
+					pushLog(cardId, "✗ SSE glitch — keeping question open (auto-reconnect)");
+				}
+				return;
+			}
+			pushLog(cardId, "✗ SSE dropped — will re-attach on next message");
+			st!.es.close();
+			streams.delete(cardId);
+			attached.delete(cardId);
+			// The run's outcome is now unknowable — release the Stop button
+			// instead of leaving the card stuck on streaming forever. Queued
+			// text never reached the transcript — hand it back (server wins).
+			const queuedBack = cur?.queue ?? [];
+			useCanvasStore.getState().updateCard(cardId, { status: "idle", queue: [] });
+			if (queuedBack.length) {
+				fetch(`/sessions/${cardId}/queue/clear`, { method: "POST" })
+					.then((r) => (r.ok ? (r.json() as Promise<{ followUp?: string[] }>) : null))
+					.then((cleared) => useCanvasStore.getState().queueToDraft(cardId, cleared?.followUp ?? queuedBack))
+					.catch(() => useCanvasStore.getState().queueToDraft(cardId, queuedBack));
+			}
+		};
+	}
+}
+
+/** Canvas ids we already tried to auto-name, so a turn end does not re-ask. */
+const autonameAttempted = new Set<string>();
+
+/**
+ * Name a placeholder canvas from its first exchange. Runs once per canvas, only
+ * while the name is still "Untitled" / "Canvas N", so a manual rename wins.
+ */
+async function maybeAutonameCanvas(): Promise<void> {
+	const s = useCanvasStore.getState();
+	const { canvasId, folder, canvasName } = s;
+	if (!canvasId || !folder) return;
+	if (autonameAttempted.has(canvasId)) return;
+	const current = (canvasName ?? "").trim();
+	if (current && !/^(untitled|canvas\s*\d+)$/i.test(current)) return;
+	const chat = s.cards.find((c) => (c.kind ?? "chat") === "chat" && c.sessionFile);
+	if (!chat) return;
+	autonameAttempted.add(canvasId);
+	try {
+		const res = await fetch(`/canvases/${canvasId}/autoname?cwd=${encodeURIComponent(folder)}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ cwd: folder }),
+		});
+		if (!res.ok) return;
+		const d = (await res.json()) as { name?: string; skipped?: boolean };
+		const name = typeof d.name === "string" ? d.name.trim() : "";
+		if (d.skipped || !name) return;
+		useCanvasStore.setState((st) => ({
+			canvasName: st.canvasId === canvasId ? name : st.canvasName,
+			canvasTreeRev: st.canvasTreeRev + 1,
+		}));
+		const cached = workspaces.get(canvasId);
+		if (cached) workspaces.set(canvasId, { ...cached, name, touchedAt: Date.now() });
+		pushLog(chat.id, `✓ canvas named "${name}"`);
+	} catch {
+		// Transient failure: allow a later turn to retry.
+		autonameAttempted.delete(canvasId);
+	}
+}
+
 export const useCanvasStore = create<CanvasState>((set, get) => ({
 	cards: [],
 	activeView: "canvas" as AppView,
 	setActiveView: (v) => set({ activeView: v }),
+	inboxOpen: false,
+	inboxFilterCardId: null,
+	openInbox(cardId = null) {
+		// Leave settings if open; the inbox takes the content area. Do NOT touch
+		// maximizedCardId — in fullscreen the same state replaces the card body.
+		set({ inboxOpen: true, inboxFilterCardId: cardId ?? null, activeView: "canvas" });
+	},
+	closeInbox() {
+		set({ inboxOpen: false, inboxFilterCardId: null });
+	},
 	sidebarCollapsed: false,
 	setSidebarCollapsed: (v) => set({ sidebarCollapsed: v }),
 	folder: loc.folder,
@@ -1053,6 +2232,27 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	},
 	/** One-shot "center this card" request, consumed by the canvas effect. */
 	focusCardId: null,
+	maximizedCardId: null,
+	setMaximizedCardId(id) {
+		const prev = get().maximizedCardId;
+		if (prev && prev !== id) {
+			void get().flushCardEdits(prev);
+		}
+		if (id) {
+			const target = findCard(id);
+			if (target?.minimized) {
+				get().updateCard(id, { minimized: false });
+			}
+		}
+		set({ maximizedCardId: id });
+	},
+	async flushCardEdits(cardId) {
+		await get().flushManualSave(cardId);
+		const c = findCard(cardId);
+		if (c?.kind === "note" && c.note?.dirty) {
+			await get().saveNoteEdits(cardId);
+		}
+	},
 	async refreshFileCards(absPath, refreshCwd, eventMtimeMs) {
 		console.log(
 			`[manual-refresh] refreshFileCards called absPath=${JSON.stringify(absPath)} cwd=${JSON.stringify(refreshCwd)} mtime=${eventMtimeMs}`,
@@ -1065,6 +2265,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				// write; if we already have this exact mtime, skip the fetch.
 				if (eventMtimeMs !== undefined && (c.documentMtimeMs ?? 0) === eventMtimeMs) {
 					console.log(`[manual-refresh]   SKIP (mtime match ${eventMtimeMs})`);
+					continue;
+				}
+				// Don't overwrite unsaved local typing.
+				if (c.dirty || manualSaveTimers.has(c.id)) {
+					console.log(`[manual-refresh]   SKIP (local dirty ${c.id})`);
 					continue;
 				}
 				try {
@@ -1087,6 +2292,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 						documentContent: d.content,
 						documentMtimeMs: d.mtimeMs,
 						documentVersion: (card.documentVersion ?? 0) + 1,
+						dirty: false,
 					}));
 					pushLog(c.id, "✓ agent edit reflected (live)");
 				} catch (e) {
@@ -1115,6 +2321,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			console.log(`[manual-refresh] refreshDocumentCard(${cardId}) — no documentFile, skipped`);
 			return;
 		}
+		// Don't clobber unsaved typing (pending debounce or dirty flag).
+		if (c.dirty || manualSaveTimers.has(cardId)) {
+			console.log(`[manual-refresh] refreshDocumentCard(${cardId}) — local dirty, skipped`);
+			return;
+		}
 		try {
 			const root = c.documentCwd ?? folder;
 			console.log(
@@ -1136,6 +2347,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				documentContent: d.content,
 				documentMtimeMs: d.mtimeMs,
 				documentVersion: (card.documentVersion ?? 0) + 1,
+				dirty: false,
 			}));
 			pushLog(cardId, "🔄 manual refresh from disk");
 		} catch (e) {
@@ -1266,7 +2478,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	setDocumentBody(cardId, body) {
 		const card = findCard(cardId);
 		if (!card?.documentFile) return;
-		patchCardInStore(cardId, (c) => ({ ...c, documentContent: body }));
+		patchCardInStore(cardId, (c) => ({ ...c, documentContent: body, dirty: true }));
 		const prev = manualSaveTimers.get(cardId);
 		if (prev) clearTimeout(prev);
 		manualSaveTimers.set(
@@ -1653,10 +2865,11 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}
 
 		switchingCanvas = true;
-		set({ canvasOpening: true });
+		set({ canvasOpening: true, maximizedCardId: null });
 		try {
 			const prevId = get().canvasId;
 			if (prevId) {
+				await get().flushPendingManualSaves();
 				stashActiveWorkspace();
 				await get().saveCanvas();
 			}
@@ -1869,7 +3082,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}
 		if (switchingCanvas) return;
 		switchingCanvas = true;
-		set({ canvasOpening: true });
+		set({ canvasOpening: true, maximizedCardId: null });
 		try {
 			// Persist under the *current* folder before flipping cwd.
 			if (get().canvasId) {
@@ -2012,7 +3225,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}
 		if (switchingCanvas) return;
 		switchingCanvas = true;
-		set({ canvasOpening: true });
+		set({ canvasOpening: true, maximizedCardId: null });
 		try {
 			// Persist under the *current* folder before changing cwd — saveCanvas
 			// reads folder from state.
@@ -2114,10 +3327,18 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		pushUndo(get().cards);
 		const parent = parentId ? get().cards.find((c) => c.id === parentId) : undefined;
 		const cardSize = size ?? currentSpawnSize();
+		// Never drop a new card on top of an existing one. `findFreeSpot` keeps the
+		// requested position when it is free and nudges only when occupied.
+		const placed = findFreeSpot(
+			get().cards,
+			spawnPosition(position, cardSize),
+			cardSize.width,
+			cardSize.height,
+		);
 		const card: SessionCard = {
 			id: forcedId ?? newCardId(),
 			title: parent ? `↳ ${parent.title}`.slice(0, 44) : "New card",
-			position: spawnPosition(position, cardSize),
+			position: placed,
 			parentId,
 			kind,
 			status: "idle",
@@ -2143,7 +3364,263 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		return card.id;
 	},
 
-	async forkCard(parentId) {
+	async spawnAgentProfile(profileId, position) {
+		if (get().serverOffline || !get().folder) return null;
+		const id = profileId.trim();
+		if (!id) return null;
+		const profile = await fetch(`/agents/${encodeURIComponent(id)}`)
+			.then((r) => (r.ok ? r.json() : null))
+			.catch(() => null);
+		if (!profile?.id || !profile?.name) return null;
+
+		const usedNames = get()
+			.cards.map((c) => c.agentInstanceName)
+			.filter((n): n is string => typeof n === "string" && n.length > 0);
+		const instanceName = uniqueWordPair(usedNames);
+		const title = specializedCardTitle(String(profile.name), instanceName);
+		const size = currentSpawnSize();
+		const lastChat = [...get().cards].reverse().find((c) => (c.kind ?? "chat") === "chat");
+		const pos =
+			position ?? (lastChat ? findOpenSpot(get().cards, lastChat.id, size.width, size.height) : { x: 120, y: 120 });
+		const defaultSkills = Array.isArray(profile.defaultSkillIds)
+			? profile.defaultSkillIds.filter((x: unknown): x is string => typeof x === "string")
+			: [];
+
+		const cardId = get().addCard(pos, null, undefined, "chat", size);
+		get().updateCard(cardId, {
+			title,
+			agentProfileId: profile.id,
+			agentInstanceName: instanceName,
+			skills: defaultSkills,
+			...(lastChat?.model ? { model: lastChat.model } : {}),
+			...(lastChat?.thinkingLevel ? { thinkingLevel: lastChat.thinkingLevel } : {}),
+		});
+		fetch(`/agents/${encodeURIComponent(profile.id)}/touch`, { method: "POST" }).catch(() => {});
+		get().setActiveView("canvas");
+		return cardId;
+	},
+
+	async sendBoxMail(fromCardId, toCardId, body, opts) {
+		if (get().serverOffline) return false;
+		const from = findCard(fromCardId);
+		const to = findCard(toCardId);
+		if (!from || !to) return false;
+		if ((from.kind ?? "chat") !== "chat" || (to.kind ?? "chat") !== "chat") return false;
+		const text = body.trim();
+		if (!text) return false;
+		boxMailLog("sendBoxMail", {
+			fromCardId,
+			toCardId,
+			chars: text.length,
+			replyPolicy: opts?.replyPolicy,
+			replyReason: opts?.replyReason,
+			inReplyToMailId: opts?.inReplyToMailId,
+		});
+
+		try {
+			const envelope: Record<string, unknown> = { ...(opts?.envelope ?? {}) };
+			if (opts?.replyPolicy) envelope.replyPolicy = opts.replyPolicy;
+			if (opts?.replyReason) envelope.replyReason = opts.replyReason;
+			if (opts?.inReplyToMailId) envelope.parentMailId = opts.inReplyToMailId;
+
+			const res = await fetch("/boxes/mail/send", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					fromCardId,
+					toCardId,
+					body: text,
+					fromTitle: from.title,
+					toTitle: to.title,
+					cwd: get().agentCwd() ?? get().folder,
+					model: to.model ?? from.model,
+					fromModel: from.model,
+					toModel: to.model ?? from.model,
+					fromSessionFile: from.sessionFile,
+					toSessionFile: to.sessionFile,
+					fromAgentProfileId: from.agentProfileId ?? undefined,
+					toAgentProfileId: to.agentProfileId ?? undefined,
+					fromSkills: from.skills ?? [],
+					toSkills: to.skills ?? [],
+					createdBy: opts?.createdBy ?? "user",
+					...(Object.keys(envelope).length > 0 ? { envelope } : {}),
+					...(opts?.inReplyToMailId ? { inReplyToMailId: opts.inReplyToMailId } : {}),
+					...(opts?.replyPolicy ? { replyPolicy: opts.replyPolicy } : {}),
+					...(opts?.replyReason ? { replyReason: opts.replyReason } : {}),
+				}),
+			});
+			if (!res.ok) {
+				const d = (await res.json().catch(() => ({}))) as { error?: string };
+				boxMailLog("sendBoxMail HTTP error", { status: res.status, error: d.error });
+				pushLog(fromCardId, `✗ node mail: ${d.error ?? res.status}`);
+				return false;
+			}
+			const d = (await res.json()) as {
+				status?: string;
+				sessionFile?: string;
+				model?: string;
+				fromSessionFile?: string;
+				fromModel?: string;
+				pendingCount?: number;
+				envelope?: { replyPolicy?: string; hop?: number; threadId?: string };
+			};
+			if (d.fromSessionFile || d.fromModel) {
+				get().updateCard(fromCardId, {
+					...(d.fromSessionFile ? { sessionFile: d.fromSessionFile } : {}),
+					...(d.fromModel ? { model: d.fromModel } : {}),
+				});
+				if (d.fromSessionFile) attached.add(fromCardId);
+			}
+			if (d.sessionFile || d.model) {
+				get().updateCard(toCardId, {
+					...(d.sessionFile ? { sessionFile: d.sessionFile } : {}),
+					...(d.model ? { model: d.model } : {}),
+				});
+				if (d.sessionFile) attached.add(toCardId);
+			}
+			ensureCardEventStream(toCardId);
+			ensureCardEventStream(fromCardId);
+			await get().syncBoxInbox(toCardId);
+			await get().syncBoxInbox(fromCardId);
+			const st = d.status ?? "pending";
+			const policyBit = d.envelope?.replyPolicy ? ` · ${d.envelope.replyPolicy}` : "";
+			pushLog(
+				fromCardId,
+				st === "pending"
+					? `• mailed → ${to.title} (pending in their inbox${policyBit})`
+					: `• mailed → ${to.title} (${st}${policyBit})`,
+			);
+			pushLog(toCardId, `• inbox ← ${from.title} (${st}${policyBit})`);
+			if (to.agentProfileId) {
+				fetch(`/agents/${encodeURIComponent(to.agentProfileId)}/touch`, { method: "POST" }).catch(() => {});
+			}
+			return true;
+		} catch (e) {
+			pushLog(fromCardId, `✗ node mail: ${e instanceof Error ? e.message : String(e)}`);
+			return false;
+		}
+	},
+
+	async syncBoxInbox(cardId) {
+		if (get().serverOffline) return;
+		try {
+			const res = await fetch(`/sessions/${encodeURIComponent(cardId)}/inbox`);
+			if (!res.ok) return;
+			const d = (await res.json()) as {
+				items?: BoxInboxItem[];
+				pendingCount?: number;
+			};
+			get().updateCard(cardId, {
+				boxInbox: d.items ?? [],
+				boxInboxPending: d.pendingCount ?? 0,
+			});
+		} catch {
+			/* offline */
+		}
+	},
+
+	async approveBoxInbox(cardId, mailId) {
+		if (get().serverOffline) return false;
+		let card = findCard(cardId);
+		boxMailLog("approveBoxInbox", { cardId, mailId, hasCard: Boolean(card) });
+		try {
+			// Attach + SSE before approve so flush/wake frames are not missed.
+			const attachedOk = await ensureCardAttached(cardId);
+			boxMailLog("approve pre-attach", { attachedOk, hadStream: streams.has(cardId) });
+			ensureCardEventStream(cardId);
+			card = findCard(cardId);
+			const res = await fetch(
+				`/sessions/${encodeURIComponent(cardId)}/inbox/${encodeURIComponent(mailId)}/approve`,
+				{
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({
+						cwd: get().agentCwd() ?? get().folder,
+						model: card?.model,
+						sessionFile: card?.sessionFile,
+						agentProfileId: card?.agentProfileId ?? undefined,
+						skills: card?.skills ?? [],
+					}),
+				},
+			);
+			if (!res.ok) {
+				const d = (await res.json().catch(() => ({}))) as { error?: string };
+				boxMailLog("approve HTTP error", { status: res.status, error: d.error });
+				pushLog(cardId, `✗ inbox approve: ${d.error ?? res.status}`);
+				return false;
+			}
+			const d = (await res.json()) as {
+				items?: BoxInboxItem[];
+				pendingCount?: number;
+				delivered?: boolean;
+				injectedText?: string;
+				sessionFile?: string;
+				model?: string;
+				item?: BoxInboxItem;
+			};
+			boxMailLog("approve ok", {
+				pendingCount: d.pendingCount,
+				delivered: d.delivered,
+				status: d.item?.status,
+				injectedChars: d.injectedText?.length ?? 0,
+			});
+			if (d.sessionFile || d.model) {
+				get().updateCard(cardId, {
+					...(d.sessionFile ? { sessionFile: d.sessionFile } : {}),
+					...(d.model ? { model: d.model } : {}),
+				});
+				if (d.sessionFile) attached.add(cardId);
+			}
+			get().updateCard(cardId, {
+				boxInbox: d.items ?? [],
+				boxInboxPending: d.pendingCount ?? 0,
+			});
+			const injected = d.injectedText?.trim();
+			if (injected) {
+				const cur = findCard(cardId);
+				if (cur && cur.messages[cur.messages.length - 1]?.text !== injected) {
+					get().updateCard(cardId, {
+						messages: [...cur.messages, { role: "user", text: injected }],
+					});
+				}
+			}
+			pushLog(
+				cardId,
+				d.delivered
+					? "✓ inbox approved — delivered to agent"
+					: "✓ inbox approved — agent will read after the queue",
+			);
+			return true;
+		} catch (e) {
+			pushLog(cardId, `✗ inbox approve: ${e instanceof Error ? e.message : String(e)}`);
+			return false;
+		}
+	},
+
+	async dismissBoxInbox(cardId, mailId) {
+		if (get().serverOffline) return false;
+		try {
+			const res = await fetch(
+				`/sessions/${encodeURIComponent(cardId)}/inbox/${encodeURIComponent(mailId)}/dismiss`,
+				{ method: "POST" },
+			);
+			if (!res.ok) return false;
+			const d = (await res.json()) as {
+				items?: BoxInboxItem[];
+				pendingCount?: number;
+			};
+			get().updateCard(cardId, {
+				boxInbox: d.items ?? [],
+				boxInboxPending: d.pendingCount ?? 0,
+			});
+			pushLog(cardId, "• inbox item dismissed");
+			return true;
+		} catch {
+			return false;
+		}
+	},
+
+	async forkCard(parentId, atEntryId) {
 		if (get().serverOffline) return "";
 		// addCard pushes undo — do not push twice or one Cmd+Z is a no-op.
 		const parent = get().cards.find((c) => c.id === parentId);
@@ -2166,12 +3643,18 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				body: JSON.stringify({
 					newCardId: childCardId,
 					sessionFile: parent?.sessionFile,
+					...(atEntryId ? { atEntryId } : {}),
 				}),
 			});
 			if (!res.ok) throw new Error(await res.text());
 			sessionInfo = await res.json();
 			attached.add(childCardId);
-			pushLog(childCardId, `✓ FORKED from ${parentId} — full transcript inherited`);
+			pushLog(
+				childCardId,
+				atEntryId
+					? `✓ FORKED from ${parentId} at message branch — transcript up to the branch point inherited`
+					: `✓ FORKED from ${parentId} — full transcript inherited`,
+			);
 		} catch (e) {
 			pushLog(
 				parentId,
@@ -2191,6 +3674,52 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		});
 		if (sessionInfo?.sessionFile) await get().hydrateMessages(childCardId, sessionInfo.sessionFile);
 		return childCardId;
+	},
+
+	async editUserMessage(cardId, entryId, text, beforeIndex) {
+		const card = findCard(cardId);
+		const trimmed = text.trim();
+		if (!card || !trimmed) return false;
+		console.log(`[melon] edit:start card=${cardId} entry=${entryId} chars=${trimmed.length}`);
+		try {
+			const res = await fetch(`/sessions/${encodeURIComponent(cardId)}/tree`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ entryId, sessionFile: card.sessionFile }),
+			});
+			if (!res.ok) {
+				const d = (await res.json().catch(() => ({}))) as { error?: string };
+				console.error(`[melon] edit:tree failed card=${cardId} status=${res.status} error=${d.error ?? ""}`);
+				pushLog(cardId, `✗ edit: ${d.error ?? res.status}`);
+				useCanvasStore.setState({ canvasNotice: `Could not edit this message: ${d.error ?? res.status}` });
+				return false;
+			}
+		} catch (e) {
+			console.error(`[melon] edit:tree threw card=${cardId}`, e);
+			pushLog(cardId, `✗ edit: ${e instanceof Error ? e.message : String(e)}`);
+			useCanvasStore.setState({ canvasNotice: "Could not reach the server to edit this message." });
+			return false;
+		}
+		// Drop the edited message and everything below it immediately, so the UI
+		// shows the branch before the network round-trip can disagree.
+		const afterRevert = findCard(cardId);
+		if (afterRevert) {
+			const cut =
+				typeof beforeIndex === "number"
+					? Math.max(0, Math.min(beforeIndex, afterRevert.messages.length))
+					: afterRevert.messages.length;
+			get().updateCard(cardId, {
+				messages: afterRevert.messages.slice(0, cut),
+				status: "idle",
+				error: undefined,
+			});
+		}
+		const sent = await get().sendMessage(cardId, trimmed);
+		console.log(
+			`[melon] edit:sent card=${cardId} messagesAfterRevert=${findCard(cardId)?.messages.length ?? -1} sendOk=${sent}`,
+		);
+		pushLog(cardId, "✓ edited message — new branch from here");
+		return sent;
 	},
 
 	moveCard(id, position) {
@@ -2513,6 +4042,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			return {
 				cards,
 				canvasActivity: canvasId ? { ...s.canvasActivity, [canvasId]: activityOf(cards) } : s.canvasActivity,
+				maximizedCardId: s.maximizedCardId && dead.has(s.maximizedCardId) ? null : s.maximizedCardId,
 			};
 		});
 		const { canvasId, cards } = get();
@@ -2569,6 +4099,28 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		} finally {
 			generatingNotes.delete(sourceCardId);
 		}
+	},
+
+	async createCompact(sourceCardId) {
+		const src = findCard(sourceCardId);
+		if (!src || get().serverOffline) return;
+		await slashCompact(sourceCardId, "");
+	},
+
+	setViewingHistory(cardId, historyId) {
+		get().updateCard(cardId, { viewingHistoryId: historyId });
+	},
+
+	clearCompactOfferLatch(cardId) {
+		get().updateCard(cardId, { compactOfferLatched: false, compactOfferOpen: false });
+	},
+
+	latchCompactOffer(cardId) {
+		get().updateCard(cardId, { compactOfferLatched: true, compactOfferOpen: true });
+	},
+
+	dismissCompactOffer(cardId) {
+		get().updateCard(cardId, { compactOfferOpen: false });
 	},
 
 	async retryHandoff(noteCardId) {
@@ -2914,6 +4466,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					text: m.text ?? "",
 					thinking: m.thinking,
 					tools: m.tools,
+					entryId: m.entryId,
 				})),
 			});
 			pushLog(cardId, `✓ transcript hydrated (${msgs.length} messages from .jsonl)`);
@@ -2924,14 +4477,72 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
 	async sendMessage(cardId, text, opts) {
 		const card = findCard(cardId);
-		if (!card || !text.trim()) return false;
-		if (get().serverOffline) return false;
+		boxMailLog("sendMessage", {
+			cardId,
+			textPreview: text.slice(0, 100),
+			offline: get().serverOffline,
+			hasCard: Boolean(card),
+		});
+		if (!card || !text.trim()) {
+			boxMailLog("sendMessage abort: empty/missing card");
+			return false;
+		}
+		if (get().serverOffline) {
+			boxMailLog("sendMessage abort: serverOffline");
+			return false;
+		}
 		// THE PARSER RUNS FIRST, on Enter — it routes commands and collects
 		// @file mentions before anything reaches the model.
 		const parsed = parseInput(text);
+		boxMailLog("parsed", { command: parsed.command, mentions: parsed.mentions });
 		if (parsed.command?.name === "handoff") {
 			return slashHandoff(cardId, parsed.command.args);
 		}
+		if (parsed.command?.name === "compact") {
+			return slashCompact(cardId, parsed.command.args);
+		}
+		if (parsed.command?.name === "send") {
+			return slashSend(cardId, parsed.command.args);
+		}
+
+		// @agent on this canvas → distill on *this* box, then send_to_box (not a raw template dump).
+		const peers = get().cards.filter((c) => (c.kind ?? "chat") === "chat" && c.id !== cardId);
+		const tokenToPeer = new Map<string, (typeof peers)[number]>();
+		for (const p of peers) {
+			tokenToPeer.set(p.id.toLowerCase(), p);
+			if (p.agentInstanceName) tokenToPeer.set(p.agentInstanceName.toLowerCase(), p);
+			// Title forms: "swift-otter ( Rude agent )" or legacy "Rude agent — swift-otter"
+			const mNew = p.title.match(/^([a-z0-9-]+)\s*\(/i);
+			if (mNew?.[1]) tokenToPeer.set(mNew[1].toLowerCase(), p);
+			const mOld = p.title.match(/—\s*([a-z0-9-]+)$/i);
+			if (mOld?.[1]) tokenToPeer.set(mOld[1].toLowerCase(), p);
+		}
+		boxMailLog("peers", {
+			count: peers.length,
+			tokens: [...tokenToPeer.keys()],
+		});
+		const agentHit = parsed.mentions.find((m) => tokenToPeer.has(m.toLowerCase()));
+		boxMailLog("agentHit", { agentHit: agentHit ?? null, mentions: parsed.mentions });
+		let handoffDistillContext: string | null = null;
+		let handoffFileMentions: string[] | null = null;
+		if (agentHit) {
+			const to = tokenToPeer.get(agentHit.toLowerCase())!;
+			const instruction = stripMentionToken(text, agentHit);
+			handoffFileMentions = parsed.mentions.filter((m) => !tokenToPeer.has(m.toLowerCase()));
+			boxMailLog("routing → distill then send_to_box", {
+				toId: to.id,
+				toTitle: to.title,
+				instruction,
+				fileMentions: handoffFileMentions,
+			});
+			handoffDistillContext = buildHandoffDistillContext({
+				from: card,
+				to,
+				userText: instruction,
+			});
+			pushLog(cardId, `• handoff → ${boxMentionLabel(to)} (distill, then send_to_box)`);
+		}
+
 		// The turn is about to start — file edits must be on disk first.
 		await get().flushPendingManualSaves();
 		const sessionFile = opts?.sessionFile ?? card.sessionFile;
@@ -2969,6 +4580,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 									model: card.model,
 									skills: card.skills ?? [],
 									cwd,
+									...(card.agentProfileId ? { agentProfileId: card.agentProfileId } : {}),
 									// Pre-attach picker choice — applied instead of the server default.
 									...(card.thinkingLevel ? { thinkingLevel: card.thinkingLevel } : {}),
 								}
@@ -2977,6 +4589,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 									cwd,
 									model: card.model,
 									skills: card.skills ?? [],
+									...(card.agentProfileId ? { agentProfileId: card.agentProfileId } : {}),
 									...(card.thinkingLevel ? { thinkingLevel: card.thinkingLevel } : {}),
 								},
 					),
@@ -3015,477 +4628,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			pushLog(cardId, "• already attached");
 		}
 
-		// ── 2. SSE subscription (once per card) ──
-		let st = streams.get(cardId);
-		if (!st) {
-			pushLog(cardId, `→ SSE connect`);
-			const es = new EventSource(`/sessions/${cardId}/events`);
-			st = {
-				es,
-				buffer: "",
-				thinkingBuffer: "",
-				segSealed: false,
-				thinkingStartTs: Date.now(),
-				toolNames: new Map(),
-			};
-			streams.set(cardId, st);
-			es.onopen = () => pushLog(cardId, "✓ SSE open");
-			es.onmessage = (ev) => {
-				const data = JSON.parse(ev.data as string) as
-					| { type: "delta"; text: string }
-					| { type: "thinking"; text: string }
-					| {
-							type: "tool_start";
-							callId: string;
-							name: string;
-							args?: string;
-							argsStructured?: Record<string, unknown>;
-					  }
-					| { type: "tool_update"; callId: string; output: string }
-					| {
-							type: "tool_end";
-							callId: string;
-							isError: boolean;
-							output: string;
-							durationMs?: number;
-							/** Abs path when this tool mutated a file (drives live doc refresh). */
-							path?: string;
-					  }
-					| { type: "raw"; text: string }
-					| { type: "turn_end"; stopReason?: string; error?: string }
-					| {
-							type: "agent_meta";
-							stopReason: string;
-							inputTokens: number | null;
-							outputTokens: number | null;
-					  }
-					| { type: "status"; status: "idle" | "streaming" | "error" }
-					| { type: "error"; message: string }
-					| { type: "context_usage"; tokens: number | null; contextWindow: number; percent: number | null }
-					| { type: "thinking_level"; level: string; thinkingLevels?: string[] }
-					| { type: "queue"; followUp: string[] }
-					| { type: "user_message"; text: string }
-					| {
-							type: "manual_updated";
-							/** Folder whose .melon/notes/manual changed. */
-							cwd?: string;
-							/** Relative path inside the folder, e.g. .melon/notes/manual/x.md. */
-							path: string;
-							mtimeMs?: number;
-					  }
-					| { type: "note_injected"; artifactId: string; revision: number; mode: string; text: string }
-					| {
-							type: "extension_ui";
-							id: string;
-							method: "select" | "confirm" | "input" | "notify";
-							title?: string;
-							options?: string[];
-							message?: string;
-							placeholder?: string;
-							notifyType?: string;
-					  }
-					| { type: "extension_ui_clear"; id?: string };
-
-				// Coalesce text/thinking patches to the next animation frame so the
-				// UI tracks the stream closely (ChatGPT-style append) without a
-				// 130ms "chunk dump". Pending state lives on the STREAM so a slow
-				// flush can't spill into the NEXT output segment.
-				const cancelFlush = () => {
-					if (st!.flushRaf != null) {
-						cancelAnimationFrame(st!.flushRaf);
-						st!.flushRaf = undefined;
-					}
-				};
-				const applyPending = () => {
-					const fn = st!.pendingPatch;
-					if (!fn) return;
-					st!.pendingPatch = undefined;
-					patchCardInStore(cardId, (c) => {
-						const msgs = [...c.messages];
-						const last = msgs[msgs.length - 1];
-						if (last?.role === "assistant") msgs[msgs.length - 1] = fn(last);
-						else msgs.push(fn({ role: "assistant", text: "" }));
-						// Mid-turn deltas must heal idle after a canvas restore that
-						// reloaded disk status while this SSE was still open.
-						const status = c.status === "idle" && streams.has(cardId) ? ("streaming" as const) : c.status;
-						return { ...c, messages: msgs, status };
-					});
-				};
-				const patchLastAssistant = (fn: (m: ChatMessage) => ChatMessage, immediate = false) => {
-					const prev = st!.pendingPatch;
-					st!.pendingPatch = prev ? (m) => fn(prev(m)) : fn;
-					if (immediate) {
-						cancelFlush();
-						applyPending();
-						return;
-					}
-					if (st!.flushRaf == null) {
-						st!.flushRaf = requestAnimationFrame(() => {
-							st!.flushRaf = undefined;
-							applyPending();
-						});
-					}
-				};
-
-				const ensureTool = (run: Partial<ToolRun> & { callId: string; name?: string }, _immediate = false) => {
-					// Direct, targeted update: find the assistant message that CONTAINS this
-					// tool by callId. Tool events can arrive AFTER a new output segment has
-					// opened — updating only the last message would leave the real tool
-					// stuck on "running" forever (the visible bug).
-					patchCardInStore(cardId, (c) => {
-						let found = false;
-						const messages = c.messages.map((m) => {
-							if (m.role !== "assistant" || found) return m;
-							if (!m.tools?.some((t) => t.callId === run.callId)) return m;
-							found = true;
-							const tools = [...m.tools];
-							const i = tools.findIndex((t) => t.callId === run.callId);
-							if (i >= 0) tools[i] = { ...tools[i], ...run } as ToolRun;
-							return { ...m, tools };
-						});
-						const status = c.status === "idle" && streams.has(cardId) ? ("streaming" as const) : c.status;
-						if (found) return { ...c, messages, status };
-						// First sighting — attach to the last assistant message (or open one).
-						const msgs = [...c.messages];
-						const last = msgs[msgs.length - 1];
-						if (last?.role === "assistant") {
-							msgs[msgs.length - 1] = {
-								...last,
-								tools: [
-									...(last.tools ?? []),
-									{ name: "tool", status: "running", output: "", ...run } as ToolRun,
-								],
-							};
-						} else {
-							msgs.push({
-								role: "assistant",
-								text: "",
-								tools: [{ name: "tool", status: "running", output: "", ...run } as ToolRun],
-							});
-						}
-						return { ...c, messages: msgs, status };
-					});
-				};
-
-				const appendToLastAssistant = (patch: { text?: string; thinking?: string }) => {
-					patchLastAssistant((m) => ({ ...m, ...patch }));
-				};
-
-				/** Start a fresh assistant output — the previous turn's text is done. */
-				const openAssistantSegment = () => {
-					// Pending text belongs to the PREVIOUS segment — land it first.
-					cancelFlush();
-					applyPending();
-					patchCardInStore(cardId, (c) => ({
-						...c,
-						messages: [...c.messages, { role: "assistant" as const, text: "", tools: [] }],
-					}));
-				};
-
-				let __toolEvId = "";
-				if (data.type === "tool_start") {
-					__toolEvId = pushEvent(cardId, {
-						kind: "tool",
-						name: data.name,
-						detail: data.args,
-					});
-					// Immediate — the ⚙ block must appear instantly.
-					ensureTool(
-						{
-							callId: data.callId,
-							name: data.name,
-							args: data.args,
-							argsStructured: data.argsStructured,
-							output: "",
-						},
-						true,
-					);
-					// The tool call ends this assistant message — any answer that
-					// follows is a NEW output block, not a continuation.
-					st!.segSealed = true;
-					st!.toolNames!.set(data.callId, data.name);
-				} else if (data.type === "tool_update") {
-					// Snapshot — REPLACE, never append.
-					ensureTool({ callId: data.callId, output: data.output });
-				} else if (data.type === "tool_end") {
-					// Final result — replace + lock terminal state.
-					ensureTool(
-						{
-							callId: data.callId,
-							status: data.isError ? "error" : "ok",
-							output: data.output,
-						},
-						true,
-					);
-					// The AGENT just mutated a file — if a document/note card is
-					// bound to it, pull the new content in immediately.
-					if (data.path && !data.isError) {
-						void useCanvasStore.getState().refreshFileCards(data.path);
-					}
-					patchEvent(cardId, __toolEvId, {
-						durMs: data.durationMs,
-						detail: data.output.slice(0, 2000),
-						status: data.isError ? "error" : "ok",
-					});
-					const tName = st!.toolNames?.get(data.callId) ?? data.callId.slice(0, 8);
-					pushLog(
-						cardId,
-						`⚙ ${tName} ${data.isError ? "✗" : "✓"}${data.durationMs ? ` ${data.durationMs}ms` : ""}${data.isError && data.output ? ` — ${data.output.slice(0, 200)}` : ""}`,
-					);
-				} else if (data.type === "manual_updated") {
-					// External edit to a manual document — refresh any bound document cards.
-					console.log(`[manual-refresh] SSE manual_updated received:`, data);
-					if (data.path) {
-						void useCanvasStore.getState().refreshFileCards(data.path, data.cwd, data.mtimeMs);
-					}
-				} else if (data.type === "agent_meta") {
-					const meta = `stopReason=${data.stopReason} tokens in:${data.inputTokens ?? "?"} out:${data.outputTokens ?? "?"}`;
-					// Clock out any still-open thinking run.
-					if (st!.thinkingEventId) {
-						patchEvent(cardId, st!.thinkingEventId, {
-							durMs: Date.now() - (st!.thinkingStartTs ?? Date.now()),
-							status: "ok",
-							detail: st!.thinkingBuffer.slice(-8000),
-						});
-						st!.thinkingEventId = undefined;
-					}
-					// Close the prompt event with total duration.
-					const evs = findCard(cardId)?.events ?? [];
-					const pe = [...evs].reverse().find((e) => e.id === promptEventId);
-					if (pe) {
-						patchEvent(cardId, pe.id, {
-							durMs: Date.now() - pe.ts,
-							status: data.stopReason === "aborted" ? "error" : "ok",
-							detail: meta,
-						});
-					}
-					pushLog(cardId, `← agent_end ${meta}`);
-				} else if (data.type === "raw") {
-					pushEvent(cardId, { kind: "system", name: "note", detail: data.text });
-					pushLog(cardId, `• ${data.text}`);
-				} else if (data.type === "turn_end") {
-					st!.segSealed = true;
-					if (data.error) {
-						// Show the real failure reason, not just "turn_end (error)".
-						const readable = data.error.split("stack=")[0].trim().slice(0, 300);
-						pushEvent(cardId, { kind: "system", name: "error", detail: readable });
-						if (/cursor/i.test(readable)) pushCursorDebug(cardId, [readable]);
-						else pushLog(cardId, `✗ ${readable}`);
-						get().setCardError(cardId, readable);
-						// Failed turn — clear any open question (server also cancelAlls).
-						useCanvasStore.getState().updateCard(cardId, { pendingExtensionUi: undefined });
-					}
-				} else if (data.type === "thinking") {
-					if (!st!.thinkingEventId) {
-						st!.thinkingEventId = pushEvent(cardId, {
-							kind: "thinking",
-							name: "reasoning",
-							detail: "",
-						});
-						st!.thinkingStartTs = Date.now();
-						const dbg = findCard(cardId);
-						pushLog(
-							cardId,
-							`[state] thinking-start lastRole=${dbg?.messages[dbg.messages.length - 1]?.role} pending=${st!.pendingPatch ? "yes" : "no"} segSealed=${st!.segSealed}`,
-						);
-					}
-					if (st!.segSealed) {
-						st!.buffer = "";
-						st!.thinkingBuffer = "";
-						st!.segSealed = false;
-						openAssistantSegment();
-					}
-					st!.thinkingBuffer += data.text;
-					appendToLastAssistant({ thinking: st!.thinkingBuffer });
-					// Thought process lives IN the event — inspect shows it anytime.
-					patchEvent(cardId, st!.thinkingEventId, {
-						detail: st!.thinkingBuffer.slice(-6000),
-					});
-				} else if (data.type === "delta") {
-					if (st!.thinkingEventId) {
-						// CLOCK OUT — duration + full thought process captured.
-						patchEvent(cardId, st!.thinkingEventId, {
-							durMs: Date.now() - (st!.thinkingStartTs ?? Date.now()),
-							status: "ok",
-							detail: st!.thinkingBuffer.slice(-8000),
-						});
-						st!.thinkingEventId = undefined;
-					}
-					if (st!.segSealed) {
-						st!.buffer = "";
-						st!.segSealed = false;
-						openAssistantSegment();
-					}
-					st!.buffer += data.text;
-					appendToLastAssistant({ text: st!.buffer });
-				} else if (data.type === "status") {
-					if (data.status === "idle") {
-						st!.buffer = "";
-						st!.thinkingBuffer = "";
-						st!.segSealed = false;
-						cancelFlush();
-						applyPending();
-						// Queue is server-truth ({type:"queue"} events) — do not
-						// clear or pop here; consumption is detected server-side.
-						const dbg = findCard(cardId);
-						pushLog(
-							cardId,
-							`[state] idle roles=${JSON.stringify(dbg?.messages.map((m) => m.role))} pending=${st!.pendingPatch ? "yes" : "no"}`,
-						);
-						useCanvasStore.getState().updateCard(cardId, { status: "idle" });
-						return;
-					}
-					if (data.status === "streaming") {
-						const dbg = findCard(cardId);
-						pushLog(
-							cardId,
-							`[state] streaming roles=${JSON.stringify(dbg?.messages.map((m) => m.role))} segSealed=${st!.segSealed}`,
-						);
-					}
-					useCanvasStore.getState().updateCard(cardId, {
-						status: data.status,
-					});
-				} else if ((data as { type: string }).type === "queue") {
-					// Server-truth queue sync — the server owns the queue, the card
-					// only mirrors it. No diffing, no client-side bookkeeping.
-					const q = data as { followUp?: string[] };
-					pushLog(cardId, `[queue-sync] server list=${JSON.stringify(q.followUp ?? [])}`);
-					useCanvasStore.getState().updateCard(cardId, { queue: q.followUp ?? [] });
-				} else if ((data as { type: string }).type === "user_message") {
-					// A queued message just reached the model (drain started it).
-					// Direct sends are appended optimistically — skip the echo.
-					const um = data as { text: string };
-					const cur = findCard(cardId);
-					if (!cur) return;
-					const last = cur.messages[cur.messages.length - 1];
-					pushLog(
-						cardId,
-						`[state] user_message "${um.text.slice(0, 20)}" lastRole=${last?.role} pending=${st!.pendingPatch ? "yes" : "no"} segSealed=${st!.segSealed}`,
-					);
-					if (last?.role === "user" && last.text === um.text) return;
-					useCanvasStore.getState().updateCard(cardId, {
-						messages: [...cur.messages, { role: "user", text: um.text }],
-					});
-				} else if ((data as { type: string }).type === "note_injected") {
-					// A handoff note was delivered into this card (wire from a note
-					// node, possibly from another window). Render it as a user-role
-					// block; the model sees it as a custom context message.
-					const ni = data as { text: string; revision: number };
-					const cur = findCard(cardId);
-					if (!cur) return;
-					if (cur.messages[cur.messages.length - 1]?.text === ni.text) return;
-					useCanvasStore.getState().updateCard(cardId, {
-						messages: [...cur.messages, { role: "user", text: ni.text }],
-					});
-					pushLog(cardId, `✓ handoff note injected (r${ni.revision})`);
-				} else if (data.type === "context_usage") {
-					useCanvasStore.getState().updateCard(cardId, {
-						contextUsage: {
-							tokens: data.tokens,
-							contextWindow: data.contextWindow,
-							percent: data.percent,
-						},
-					});
-				} else if (data.type === "thinking_level") {
-					// Server-truth sync: this client's picker change, another tab's,
-					// or a model-switch re-clamp. Server state always wins.
-					useCanvasStore.getState().updateCard(cardId, {
-						thinkingLevel: data.level,
-						...(Array.isArray(data.thinkingLevels) ? { thinkingLevels: data.thinkingLevels } : {}),
-					});
-				} else if ((data as { type: string }).type === "extension_ui") {
-					const ui = data as {
-						id: string;
-						method: string;
-						title?: string;
-						options?: string[];
-						message?: string;
-						placeholder?: string;
-						notifyType?: string;
-					};
-					if (ui.method === "notify") {
-						pushLog(cardId, `• ${ui.message ?? ""}`);
-						return;
-					}
-					if (ui.method !== "select" && ui.method !== "confirm" && ui.method !== "input") return;
-					const pending: PendingExtensionUi = {
-						id: ui.id,
-						method: ui.method,
-						title: ui.title ?? "",
-						...(ui.options ? { options: ui.options } : {}),
-						...(ui.message ? { message: ui.message } : {}),
-						...(ui.placeholder ? { placeholder: ui.placeholder } : {}),
-					};
-					pushLog(cardId, `[extension-ui] ${ui.method}: ${pending.title.slice(0, 80)}`);
-					useCanvasStore.getState().updateCard(cardId, { pendingExtensionUi: pending });
-				} else if ((data as { type: string }).type === "extension_ui_clear") {
-					const clear = data as { id?: string };
-					const cur = findCard(cardId);
-					if (!cur?.pendingExtensionUi) return;
-					if (clear.id && cur.pendingExtensionUi.id !== clear.id) return;
-					useCanvasStore.getState().updateCard(cardId, { pendingExtensionUi: undefined });
-				} else if ((data as { type: string }).type === "error") {
-					const msg = (data as { message?: string }).message;
-					if (msg && /cursor/i.test(msg)) pushCursorDebug(cardId, [`agent error: ${msg}`]);
-					else pushLog(cardId, `✗ agent error: ${msg ?? "unknown"}`);
-					if (msg) pushEvent(cardId, { kind: "system", name: "error", detail: msg.slice(0, 300) });
-					get().setCardError(cardId, msg ?? "agent error");
-					const cur = findCard(cardId);
-					const queuedBack = cur?.queue ?? [];
-					// Turn is dead — drop any question panel so we don't look open while the agent is gone.
-					useCanvasStore.getState().updateCard(cardId, {
-						status: "error",
-						queue: [],
-						pendingExtensionUi: undefined,
-					});
-					if (queuedBack.length) {
-						// The server queue holds these too — clear it or they would
-						// execute as zombies on the next prompt. Server list wins.
-						void fetch(`/sessions/${cardId}/queue/clear`, { method: "POST" })
-							.then((r) => (r.ok ? (r.json() as Promise<{ followUp?: string[] }>) : null))
-							.then((cleared) => get().queueToDraft(cardId, cleared?.followUp ?? queuedBack))
-							.catch(() => get().queueToDraft(cardId, queuedBack));
-					}
-				}
-			};
-			es.onerror = () => {
-				const cur = findCard(cardId);
-				// Mid-question: keep the EventSource so the browser auto-reconnects
-				// and the server can replay the dialog. Do NOT pretend idle (Stop
-				// would vanish while the agent is still blocked on the answer).
-				if (cur?.pendingExtensionUi) {
-					if (cur.status !== "streaming") {
-						useCanvasStore.getState().updateCard(cardId, { status: "streaming" });
-					}
-					const now = Date.now();
-					if (!st!.lastPendingSseErrorLog || now - st!.lastPendingSseErrorLog > 5000) {
-						st!.lastPendingSseErrorLog = now;
-						pushLog(cardId, "✗ SSE glitch — keeping question open (auto-reconnect)");
-					}
-					return;
-				}
-				pushLog(cardId, "✗ SSE dropped — will re-attach on next message");
-				st!.es.close();
-				streams.delete(cardId);
-				attached.delete(cardId);
-				// The run's outcome is now unknowable — release the Stop button
-				// instead of leaving the card stuck on streaming forever. Queued
-				// text never reached the transcript — hand it back (server wins).
-				const queuedBack = cur?.queue ?? [];
-				useCanvasStore.getState().updateCard(cardId, { status: "idle", queue: [] });
-				if (queuedBack.length) {
-					fetch(`/sessions/${cardId}/queue/clear`, { method: "POST" })
-						.then((r) => (r.ok ? (r.json() as Promise<{ followUp?: string[] }>) : null))
-						.then((cleared) => get().queueToDraft(cardId, cleared?.followUp ?? queuedBack))
-						.catch(() => get().queueToDraft(cardId, queuedBack));
-				}
-			};
-		} else {
-			st.buffer = "";
-			st.thinkingBuffer = "";
-			st.segSealed = false;
-			st.thinkingStartTs = Date.now();
-		}
+		ensureCardEventStream(cardId);
 
 		// ── 3. send ──
 		// /diagram expands into a directive for the MODEL; @mentions expand into
@@ -3493,18 +4636,25 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		// Build context separately so expansions go to the model as context,
 		// not as user text — prevents the model from echoing them back.
 		let context = "";
-		if (parsed.command?.name === "diagram") {
-			context = expandDiagramCommand("", parsed.command.args).trimStart();
+		if (handoffDistillContext) {
+			context = handoffDistillContext;
 		}
-		if (parsed.mentions.length > 0) {
+		if (parsed.command?.name === "diagram") {
+			const diagramCtx = expandDiagramCommand("", parsed.command.args).trimStart();
+			if (diagramCtx) {
+				context = context ? `${context}\n\n${diagramCtx}` : diagramCtx;
+			}
+		}
+		const mentionsForFiles = handoffFileMentions ?? parsed.mentions.filter((m) => !tokenToPeer.has(m.toLowerCase()));
+		if (mentionsForFiles.length > 0) {
 			const fileParts = (
-				await expandMentions("", parsed.mentions, [cwd, get().folder !== cwd ? get().folder : null])
+				await expandMentions("", mentionsForFiles, [cwd, get().folder !== cwd ? get().folder : null])
 			).trimStart();
 			if (fileParts) {
 				context = context ? `${context}\n\n${fileParts}` : fileParts;
 			}
 		}
-		const promptEventId = pushEvent(cardId, {
+		pushEvent(cardId, {
 			kind: "prompt",
 			name: text.slice(0, 60),
 		});

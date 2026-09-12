@@ -21,10 +21,11 @@ import { Sidebar } from './sidebar';
 import { VizFullscreenLayer } from '@/components/viz-fullscreen-layer';
 import { CanvasNoticeBanner } from '@/components/canvas-notice-banner';
 // import { TopBar } from './topbar';  // DISABLED — re-enable later
-import { useCanvasStore, currentSpawnSize } from '@/store/canvas-store';
+import { useCanvasStore, currentSpawnSize, syncBoxPeers } from '@/store/canvas-store';
 import { focusViewport, isFullyVisible, SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_WIDTH, type WorldRect } from '@/lib/spawn';
 import { useActiveTheme } from '@/theme/theme-store';
 import { SettingsPage } from '@/settings/settings-page';
+import { InboxView } from '@/components/inbox-view';
 import { isTypingTarget } from '@/lib/utils';
 import { DEFAULT_CARD_SIZE, MINIMIZED_CARD_HEIGHT, type SessionCard } from '@/types/session-card';
 
@@ -48,6 +49,22 @@ export function Canvas() {
     const canvasId = useCanvasStore((s) => s.canvasId);
     const saveCanvas = useCanvasStore((s) => s.saveCanvas);
     const storedViewport = useCanvasStore((s) => s.viewport);
+    const maximizedCardId = useCanvasStore((s) => s.maximizedCardId);
+    // Defer the expensive part of entering fullscreen by one frame. Flipping
+    // `onlyRenderVisibleElements` off mounts EVERY card's editor at once, and the
+    // maximized card's editor remounts into the portal. If that heavy commit runs
+    // before the opaque fullscreen shell paints, the canvas is visible for the
+    // whole commit (the "canvas flashes for a second" bug). Stage it: the shell
+    // paints first, then the heavy content mounts behind it.
+    const [renderAllNodes, setRenderAllNodes] = useState(false);
+    useEffect(() => {
+        if (!maximizedCardId) {
+            setRenderAllNodes(false);
+            return;
+        }
+        const id = requestAnimationFrame(() => setRenderAllNodes(true));
+        return () => cancelAnimationFrame(id);
+    }, [maximizedCardId]);
     const hydrated = useCanvasStore((s) => s.hydrated);
     const serverOffline = useCanvasStore((s) => s.serverOffline);
     const canvasOpening = useCanvasStore((s) => s.canvasOpening);
@@ -55,11 +72,19 @@ export function Canvas() {
     const [nodes, setNodes] = useState<AppNode[]>([]);
     const theme = useActiveTheme();
     const [menu, setMenu] = useState<{ x: number; y: number; mergeIds?: string[] } | null>(null);
+    const [topAgents, setTopAgents] = useState<Array<{ id: string; name: string; role: string }>>([]);
     const shiftPressed = useKeyPress('Shift');
-    const { screenToFlowPosition, fitView } = useReactFlow();
+    const { screenToFlowPosition, fitView, getViewport, setViewport } = useReactFlow();
     const wrapperRef = useRef<HTMLDivElement>(null);
+    const flowLayerRef = useRef<HTMLDivElement>(null);
     const activeView = useCanvasStore((s) => s.activeView);
+    const inboxOpen = useCanvasStore((s) => s.inboxOpen);
+    const inboxFilterCardId = useCanvasStore((s) => s.inboxFilterCardId);
+    const closeInbox = useCanvasStore((s) => s.closeInbox);
     const sidebarCollapsed = useCanvasStore((s) => s.sidebarCollapsed);
+    // The inbox hosts itself in whichever frame is active: the fullscreen shell
+    // owns it when a card is maximized, the canvas content area otherwise.
+    const showCanvasInbox = inboxOpen && !maximizedCardId;
 
     // Reopen last session of work on refresh.
     const restoredRef = useRef(false);
@@ -76,22 +101,73 @@ export function Canvas() {
     );
     const edgeTypes = useMemo(() => ({ fork: ForkEdge }), []);
 
-	// Autosave workspace (debounced).
+	// Autosave workspace (debounced) + a subtle save indicator.
+	const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
 	useEffect(() => {
 		if (!canvasId || !folder) return;
-		const t = setTimeout(() => saveCanvas(), 800);
+		setSaveState('saving');
+		const t = setTimeout(() => {
+			void Promise.resolve(saveCanvas()).then(() => setSaveState('saved'));
+		}, 800);
 		return () => clearTimeout(t);
-	}, [cards, storedViewport, canvasId, folder]);
+	}, [cards, storedViewport, canvasId, folder, saveCanvas]);
+	useEffect(() => {
+		if (saveState !== 'saved') return;
+		const t = setTimeout(() => setSaveState('idle'), 1600);
+		return () => clearTimeout(t);
+	}, [saveState]);
+
+	// Keep send_to_box peer directories in sync with canvas chat boxes.
+	useEffect(() => {
+		const t = setTimeout(() => {
+			void syncBoxPeers();
+		}, 400);
+		return () => clearTimeout(t);
+	}, [cards]);
 
 	// Apply stored viewport once nodes exist after a workspace load.
 	const appliedViewportFor = useRef<string | null>(null);
-	const { setViewport: rfSetViewport } = useReactFlow();
 	useEffect(() => {
 		if (!storedViewport || appliedViewportFor.current === canvasId) return;
 		if (nodes.length === 0) return;
 		appliedViewportFor.current = canvasId ?? '';
-		rfSetViewport(storedViewport);
-	}, [nodes.length, canvasId, storedViewport, rfSetViewport]);
+		setViewport(storedViewport);
+	}, [nodes.length, canvasId, storedViewport, setViewport]);
+
+	// Trackpad pinch is ctrl+wheel. Over `.nowheel` editors React Flow skips zoom,
+	// so the browser/Electron page-zooms instead and the whole UI (including the
+	// document text) grows/shrinks. Own pinch here: always canvas zoom, never page
+	// zoom — so document cards scale with the board like every other card.
+	useEffect(() => {
+		const el = flowLayerRef.current;
+		if (!el) return;
+		const isMac =
+			typeof navigator !== 'undefined' &&
+			/Mac|iPhone|iPod|iPad/i.test(navigator.platform || navigator.userAgent);
+		const onWheel = (e: WheelEvent) => {
+			if (!e.ctrlKey) return;
+			if (useCanvasStore.getState().activeView !== 'canvas') return;
+			if (useCanvasStore.getState().maximizedCardId) return;
+			e.preventDefault();
+			e.stopPropagation();
+			const vp = getViewport();
+			const factor = isMac ? 10 : 1;
+			const delta =
+				-e.deltaY * (e.deltaMode === 1 ? 0.05 : e.deltaMode ? 1 : 0.002) * factor;
+			const nextZoom = Math.min(5, Math.max(0.1, vp.zoom * Math.pow(2, delta)));
+			if (Math.abs(nextZoom - vp.zoom) < 1e-6) return;
+			const rect = el.getBoundingClientRect();
+			const sx = e.clientX - rect.left;
+			const sy = e.clientY - rect.top;
+			const worldX = (sx - vp.x) / vp.zoom;
+			const worldY = (sy - vp.y) / vp.zoom;
+			const next = { zoom: nextZoom, x: sx - worldX * nextZoom, y: sy - worldY * nextZoom };
+			setViewport(next);
+			useCanvasStore.getState().setViewport(next);
+		};
+		el.addEventListener('wheel', onWheel, { passive: false, capture: true });
+		return () => el.removeEventListener('wheel', onWheel, { capture: true });
+	}, [getViewport, setViewport]);
 
 	// Track focus in editors/inputs so canvas delete/undo never steal from them.
 	const [typingFocus, setTypingFocus] = useState(() => isTypingTarget(document.activeElement));
@@ -197,6 +273,14 @@ export function Canvas() {
         useCanvasStore.getState().requestFocusCard(null);
         const card = cards.find((c) => c.id === focusCardId);
         if (!card) return;
+        // Select the focused node so opening it from the sidebar reads as selection,
+        // not just a viewport nudge.
+        setNodes((nds) =>
+            nds.map((n) => {
+                const selected = n.id === focusCardId;
+                return n.selected === selected ? n : { ...n, selected };
+            }),
+        );
         const box = cardBox(card);
         const rect: WorldRect = {
             left: card.position.x,
@@ -211,8 +295,8 @@ export function Canvas() {
             width: window.innerWidth,
             height: window.innerHeight,
         };
-        void rfSetViewport(focusViewport(rect, vp, screen), { duration: 300 });
-    }, [focusCardId, cards, sidebarCollapsed, rfSetViewport]);
+        void setViewport(focusViewport(rect, vp, screen), { duration: 300 });
+    }, [focusCardId, cards, sidebarCollapsed, setViewport]);
 
     // Reveal a newly added card when it lands (partially) outside the view.
     // Only single-card adds trigger this — canvas restores hydrate many at once
@@ -241,8 +325,8 @@ export function Canvas() {
             height: window.innerHeight,
         };
         if (isFullyVisible(rect, vp, screen)) return;
-        void rfSetViewport(focusViewport(rect, vp, screen), { duration: 300 });
-    }, [cards, activeView, sidebarCollapsed, rfSetViewport]);
+        void setViewport(focusViewport(rect, vp, screen), { duration: 300 });
+    }, [cards, activeView, sidebarCollapsed, setViewport]);
 
     // Fork lineage + note sources → edges. Chat cards use parentId (fork /
     // spawn lineage); note cards additionally use parentIds (merge sources).
@@ -322,11 +406,47 @@ export function Canvas() {
         return () => window.removeEventListener('keydown', onKey);
     }, [closeMenu]);
 
+    const openPaneMenu = useCallback((x: number, y: number, mergeIds?: string[]) => {
+        setMenu(mergeIds ? { x, y, mergeIds } : { x, y });
+        // Top 5 by recent use (server sorts); cold start = alphabetical.
+        void fetch('/agents')
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d) => {
+                const agents = Array.isArray(d?.agents) ? d.agents : [];
+                const topIds: string[] = Array.isArray(d?.top) ? d.top : [];
+                const byId = new Map(
+                    agents.map((a: { id: string; name: string; role?: string }) => [a.id, a]),
+                );
+                const ordered =
+                    topIds.length > 0
+                        ? topIds.map((id) => byId.get(id)).filter(Boolean)
+                        : agents.slice(0, 5);
+                setTopAgents(
+                    ordered.slice(0, 5).map((a: { id: string; name: string; role?: string }) => ({
+                        id: a.id,
+                        name: a.name,
+                        role: a.role ?? '',
+                    })),
+                );
+            })
+            .catch(() => setTopAgents([]));
+    }, []);
+
     const newCardHere = useCallback(() => {
         if (!menu) return;
         addCard(screenToFlowPosition(menu));
         setMenu(null);
     }, [menu, addCard, screenToFlowPosition]);
+
+    const spawnAgentHere = useCallback(
+        (profileId: string) => {
+            if (!menu) return;
+            const pos = screenToFlowPosition(menu);
+            setMenu(null);
+            void useCanvasStore.getState().spawnAgentProfile(profileId, pos);
+        },
+        [menu, screenToFlowPosition],
+    );
 
     const bounds = wrapperRef.current?.getBoundingClientRect();
     const sidebarWidth = sidebarCollapsed ? SIDEBAR_COLLAPSED_WIDTH : SIDEBAR_WIDTH;
@@ -343,10 +463,15 @@ export function Canvas() {
     return (
         <div className="relative h-full w-full" ref={wrapperRef}>
             {/* Canvas layer — stays mounted so streams/iframes survive page swaps;
-                hidden while a Settings page fills the content area. */}
-            <div className={`absolute inset-0 ${activeView !== 'canvas' ? 'invisible' : ''}`}>
+                hidden while a Settings page fills the content area.
+                Clip the navbar strip so cards/editors never paint over it. */}
+            <div
+                ref={flowLayerRef}
+                className={`absolute inset-0 ${activeView !== 'canvas' || showCanvasInbox ? 'invisible' : ''}`}
+                style={{ clipPath: `inset(0 0 0 ${sidebarWidth}px)` }}
+            >
             <ReactFlow
-                onlyRenderVisibleElements
+                onlyRenderVisibleElements={!renderAllNodes}
                 nodes={nodes}
                 edges={edges}
                 onNodesChange={onNodesChange}
@@ -371,14 +496,14 @@ export function Canvas() {
                 deleteKeyCode={typingFocus ? null : ['Backspace', 'Delete']}
                 onPaneContextMenu={(e) => {
                     e.preventDefault();
-                    setMenu({ x: e.clientX, y: e.clientY });
+                    openPaneMenu(e.clientX, e.clientY);
                 }}
                 onSelectionContextMenu={(e) => {
                     e.preventDefault();
                     const selectedIds = new Set(nodes.filter((n) => n.selected).map((n) => n.id));
                     const selectedCards = cards.filter((c) => c.kind !== 'note' && selectedIds.has(c.id));
                     if (selectedCards.length >= 2) {
-                        setMenu({ x: e.clientX, y: e.clientY, mergeIds: selectedCards.map((c) => c.id) });
+                        openPaneMenu(e.clientX, e.clientY, selectedCards.map((c) => c.id));
                     }
                 }}
                 onPaneClick={closeMenu}
@@ -407,13 +532,22 @@ export function Canvas() {
 
             <CanvasNoticeBanner />
 
+            {saveState !== 'idle' && (
+                <div
+                    className="pointer-events-none absolute right-3 top-3 z-10 rounded-md border border-border bg-card/90 px-2 py-0.5 text-[10px] text-muted-foreground backdrop-blur"
+                    aria-live="polite"
+                >
+                    {saveState === 'saving' ? 'Saving…' : 'Saved'}
+                </div>
+            )}
+
             {/* <TopBar /> DISABLED — re-enable later */}
             {cards.length > 0 && <Toolbar />}
 
             {/* Right-click context menu */}
             {menu && (
                 <div
-                    className="fixed z-20 w-44 rounded-lg border border-border bg-card py-1 text-xs shadow-md"
+                    className="fixed z-[60] w-52 rounded-lg border border-border bg-card py-1 text-xs shadow-md"
                     style={{ left: menu.x, top: menu.y }}
                 >
                     {menu.mergeIds && menu.mergeIds.length >= 2 && (
@@ -431,8 +565,32 @@ export function Canvas() {
                         className="block w-full px-3 py-1.5 text-left text-card-foreground hover:bg-secondary"
                         onClick={newCardHere}
                     >
-                        💬 New chat card
+                        New chat card
                     </button>
+                    {topAgents.length > 0 && (
+                        <>
+                            <div className="my-1 border-t border-border" />
+                            <p className="px-3 py-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+                                Agents
+                            </p>
+                            {topAgents.map((agent) => (
+                                <button
+                                    key={agent.id}
+                                    className="block w-full px-3 py-1.5 text-left text-card-foreground hover:bg-secondary"
+                                    title={agent.role || agent.id}
+                                    onClick={() => spawnAgentHere(agent.id)}
+                                >
+                                    <span className="block truncate">{agent.name}</span>
+                                    {agent.role ? (
+                                        <span className="block truncate text-[10px] text-muted-foreground">
+                                            {agent.role}
+                                        </span>
+                                    ) : null}
+                                </button>
+                            ))}
+                        </>
+                    )}
+                    <div className="my-1 border-t border-border" />
                     <button
                         className="block w-full px-3 py-1.5 text-left text-card-foreground hover:bg-secondary"
                         onClick={() => {
@@ -441,7 +599,7 @@ export function Canvas() {
                             setMenu(null);
                         }}
                     >
-                        📄 New document
+                        New document
                     </button>
                     <button
                         className="block w-full px-3 py-1.5 text-left text-card-foreground hover:bg-secondary"
@@ -464,13 +622,21 @@ export function Canvas() {
                 promoted iframe node from any card; auto-closes off-canvas. */}
             <VizFullscreenLayer />
 
-            {/* Settings PAGE (never a dialog) — fills the content area right of the navbar */}
-            {activeView !== 'canvas' && (
+            {/* Content-area PAGE (never a dialog) right of the navbar: inbox or settings. */}
+            {(showCanvasInbox || activeView !== 'canvas') && (
                 <div
                     className="absolute inset-y-0 right-0 transition-[left] duration-200"
                     style={{ left: sidebarCollapsed ? 48 : 260 }}
                 >
-                    <SettingsPage />
+                    {showCanvasInbox ? (
+                        <InboxView
+                            filterCardId={inboxFilterCardId}
+                            closeLabel="Back to canvas"
+                            onClose={closeInbox}
+                        />
+                    ) : (
+                        <SettingsPage />
+                    )}
                 </div>
             )}
         </div>

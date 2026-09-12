@@ -1,29 +1,40 @@
 import { useEffect, useRef, useState } from 'react';
 import { SkillsManager, SkillEditor, type SkillPrefill } from '@/components/skills-manager';
+import { AgentsManager, AgentEditor, type AgentPrefill } from '@/components/agents-manager';
+import { ProvidersSection } from '@/settings/providers-section';
 import { confirmAction } from '@/components/dialogs';
 import { THEMES } from '@/theme/themes';
 import { useThemeStore } from '@/theme/theme-store';
-import { useCanvasStore } from '@/store/canvas-store';
+import { useCanvasStore, type AppView } from '@/store/canvas-store';
 import { cn } from '@/lib/utils';
+
+type SettingsSection = 'agents' | 'skills' | 'themes' | 'providers';
+
+function sectionFromView(view: AppView): SettingsSection {
+    if (view === 'agents') return 'agents';
+    if (view === 'themes') return 'themes';
+    if (view === 'providers') return 'providers';
+    return 'skills';
+}
 
 /**
  * Full Settings PAGE (not a dialog) — fills the content area next to the
  * navbar. NO tabs/header here: the section follows the navbar row you
- * clicked (Skills | Themes). Edit/add swaps the whole page to the editor.
+ * clicked (Agents | Skills | Themes). Edit/add swaps the whole page to the editor.
  */
 export function SettingsPage() {
     const activeView = useCanvasStore((s) => s.activeView);
-    const section: 'skills' | 'themes' = activeView === 'themes' ? 'themes' : 'skills';
+    const section = sectionFromView(activeView);
 
     const [editingId, setEditingId] = useState<string | null>(null);
     const [creating, setCreating] = useState(false);
-    const [prefill, setPrefill] = useState<SkillPrefill | undefined>(undefined);
+    const [skillPrefill, setSkillPrefill] = useState<SkillPrefill | undefined>(undefined);
+    const [agentPrefill, setAgentPrefill] = useState<AgentPrefill | undefined>(undefined);
     const [refreshKey, setRefreshKey] = useState(0);
     const [appVersion, setAppVersion] = useState<string | null>(null);
     const dirtyRef = useRef(false);
     const setActiveView = useCanvasStore((s) => s.setActiveView);
 
-    // Same version string baked into release artifact names (Melon-0.3.3-arm64.dmg).
     useEffect(() => {
         let alive = true;
         fetch('/healthz', { cache: 'no-store' })
@@ -44,20 +55,24 @@ export function SettingsPage() {
     const closeEditor = () => {
         setEditingId(null);
         setCreating(false);
-        setPrefill(undefined);
+        setSkillPrefill(undefined);
+        setAgentPrefill(undefined);
         setRefreshKey((k) => k + 1);
     };
 
-    // Leaving the skills section while the editor is open: confirm if dirty.
+    // Leaving a section while the editor is open: confirm if dirty.
     useEffect(() => {
-        if (section === 'skills' || (!creating && editingId === null)) return;
+        if (!creating && editingId === null) return;
         if (dirtyRef.current) {
             confirmAction({
                 title: 'Discard changes?',
-                description: 'Your edits to this skill will not be saved.',
+                description:
+                    section === 'agents'
+                        ? 'Your edits to this agent will not be saved.'
+                        : 'Your edits to this skill will not be saved.',
             }).then((ok) => {
                 if (ok) closeEditor();
-                else setActiveView('skills');
+                else setActiveView(section === 'themes' ? 'skills' : section);
             });
         } else {
             closeEditor();
@@ -65,15 +80,30 @@ export function SettingsPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [section]);
 
-    const duplicate = async (sk: { id: string; name: string }) => {
+    const duplicateSkill = async (sk: { id: string; name: string }) => {
         const d = await fetch(`/skills/${sk.id}`)
             .then((r) => r.json())
             .catch(() => null);
         if (!d) return;
-        setPrefill({
+        setSkillPrefill({
             name: `${d.name ?? sk.name} copy`,
             description: d.description ?? '',
             instructions: d.instructions ?? '',
+        });
+        setEditingId(null);
+        setCreating(true);
+    };
+
+    const duplicateAgent = async (row: { id: string; name: string }) => {
+        const d = await fetch(`/agents/${row.id}`)
+            .then((r) => r.json())
+            .catch(() => null);
+        if (!d) return;
+        setAgentPrefill({
+            name: `${d.name ?? row.name} copy`,
+            role: d.role ?? '',
+            descriptionMd: d.descriptionMd ?? '',
+            defaultSkillIds: Array.isArray(d.defaultSkillIds) ? d.defaultSkillIds : [],
         });
         setEditingId(null);
         setCreating(true);
@@ -87,14 +117,41 @@ export function SettingsPage() {
     return (
         <div className="flex h-full w-full flex-col bg-background">
             <div className="min-h-0 flex-1 overflow-hidden">
-                {section === 'skills' ? (
+                {section === 'agents' ? (
+                    inEditor ? (
+                        <div className="mx-auto flex h-full w-full max-w-3xl flex-col p-5">
+                            <AgentEditor
+                                agentId={creating ? null : editingId}
+                                initial={agentPrefill}
+                                onBack={closeEditor}
+                                onDirtyChange={(d) => {
+                                    dirtyRef.current = d;
+                                }}
+                            />
+                        </div>
+                    ) : (
+                        <div className="mx-auto flex h-full w-full max-w-3xl flex-col p-5">
+                            <AgentsManager
+                                onEdit={setEditingId}
+                                onCreate={() => {
+                                    setAgentPrefill(undefined);
+                                    setCreating(true);
+                                }}
+                                onDuplicate={duplicateAgent}
+                                refreshKey={refreshKey}
+                            />
+                        </div>
+                    )
+                ) : section === 'skills' ? (
                     inEditor ? (
                         <div className="mx-auto flex h-full w-full max-w-3xl flex-col p-5">
                             <SkillEditor
                                 skillId={creating ? null : editingId}
-                                initial={prefill}
+                                initial={skillPrefill}
                                 onBack={closeEditor}
-                                onDirtyChange={(d) => (dirtyRef.current = d)}
+                                onDirtyChange={(d) => {
+                                    dirtyRef.current = d;
+                                }}
                             />
                         </div>
                     ) : (
@@ -102,14 +159,18 @@ export function SettingsPage() {
                             <SkillsManager
                                 onEdit={setEditingId}
                                 onCreate={() => {
-                                    setPrefill(undefined);
+                                    setSkillPrefill(undefined);
                                     setCreating(true);
                                 }}
-                                onDuplicate={duplicate}
+                                onDuplicate={duplicateSkill}
                                 refreshKey={refreshKey}
                             />
                         </div>
                     )
+                ) : section === 'providers' ? (
+                    <div className="mx-auto flex h-full w-full max-w-3xl flex-col p-5">
+                        <ProvidersSection />
+                    </div>
                 ) : (
                     <div className="mx-auto h-full w-full max-w-3xl overflow-y-auto p-5">
                         <div className="space-y-1" role="radiogroup" aria-label="Theme">

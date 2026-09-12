@@ -7,6 +7,8 @@ export interface AttachedSession {
     lastViz?: boolean;
     /** Skill ids currently active for this card's session. */
     activeSkills?: string[];
+    /** Settings → Agents profile bound to this box (standing instructions). */
+    agentProfileId?: string;
     /**
      * Server-owned prompt queue. pi has no per-item queue removal, so queued
      * prompts NEVER enter pi's followUp queue — this array is the single

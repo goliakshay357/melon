@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import {
+    ArrowLeft,
+    Bot,
     Check,
     ChevronRight,
     FileText,
     FolderOpen,
     FolderPlus,
+    Inbox,
     Layers,
     MessageSquare,
     Palette,
@@ -12,6 +15,7 @@ import {
     PanelLeftOpen,
     Plus,
     Search,
+    Server,
     Settings,
     Sparkles,
     X,
@@ -21,6 +25,7 @@ import { askText, confirmAction, chooseCanvasIsolation } from '@/components/dial
 import { cn } from '@/lib/utils';
 import { fuzzyMatchIndices, fuzzyScore } from '@/lib/fuzzy';
 import { pickFolder } from '@/lib/pick-folder';
+import { resolveCanvasNode } from '@/lib/canvas-node';
 
 type CanvasListItem = {
     id: string;
@@ -104,7 +109,13 @@ export function Sidebar() {
     const [pickingNative, setPickingNative] = useState(false);
     const activeView = useCanvasStore((s) => s.activeView);
     const setActiveView = useCanvasStore((s) => s.setActiveView);
-    const openView = (v: 'skills' | 'themes') => {
+    const cards = useCanvasStore((s) => s.cards);
+    const openInbox = useCanvasStore((s) => s.openInbox);
+    const closeInbox = useCanvasStore((s) => s.closeInbox);
+    const inboxOpen = useCanvasStore((s) => s.inboxOpen);
+    const totalPending = cards.reduce((n, c) => n + (c.boxInboxPending ?? 0), 0);
+    const openView = (v: 'agents' | 'skills' | 'themes' | 'providers') => {
+        closeInbox();
         setActiveView(v);
     };
     const [recent, setRecent] = useState<CanvasListItem[]>([]);
@@ -369,6 +380,59 @@ export function Sidebar() {
             });
     };
 
+    /**
+     * Open an existing node from the Workspaces tree.
+     *
+     * RCA of "clicking a node creates a new card": the tree lists sessions and the
+     * click fell back to `resumeSession`, which spawns a fresh card. A node is
+     * identified by its session file, and the canvas cards already carry that
+     * file, so resolve it there and never create anything.
+     *
+     * `cardId` is a fast path only — the session file is the source of truth, so
+     * a stale tree (or an older server that does not send cardId) still navigates
+     * to the existing node instead of resuming it.
+     */
+    const openNode = (
+        cwd: string,
+        targetCanvasId: string,
+        sessionFile: string,
+        cardId?: string,
+    ) => {
+        clearSearch();
+        setActiveView('canvas');
+
+        const focusExisting = (): boolean => {
+            const store = useCanvasStore.getState();
+            if (store.folder !== cwd || store.canvasId !== targetCanvasId) return false;
+            const card = resolveCanvasNode(store.cards, sessionFile, cardId);
+            if (!card) return false;
+            store.requestFocusCard(card.id);
+            return true;
+        };
+
+        const store = useCanvasStore.getState();
+        if (store.folder === cwd && store.canvasId === targetCanvasId) {
+            if (!focusExisting()) {
+                useCanvasStore.setState({
+                    canvasNotice: 'That node is not on this canvas anymore. Nothing was created.',
+                });
+            }
+            return;
+        }
+
+        setSwitchingCanvasId(targetCanvasId);
+        void openCanvas(cwd, targetCanvasId)
+            .then(() => {
+                if (!focusExisting()) {
+                    useCanvasStore.setState({
+                        canvasNotice: 'That node is not on this canvas anymore. Nothing was created.',
+                    });
+                }
+            })
+            .catch(() => {})
+            .finally(() => setSwitchingCanvasId(null));
+    };
+
     // Native OS dialog — the only way in. Cancel = no-op.
     const addFolder = async () => {
         setPickingNative(true);
@@ -467,7 +531,7 @@ export function Sidebar() {
     return (
         <div
             className={cn(
-                'absolute left-0 top-0 z-10 flex h-full flex-col overflow-hidden border-r border-border bg-card transition-all duration-200',
+                'absolute left-0 top-0 z-50 flex h-full flex-col overflow-hidden border-r border-border bg-card transition-all duration-200',
                 collapsed ? 'w-12 items-center py-2' : 'w-[260px]',
             )}
         >
@@ -475,6 +539,9 @@ export function Sidebar() {
                 <>
                     <button
                         className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                        title="Expand sidebar"
+                        aria-label="Expand sidebar"
+                        aria-expanded={false}
                         onClick={() => setCollapsed(false)}
                     >
                         <PanelLeftOpen className="size-4" />
@@ -482,6 +549,7 @@ export function Sidebar() {
                     <button
                         className="rounded-lg p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
                         title="Search canvases (⌘K)"
+                        aria-label="Search canvases"
                         onClick={() => {
                             setCollapsed(false);
                             setActiveView('canvas');
@@ -490,33 +558,73 @@ export function Sidebar() {
                     >
                         <Search className="size-4" />
                     </button>
-                    {activeView !== 'canvas' && (
-                        <>
-                            <button
-                                className={cn(
-                                    'rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
-                                    activeView === 'skills' && 'bg-secondary text-foreground',
-                                )}
-                                title="Skills"
-                                onClick={() => openView('skills')}
-                            >
-                                <Sparkles className="size-4" />
-                            </button>
-                            <button
-                                className={cn(
-                                    'rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
-                                    activeView === 'themes' && 'bg-secondary text-foreground',
-                                )}
-                                title="Themes"
-                                onClick={() => openView('themes')}
-                            >
-                                <Palette className="size-4" />
-                            </button>
-                        </>
-                    )}
+                    <button
+                        className={cn(
+                            'relative rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
+                            inboxOpen && 'bg-secondary text-foreground',
+                        )}
+                        title="Inbox"
+                        aria-label="Inbox"
+                        aria-current={inboxOpen ? 'page' : undefined}
+                        onClick={() => (inboxOpen ? closeInbox() : openInbox(null))}
+                    >
+                        <Inbox className="size-4" />
+                        {totalPending > 0 ? (
+                            <span className="absolute right-1 top-1 size-2 rounded-full bg-amber-500" />
+                        ) : null}
+                    </button>
+                    <button
+                        className={cn(
+                            'rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
+                            activeView === 'providers' && 'bg-secondary text-foreground',
+                        )}
+                        title="Providers"
+                        aria-label="Providers"
+                        aria-current={activeView === 'providers' ? 'page' : undefined}
+                        onClick={() => openView('providers')}
+                    >
+                        <Server className="size-4" />
+                    </button>
+                    <button
+                        className={cn(
+                            'rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
+                            activeView === 'agents' && 'bg-secondary text-foreground',
+                        )}
+                        title="Agents"
+                        aria-label="Agents"
+                        aria-current={activeView === 'agents' ? 'page' : undefined}
+                        onClick={() => openView('agents')}
+                    >
+                        <Bot className="size-4" />
+                    </button>
+                    <button
+                        className={cn(
+                            'rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
+                            activeView === 'skills' && 'bg-secondary text-foreground',
+                        )}
+                        title="Skills"
+                        aria-label="Skills"
+                        aria-current={activeView === 'skills' ? 'page' : undefined}
+                        onClick={() => openView('skills')}
+                    >
+                        <Sparkles className="size-4" />
+                    </button>
+                    <button
+                        className={cn(
+                            'rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
+                            activeView === 'themes' && 'bg-secondary text-foreground',
+                        )}
+                        title="Themes"
+                        aria-label="Themes"
+                        aria-current={activeView === 'themes' ? 'page' : undefined}
+                        onClick={() => openView('themes')}
+                    >
+                        <Palette className="size-4" />
+                    </button>
                     <button
                         className="mt-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
                         title={activeView === 'canvas' ? 'Settings' : 'Back to chat'}
+                        aria-label={activeView === 'canvas' ? 'Settings' : 'Back to chat'}
                         onClick={() =>
                             activeView === 'canvas' ? openView('themes') : setActiveView('canvas')
                         }
@@ -537,6 +645,9 @@ export function Sidebar() {
                         </span>
                         <button
                             className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary"
+                            title="Collapse sidebar"
+                            aria-label="Collapse sidebar"
+                            aria-expanded={true}
                             onClick={() => setCollapsed(true)}
                         >
                             <PanelLeftClose className="size-4" />
@@ -591,6 +702,29 @@ export function Sidebar() {
                                 </kbd>
                             )}
                         </div>
+                    </div>
+
+                    {/* Inbox — canvas-level pending approvals, pinned above the scroll list. */}
+                    <div className="px-2 pb-1">
+                        <button
+                            type="button"
+                            onClick={() => (inboxOpen ? closeInbox() : openInbox(null))}
+                            aria-current={inboxOpen ? 'page' : undefined}
+                            className={cn(
+                                'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs transition-colors',
+                                inboxOpen
+                                    ? 'bg-secondary font-medium text-card-foreground'
+                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                            )}
+                        >
+                            <Inbox className="size-3.5 shrink-0" />
+                            <span className="min-w-0 flex-1 truncate">Inbox</span>
+                            {totalPending > 0 ? (
+                                <span className="shrink-0 rounded-full bg-amber-500 px-1.5 text-[10px] font-semibold tabular-nums text-white">
+                                    {totalPending > 99 ? '99+' : totalPending}
+                                </span>
+                            ) : null}
+                        </button>
                     </div>
 
                     {/* Scrollable body */}
@@ -893,9 +1027,7 @@ export function Sidebar() {
                                                                     key={sess.file}
                                                                     className="flex w-full items-center gap-1 truncate rounded-md py-0.5 pl-6 pr-1 text-left text-[11px] text-muted-foreground transition-colors hover:bg-secondary/70 hover:text-card-foreground"
                                                                     title={sess.title}
-                                                                    onClick={() =>
-                                                                        resumeSession(sess.file)
-                                                                    }
+                                                                    onClick={() => openNode(cwd, cv.id, sess.file, sess.cardId)}
                                                                 >
                                                                     <FileText className="size-2.5 shrink-0" />
                                                                     <span className="truncate">
@@ -966,10 +1098,42 @@ export function Sidebar() {
                     ) : (
                         /* Settings mode: navbar body becomes the two pages */
                         <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2">
+                            {/* Supernova puts "Back to app" at the top of the settings nav. */}
+                            <div className="pt-2">
+                                <button
+                                    type="button"
+                                    onClick={() => setActiveView('canvas')}
+                                    className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                                >
+                                    <ArrowLeft className="size-3.5 shrink-0" /> Back to chat
+                                </button>
+                            </div>
                             <p className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
                                 Settings
                             </p>
                             <div className="space-y-0.5">
+                                <button
+                                    onClick={() => openView('providers')}
+                                    className={cn(
+                                        'flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-xs transition-colors',
+                                        activeView === 'providers'
+                                            ? 'bg-secondary font-medium text-card-foreground'
+                                            : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                                    )}
+                                >
+                                    <Server className="size-3.5 shrink-0" /> Providers
+                                </button>
+                                <button
+                                    onClick={() => openView('agents')}
+                                    className={cn(
+                                        'flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-xs transition-colors',
+                                        activeView === 'agents'
+                                            ? 'bg-secondary font-medium text-card-foreground'
+                                            : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                                    )}
+                                >
+                                    <Bot className="size-3.5 shrink-0" /> Agents
+                                </button>
                                 <button
                                     onClick={() => openView('skills')}
                                     className={cn(
@@ -1022,19 +1186,16 @@ export function Sidebar() {
                             ) : (
                                 <span className="min-w-0 flex-1" />
                             )}
-                            <button
-                                className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                                title={activeView === 'canvas' ? 'Settings' : 'Back to chat'}
-                                onClick={() =>
-                                    activeView === 'canvas' ? openView('themes') : setActiveView('canvas')
-                                }
-                            >
-                                {activeView === 'canvas' ? (
+                            {activeView === 'canvas' && (
+                                <button
+                                    className="shrink-0 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                                    title="Settings"
+                                    aria-label="Settings"
+                                    onClick={() => openView('themes')}
+                                >
                                     <Settings className="size-3.5" />
-                                ) : (
-                                    <MessageSquare className="size-3.5" />
-                                )}
-                            </button>
+                                </button>
+                            )}
                         </div>
                     </div>
 

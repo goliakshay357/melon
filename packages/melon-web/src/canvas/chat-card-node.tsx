@@ -8,14 +8,19 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { BookMarked, Bug, ChevronDown, ChevronUp, Copy, Minimize2, MoreHorizontal, Pencil, Plus, Search, X } from 'lucide-react';
+import { BookMarked, Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, Shrink, X } from 'lucide-react';
+import { askChoice } from '@/components/dialogs';
 import { useCanvasStore } from '@/store/canvas-store';
+import { boxMailLog } from '@/lib/box-mail-brief';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { PromptComposer } from '@/components/prompt-composer';
+import { MatrixLoader } from '@/components/matrix-loader';
 import { QuestionPanel } from '@/components/question-panel';
 import { ToolRunBlock } from '@/components/tool-run-block';
 import { DEFAULT_CARD_SIZE, type TraceEvent } from '@/types/session-card';
 import { MinimizedCardBar } from './minimized-card-bar';
+import { MaximizeIcon } from './canvas-boxes-side-nav';
+import { FullscreenExitButton, FullscreenShell } from './fullscreen-shell';
 import {
     mentionExists,
     mentionPaths,
@@ -93,17 +98,16 @@ function setUiFlag(key: string, v: boolean) {
     blockUi.set(key, v);
 }
 
-function Spinner() {
-    return (
-        <span className="inline-block size-2.5 animate-spin rounded-full border-2 border-muted-foreground/40 border-t-muted-foreground" />
-    );
-}
-
 // ── 💭 Thinking ──────────────────────────────────────────────────────────
+/** Edit-in-place is disabled for now. Flip to true to re-enable the Edit action. */
+const EDIT_MESSAGE_ENABLED = false;
+
 type MessageShape = {
     role: string;
     text: string;
     thinking?: string;
+    /** pi session entry id — lets a message be a fork point. */
+    entryId?: string;
     tools?: Array<{
         callId: string;
         name: string;
@@ -117,6 +121,76 @@ type MessageShape = {
 // MODULE-LEVEL + memoized: a stable component identity means React reconciles
 // messages on re-render instead of REMOUNTING them (which reloaded viz iframes
 // and made the chat bounce up/down while typing).
+/**
+ * Message action row, Supernova-style: sits under the message and is hidden until
+ * the message is hovered. Copy is always available; Fork and Edit only while the
+ * card is idle.
+ */
+function MessageActions({
+    align,
+    text,
+    onFork,
+    onEdit,
+}: {
+    align: 'start' | 'end';
+    text: string;
+    onFork?: () => void;
+    onEdit?: () => void;
+}) {
+    const [copied, setCopied] = useState(false);
+    const canCopy = text.trim().length > 0;
+    if (!canCopy && !onFork && !onEdit) return null;
+    return (
+        <div
+            className={cn(
+                'mt-1 flex items-center gap-0.5 opacity-0 transition-opacity group-hover/msg:opacity-100',
+                align === 'end' && 'justify-end',
+                copied && 'opacity-100',
+            )}
+        >
+            {canCopy ? (
+                <button
+                    type="button"
+                    title={copied ? 'Copied' : 'Copy message'}
+                    aria-label="Copy message"
+                    className="grid size-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                    onClick={() => {
+                        if (copied) return;
+                        void navigator.clipboard.writeText(text).then(() => {
+                            setCopied(true);
+                            window.setTimeout(() => setCopied(false), 1000);
+                        });
+                    }}
+                >
+                    {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                </button>
+            ) : null}
+            {onFork ? (
+                <button
+                    type="button"
+                    title="Fork from here"
+                    aria-label="Fork from here"
+                    className="grid size-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                    onClick={onFork}
+                >
+                    <GitBranch className="size-3.5" />
+                </button>
+            ) : null}
+            {onEdit ? (
+                <button
+                    type="button"
+                    title="Edit from here"
+                    aria-label="Edit from here"
+                    className="grid size-6 place-items-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                    onClick={onEdit}
+                >
+                    <Pencil className="size-3.5" />
+                </button>
+            ) : null}
+        </div>
+    );
+}
+
 const MessageBlocks = ReactMemo(function MessageBlocks({
     m,
     index,
@@ -126,6 +200,8 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     highlighted,
     findQuery,
     findActive,
+    onFork,
+    onEditSubmit,
 }: {
     m: MessageShape;
     index: number;
@@ -135,8 +211,14 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     highlighted?: boolean;
     findQuery?: string;
     findActive?: boolean;
+    /** Fork the conversation up to this message index. */
+    onFork?: (index: number) => void;
+    /** Revert to before this user message and send the edited text from there. */
+    onEditSubmit?: (index: number, text: string) => void;
 }) {
     const q = findQuery?.trim() ?? '';
+    const [editing, setEditing] = useState(false);
+    const [draft, setDraft] = useState('');
     if (m.role === 'system') {
         const bad = m.text.startsWith('✗');
         return (
@@ -157,22 +239,73 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
         );
     }
     if (m.role === 'user') {
+        if (editing) {
+            const submitEdit = () => {
+                const text = draft.trim();
+                if (!text) return;
+                setEditing(false);
+                onEditSubmit?.(index, text);
+            };
+            return (
+                <div
+                    className="group/msg flex flex-col items-end"
+                    data-msg-index={index}
+                    data-user-prompt="true"
+                >
+                    <div className="w-full max-w-[92%] rounded-xl border border-ring bg-background px-3 py-2">
+                        <textarea
+                            autoFocus
+                            rows={Math.min(10, Math.max(1, draft.split('\n').length))}
+                            value={draft}
+                            onChange={(e) => setDraft(e.target.value)}
+                            onKeyDown={(e) => {
+                                e.stopPropagation();
+                                if (e.key === 'Enter' && !e.shiftKey) {
+                                    e.preventDefault();
+                                    submitEdit();
+                                } else if (e.key === 'Escape') {
+                                    e.preventDefault();
+                                    setEditing(false);
+                                }
+                            }}
+                            className="nodrag nowheel block w-full resize-none bg-transparent text-[length:var(--text-chat)] leading-relaxed text-foreground outline-none"
+                        />
+                        <p className="mt-1 text-right text-[10px] text-muted-foreground">
+                            Enter to send · Esc to cancel
+                        </p>
+                    </div>
+                </div>
+            );
+        }
         return (
             <div
                 className={cn(
-                    'flex justify-end rounded-xl transition-colors duration-500',
+                    'group/msg flex flex-col items-end rounded-xl transition-colors duration-500',
                     highlighted && 'ring-2 ring-primary/50 ring-offset-2 ring-offset-card',
                 )}
                 data-msg-index={index}
                 data-user-prompt="true"
             >
-                <div className="max-w-[92%] overflow-hidden rounded-xl bg-primary/10 px-3 py-1.5 text-xs leading-relaxed text-primary whitespace-pre-wrap break-words">
+                <div className="max-w-[92%] overflow-hidden rounded-xl bg-primary/10 px-3 py-1.5 text-[length:var(--text-chat)] leading-relaxed text-primary whitespace-pre-wrap break-words">
                     {q ? (
                         <HighlightedPlainText text={m.text} query={q} current={findActive} />
                     ) : (
                         <UserTextWithMentions text={m.text} />
                     )}
                 </div>
+                <MessageActions
+                    align="end"
+                    text={m.text}
+                    onFork={!streaming && onFork ? () => onFork(index) : undefined}
+                    onEdit={
+                        !streaming && onEditSubmit
+                            ? () => {
+                                  setDraft(m.text);
+                                  setEditing(true);
+                              }
+                            : undefined
+                    }
+                />
             </div>
         );
     }
@@ -184,7 +317,7 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     return (
         <div
             className={cn(
-                'min-w-0 space-y-2 pl-1 rounded-lg transition-colors duration-500',
+                'group/msg min-w-0 space-y-2 pl-1 rounded-lg transition-colors duration-500',
                 highlighted && 'ring-2 ring-primary/40 ring-offset-2 ring-offset-card',
             )}
             data-msg-index={index}
@@ -214,7 +347,7 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
                 />
             ))}
             {(isStreamingTail ? m.text.length > 0 : m.text.trim()) ? (
-                <div className="rounded-lg bg-secondary/40 px-3 py-2">
+                <div>
                     {q ? (
                         <FindHighlightHost query={q} current={findActive}>
                             <MarkdownBlock content={m.text} streaming={isStreamingTail} />
@@ -224,6 +357,10 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
                     )}
                 </div>
             ) : null}
+            <MessageActions
+                align="start"
+                text={m.text}
+            />
         </div>
     );
 });
@@ -764,14 +901,14 @@ function ThinkingBlock({
     }, [findQuery, findActive, text, key]);
 
     return (
-        <div
-            className={cn(
-                'rounded-lg border bg-background/40',
-                active ? 'border-primary/35' : 'border-border/70',
-            )}
-        >
+        <div className="min-w-0 text-[13px]">
             <button
-                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left"
+                type="button"
+                aria-expanded={open}
+                className={cn(
+                    'flex w-full min-w-0 items-center gap-2 py-0.5 text-left text-muted-foreground transition-colors hover:text-foreground',
+                    active && 'shimmer-text',
+                )}
                 onClick={() => {
                     autoControlled.current = false;
                     const next = !open;
@@ -779,21 +916,16 @@ function ThinkingBlock({
                     setUiFlag(key, next);
                 }}
             >
-                {active ? <Spinner /> : <span className="text-muted-foreground">💭</span>}
-                <span
-                    className={cn(
-                        'flex-1 text-[10px] font-medium uppercase tracking-wide',
-                        active ? 'shimmer-text' : 'text-muted-foreground',
-                    )}
-                >
-                    {active ? 'Thinking…' : 'Thought process'}
-                </span>
-                <span className="text-[9px] text-muted-foreground/60">{text.length} chars</span>
+                <Brain className="size-3.5 shrink-0" />
+                <span className="min-w-0 truncate">{active ? 'Thinking…' : 'Thought process'}</span>
+                <ChevronRight
+                    className={cn('ml-auto size-3.5 shrink-0 transition-transform', open && 'rotate-90')}
+                />
             </button>
             {open && (
                 <div
                     ref={bodyRef}
-                    className="nowheel max-h-56 overflow-y-auto whitespace-pre-wrap border-t border-border/50 px-2.5 py-1.5 text-[10px] italic leading-relaxed text-muted-foreground"
+                    className="nowheel mt-1.5 max-h-56 overflow-y-auto whitespace-pre-wrap text-[12px] leading-relaxed text-muted-foreground"
                 >
                     {findQuery.trim() ? (
                         <HighlightedPlainText
@@ -1174,7 +1306,14 @@ function ChatCardNodeInner({
         (next: string | ((prev: string) => string)) => useCanvasStore.getState().setCardDraft(id, next),
         [id],
     );
-    const [maximized, setMaximized] = useState(false);
+    const maximizedCardId = useCanvasStore((s) => s.maximizedCardId);
+    const maximized = maximizedCardId === id;
+    const setMaximized = useCallback(
+        (next: boolean) => {
+            useCanvasStore.getState().setMaximizedCardId(next ? id : null);
+        },
+        [id],
+    );
     const [view, setView] = useState<'chat' | 'trajectory'>('chat');
     const [editingTitle, setEditingTitle] = useState(false);
     const [highlightedIndex, setHighlightedIndex] = useState(-1);
@@ -1183,8 +1322,9 @@ function ChatCardNodeInner({
     const [findQuery, setFindQuery] = useState('');
     const [findMatchCursor, setFindMatchCursor] = useState(0);
     const findInputRef = useRef<HTMLInputElement>(null);
-    const dbg = (...args: unknown[]) => console.log('[ui-debug]', ...args);
-    useEffect(() => { dbg('card mounted', id); }, []);
+    useEffect(() => {
+        void useCanvasStore.getState().syncBoxInbox(id);
+    }, [id]);
     const scrollRef = useRef<HTMLDivElement>(null);
     const maxScrollRef = useRef<HTMLDivElement>(null);
     const atBottomRef = useRef(true); // user pinned to the newest output?
@@ -1196,7 +1336,6 @@ function ChatCardNodeInner({
 
     const handleMessagesScroll = (el: HTMLDivElement) => {
         const near = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-        dbg('scroll', `st=${el.scrollTop} sh=${el.scrollHeight} ch=${el.clientHeight} atBottom=${near}`);
         atBottomRef.current = near;
         setShowDown(!near); // React bails out when unchanged
         if (maximized) {
@@ -1205,7 +1344,6 @@ function ChatCardNodeInner({
         }
     };
     const goToBottom = () => {
-        dbg('DOWN-ARROW clicked — jumping to bottom');
         atBottomRef.current = true;
         setShowDown(false);
         const el = scrollRef.current;
@@ -1286,7 +1424,6 @@ function ChatCardNodeInner({
     // Auto-follow ONLY while the user is at the bottom. If they scroll away,
     // new output must NOT yank them down — the ↓ button returns them instead.
     useEffect(() => {
-        dbg('stream-change fired', `atBottom=${atBottomRef.current} msgs=${card?.messages.length}`);
         if (!atBottomRef.current) return; // user scrolled away — DO NOT yank
         const el = scrollRef.current;
         if (el) el.scrollTop = el.scrollHeight;
@@ -1300,9 +1437,7 @@ function ChatCardNodeInner({
     useEffect(() => {
         const attach = (el: HTMLDivElement | null) => {
             if (!el) return;
-            const ro = new ResizeObserver((entries) => {
-                const cr = entries[0]?.contentRect;
-                dbg('viewport-resize', `ch=${cr?.height?.toFixed(0)} atBottom=${atBottomRef.current} ${atBottomRef.current ? '→ snap' : '→ leave'}`);
+            const ro = new ResizeObserver(() => {
                 if (atBottomRef.current) el.scrollTop = el.scrollHeight;
             });
             ro.observe(el);
@@ -1380,6 +1515,12 @@ function ChatCardNodeInner({
                 return;
             }
             if (e.key === 'Escape') {
+                if (useCanvasStore.getState().inboxOpen) {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    useCanvasStore.getState().closeInbox();
+                    return;
+                }
                 if (findOpen) {
                     e.preventDefault();
                     e.stopPropagation();
@@ -1394,7 +1535,7 @@ function ChatCardNodeInner({
             document.body.style.overflow = prevOverflow;
             window.removeEventListener('keydown', onKey);
         };
-    }, [maximized, findOpen, findQuery, findMatchCursor, closeFind, goToFindMatch, card?.messages]);
+    }, [maximized, findOpen, findQuery, findMatchCursor, closeFind, goToFindMatch, card?.messages, setMaximized]);
 
     useEffect(() => {
         if (!card?.pendingDraft) return;
@@ -1402,6 +1543,26 @@ function ChatCardNodeInner({
         setDraft((prev) => (prev ? `${prev}\n\n${card.pendingDraft}` : card.pendingDraft!));
         useCanvasStore.getState().updateCard(id, { pendingDraft: undefined });
     }, [card?.pendingDraft, id, setDraft]);
+
+    // At ~90% context, show an in-card Compact banner once per fill cycle.
+    useEffect(() => {
+        if (!card || card.kind === 'note' || card.kind === 'document') return;
+        const pct = card.contextUsage?.percent;
+        if (pct == null) return;
+        if (pct < 85 && card.compactOfferLatched) {
+            useCanvasStore.getState().clearCompactOfferLatch(id);
+            return;
+        }
+        if (pct < 90 || card.compactOfferLatched || card.compacting || serverOffline) return;
+        useCanvasStore.getState().latchCompactOffer(id);
+    }, [
+        card?.contextUsage?.percent,
+        card?.compactOfferLatched,
+        card?.compacting,
+        card?.kind,
+        id,
+        serverOffline,
+    ]);
 
     // The persisted queue is a mirror of pi's in-memory queue, which dies
     // with the server. Resync once per mount so stale chips (app restart,
@@ -1434,24 +1595,117 @@ function ChatCardNodeInner({
 
     const submit = async () => {
         const text = draft.trim();
-        if (!text) return;
+        boxMailLog('card submit', { cardId: id, textPreview: text.slice(0, 100) });
+        if (!text) {
+            boxMailLog('card submit abort: empty');
+            return;
+        }
         setDraft('');
         const ok = await sendMessage(id, text);
+        boxMailLog('card submit done', { ok });
         // Failed — hand the text back behind anything typed since, never over it.
         if (!ok) setDraft((prev) => (prev ? `${prev}\n\n${text}` : text));
     };
 
-    const forkThis = () => {
+    /** Reveal a freshly forked card next to its parent. */
+    const revealNewCard = (newId: string) => {
+        const child = useCanvasStore.getState().cards.find((c) => c.id === newId);
+        if (!child) return;
+        const w = child.size?.width ?? DEFAULT_CARD_SIZE.width;
+        const h = child.size?.height ?? DEFAULT_CARD_SIZE.height;
+        setCenter(child.position.x + w / 2, child.position.y + h / 2, {
+            zoom: getZoom(),
+            duration: 320,
+        });
+    };
+
+    /** Fork the whole card, or a branch up to one pi entry. */
+    const forkAt = (atEntryId?: string) => {
         void (async () => {
-            const newId = await forkCard(id);
-            const child = useCanvasStore.getState().cards.find((c) => c.id === newId);
-            if (!child) return;
-            const w = child.size?.width ?? DEFAULT_CARD_SIZE.width;
-            const h = child.size?.height ?? DEFAULT_CARD_SIZE.height;
-            setCenter(child.position.x + w / 2, child.position.y + h / 2, {
-                zoom: getZoom(),
-                duration: 320,
+            const newId = await forkCard(id, atEntryId);
+            revealNewCard(newId);
+        })();
+    };
+
+    const forkThis = () => forkAt();
+
+    /**
+     * Fork up to one message. Streamed messages do not carry pi entry ids, so
+     * hydrate the transcript once on demand and then read the entry for that
+     * index. Falls back to a whole-card fork if the entry cannot be resolved.
+     */
+    const forkAtMessage = (index: number) => {
+        void (async () => {
+            const cardNow = () => useCanvasStore.getState().cards.find((c) => c.id === id);
+            let msgs = cardNow()?.messages ?? [];
+            if (!msgs[index]?.entryId) {
+                await useCanvasStore.getState().hydrateMessages(id);
+                msgs = cardNow()?.messages ?? [];
+            }
+            const newId = await forkCard(id, msgs[index]?.entryId);
+            revealNewCard(newId);
+        })();
+    };
+
+    /**
+     * Send an edited user message from its own position: revert the session to
+     * just before it, then send the new text so every later turn is dropped from
+     * the active branch.
+     */
+    const editMessage = (index: number, text: string) => {
+        void (async () => {
+            const cardNow = () => useCanvasStore.getState().cards.find((c) => c.id === id);
+            let msgs = cardNow()?.messages ?? [];
+            if (!msgs[index]?.entryId) {
+                await useCanvasStore.getState().hydrateMessages(id);
+                msgs = cardNow()?.messages ?? [];
+            }
+            const entryId = msgs[index]?.entryId;
+            if (!entryId) {
+                console.error(
+                    `[melon] edit: no entryId for message ${index} — the server transcript has no entry ids. Restart melon-server.`,
+                );
+                useCanvasStore.setState({
+                    canvasNotice:
+                        'Could not edit: the server did not provide a message id. Restart melon-server and reload.',
+                });
+                return;
+            }
+            await useCanvasStore.getState().editUserMessage(id, entryId, text, index);
+        })();
+    };
+
+    const historyEntries = card.sessionHistory ?? [];
+    const viewingHistoryId = card.viewingHistoryId ?? null;
+    const viewingEntry = viewingHistoryId
+        ? historyEntries.find((h) => h.id === viewingHistoryId) ?? null
+        : null;
+    const displayMessages = viewingEntry?.messages ?? card.messages;
+    const viewingHistory = Boolean(viewingEntry);
+
+    const openPreviousHistory = () => {
+        void (async () => {
+            if (viewingHistory) {
+                useCanvasStore.getState().setViewingHistory(id, null);
+                return;
+            }
+            if (historyEntries.length === 0) return;
+            if (historyEntries.length === 1) {
+                useCanvasStore.getState().setViewingHistory(id, historyEntries[0]!.id);
+                return;
+            }
+            const choice = await askChoice({
+                title: 'Previous history',
+                description: 'Pick which archived chat to view. Your live session stays as it is.',
+                options: [...historyEntries]
+                    .reverse()
+                    .map((h) => ({
+                        value: h.id,
+                        label: h.label,
+                        description: `${h.messages.length} messages`,
+                    })),
             });
+            if (choice) useCanvasStore.getState().setViewingHistory(id, choice);
         })();
     };
 
@@ -1466,7 +1720,7 @@ function ChatCardNodeInner({
         <div
             className={cn(
                 'flex shrink-0 items-center gap-2 border-b border-border',
-                isMax ? 'px-5 py-2.5' : 'rounded-t-xl px-3 py-2',
+                isMax ? 'h-14 px-4' : 'rounded-t-xl px-3 py-2',
             )}
         >
             <span className={cn('size-2 shrink-0 rounded-full', statusDot[card.status])} />
@@ -1496,13 +1750,25 @@ function ChatCardNodeInner({
             ) : (
                 <span
                     className="min-w-0 flex-1 cursor-text truncate text-sm font-medium tracking-tight text-card-foreground"
-                    title="Double-click to rename"
+                    title={
+                        card.agentProfileId
+                            ? `${card.title} · id ${card.id}${card.agentInstanceName ? ` · ${card.agentInstanceName}` : ''}`
+                            : 'Double-click to rename'
+                    }
                     onDoubleClick={(e) => {
                         e.stopPropagation();
                         setEditingTitle(true);
                     }}
                 >
                     {card.title}
+                </span>
+            )}
+            {card.agentProfileId && (
+                <span
+                    className="shrink-0 rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground"
+                    title={`Profile ${card.agentProfileId} · ${card.id}${card.agentInstanceName ? ` · ${card.agentInstanceName}` : ''} · ${card.status === 'streaming' ? 'thinking' : card.status === 'error' ? 'error' : 'idle'}`}
+                >
+                    agent
                 </span>
             )}
 
@@ -1520,6 +1786,47 @@ function ChatCardNodeInner({
                             {contextPct}%
                         </span>
                     )}
+                    {historyEntries.length > 0 ? (
+                        <button
+                            type="button"
+                            className={cn(
+                                'nodrag relative rounded-md p-1.5 transition-colors',
+                                viewingHistory
+                                    ? 'bg-primary/15 text-primary'
+                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                            )}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                openPreviousHistory();
+                            }}
+                            title={viewingHistory ? 'Back to live session' : 'Previous history'}
+                        >
+                            <History className="size-4" />
+                            <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-secondary px-0.5 text-[9px] font-semibold text-muted-foreground ring-1 ring-border">
+                                {historyEntries.length > 9 ? '9+' : historyEntries.length}
+                            </span>
+                        </button>
+                    ) : null}
+                    <button
+                        type="button"
+                        className="nodrag rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
+                        disabled={serverOffline || Boolean(card.compacting) || viewingHistory}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            if (serverOffline || card.compacting) return;
+                            useCanvasStore.getState().dismissCompactOffer(id);
+                            void useCanvasStore.getState().createCompact(id);
+                        }}
+                        title={
+                            serverOffline
+                                ? 'Reconnecting to server…'
+                                : card.compacting
+                                  ? 'Compacting…'
+                                  : 'Compact — archive chat, fresh session, handoff in input'
+                        }
+                    >
+                        <Shrink className="size-4" />
+                    </button>
                     <CardMoreMenu
                         debug={card.debug === true}
                         contextLabel={contextLabel}
@@ -1527,18 +1834,7 @@ function ChatCardNodeInner({
                             useCanvasStore.getState().updateCard(id, { debug: !card.debug })
                         }
                     />
-                    <button
-                        type="button"
-                        className="nodrag flex items-center gap-1.5 rounded-md border border-border/80 px-2.5 py-1 text-[12px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            setMaximized(false);
-                        }}
-                        title="Back to canvas (Esc)"
-                    >
-                        <Minimize2 className="size-3.5" />
-                        Canvas
-                    </button>
+                    <FullscreenExitButton onExit={() => setMaximized(false)} />
                 </>
             ) : (
                 <>
@@ -1585,6 +1881,21 @@ function ChatCardNodeInner({
                         </button>
                     )}
                     <button
+                        className="nodrag relative flex items-center gap-0.5 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            useCanvasStore.getState().openInbox(id);
+                        }}
+                        title="Node inbox"
+                    >
+                        <Inbox className="size-4" />
+                        {(card.boxInboxPending ?? 0) > 0 ? (
+                            <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-500 px-0.5 text-[9px] font-semibold text-white">
+                                {(card.boxInboxPending ?? 0) > 9 ? '9+' : card.boxInboxPending}
+                            </span>
+                        ) : null}
+                    </button>
+                    <button
                         className={cn(
                             'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
                             card.debug === true
@@ -1600,9 +1911,48 @@ function ChatCardNodeInner({
                         <Bug className="size-3.5" />
                         DBG
                     </button>
+                    {historyEntries.length > 0 ? (
+                        <button
+                            className={cn(
+                                'nodrag relative rounded-md p-1 transition-colors',
+                                viewingHistory
+                                    ? 'bg-primary/15 text-primary'
+                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                            )}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                openPreviousHistory();
+                            }}
+                            title={viewingHistory ? 'Back to live session' : 'Previous history'}
+                        >
+                            <History className="size-4" />
+                            <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-secondary px-0.5 text-[9px] font-semibold text-muted-foreground ring-1 ring-border">
+                                {historyEntries.length > 9 ? '9+' : historyEntries.length}
+                            </span>
+                        </button>
+                    ) : null}
                     <button
                         className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-                        disabled={serverOffline}
+                        disabled={serverOffline || Boolean(card.compacting) || viewingHistory}
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            if (serverOffline || card.compacting) return;
+                            useCanvasStore.getState().dismissCompactOffer(id);
+                            void useCanvasStore.getState().createCompact(id);
+                        }}
+                        title={
+                            serverOffline
+                                ? 'Reconnecting to server…'
+                                : card.compacting
+                                  ? 'Compacting…'
+                                  : 'Compact — archive chat, fresh session, handoff in input'
+                        }
+                    >
+                        <Shrink className="size-4" />
+                    </button>
+                    <button
+                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                        disabled={serverOffline || Boolean(card.compacting)}
                         onClick={(e) => {
                             e.stopPropagation();
                             if (serverOffline) return;
@@ -1672,11 +2022,26 @@ function ChatCardNodeInner({
     // reloading viz iframes and making the chat bounce).
 
     const messagesBody = (scrollTo: React.RefObject<HTMLDivElement>, opts?: { roomy?: boolean }) => {
-        const streaming = card.status === 'streaming';
+        const streaming = !viewingHistory && card.status === 'streaming';
         // roomy (maximized): scroll surface is full-bleed so side gutters/padding
         // still receive wheel events; max-width + horizontal padding live INSIDE.
         return (
         <div className="relative min-h-0 min-w-0 flex-1">
+            {viewingHistory ? (
+                <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border bg-secondary/40 px-3 py-1.5 text-[11px] text-muted-foreground">
+                    <span className="truncate">Previous history · {viewingEntry?.label}</span>
+                    <button
+                        type="button"
+                        className="nodrag shrink-0 rounded px-1.5 py-0.5 text-foreground hover:bg-secondary"
+                        onClick={(e) => {
+                            e.stopPropagation();
+                            useCanvasStore.getState().setViewingHistory(id, null);
+                        }}
+                    >
+                        Back to live
+                    </button>
+                </div>
+            ) : null}
             <div
                 ref={scrollTo}
                 onScroll={(e) => handleMessagesScroll(e.currentTarget)}
@@ -1691,32 +2056,36 @@ function ChatCardNodeInner({
                     className={cn(
                         'space-y-4',
                         opts?.roomy &&
-                            'mx-auto w-full max-w-[72rem] px-5 sm:px-8 lg:px-10',
+                            'mx-auto w-full max-w-3xl px-5 md:px-8',
                     )}
                 >
-                    {card.messages.length === 0 && !streaming && (
+                    {displayMessages.length === 0 && !streaming && (
                         <p className="flex h-full items-center justify-center text-xs text-muted-foreground">
-                            Ask something to start this thread.
+                            {viewingHistory ? 'This archive is empty.' : 'Ask something to start this thread.'}
                         </p>
                     )}
-                    {card.messages.map((m, i) => (
+                    {displayMessages.map((m, i) => (
                         <MessageBlocks
                             key={i}
                             m={m}
                             index={i}
                             cardId={id}
                             streaming={streaming}
-                            totalMessages={card.messages.length}
+                            totalMessages={displayMessages.length}
                             highlighted={highlightedIndex === i}
                             findQuery={findOpen ? findQuery : ''}
                             findActive={findOpen && highlightedIndex === i}
+                            onFork={viewingHistory ? undefined : forkAtMessage}
+                            onEditSubmit={
+                                viewingHistory || !EDIT_MESSAGE_ENABLED ? undefined : editMessage
+                            }
                         />
                     ))}
                 </div>
             </div>
             {showDown && (
                 <button
-                    className="nodrag absolute bottom-3 right-3 z-10 flex size-7 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
+                    className="nodrag absolute bottom-3 left-1/2 z-10 flex size-7 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-card text-muted-foreground shadow-md transition-colors hover:bg-secondary hover:text-foreground"
                     onClick={(e) => {
                         e.stopPropagation();
                         goToBottom();
@@ -1784,13 +2153,14 @@ function ChatCardNodeInner({
                 </div>
             )}
             {activityLabel && (
-                <div
-                    className="mb-1.5 flex items-center gap-1.5 px-0.5 text-muted-foreground"
+                <p
+                    className="mb-2 flex w-fit items-center gap-2.5 px-0.5 text-[length:var(--text-chat)] text-muted-foreground"
+                    role="status"
                     aria-live="polite"
                 >
-                    <span className="size-1.5 shrink-0 rounded-full bg-[#50fa7b] animate-pulse" />
-                    <span className="text-[11px] tracking-tight">{activityLabel}</span>
-                </div>
+                    <MatrixLoader />
+                    <span className="shimmer-text">{activityLabel}</span>
+                </p>
             )}
             <PromptComposer
                 value={draft}
@@ -1807,14 +2177,18 @@ function ChatCardNodeInner({
                 onPermissionChange={(permission) =>
                     useCanvasStore.getState().updateCard(id, { permission })
                 }
-                sending={card.status === 'streaming'}
+                sending={card.status === 'streaming' || Boolean(card.compacting)}
                 onStop={abortStream}
-                disabled={serverOffline}
+                disabled={serverOffline || viewingHistory || Boolean(card.compacting)}
                 cardId={id}
                 placeholder={
                     serverOffline
                         ? 'Reconnecting to server…'
-                        : 'Ask anything…  (Enter to send, Shift+Enter for newline)'
+                        : viewingHistory
+                          ? 'Viewing previous history — switch back to live to chat'
+                          : card.compacting
+                            ? 'Compacting… handoff will land here'
+                            : 'Ask anything…  (Enter to send, Shift+Enter for newline)'
                 }
             />
         </div>
@@ -1826,7 +2200,7 @@ function ChatCardNodeInner({
         <>
             <div
                 className={cn(
-                    'flex h-full w-full flex-col rounded-xl border bg-card shadow-sm transition-shadow',
+                    'relative flex h-full w-full flex-col rounded-xl border bg-card shadow-sm transition-shadow',
                     focused ? 'border-ring shadow-md ring-2 ring-ring/30' : 'border-border',
                 )}
             >
@@ -1870,22 +2244,103 @@ function ChatCardNodeInner({
                         </button>
                     </div>
                 )}
+                {card.compactOfferOpen && !card.compacting ? (
+                    <div className="nodrag flex items-start gap-2 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2">
+                        <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-amber-200">
+                            Context is getting full (~{contextPct ?? 90}%). Compact archives this chat under Previous history and puts a handoff in the input.
+                        </span>
+                        <button
+                            type="button"
+                            className="nodrag shrink-0 rounded-md bg-amber-500/20 px-2 py-0.5 text-[11px] font-medium text-amber-100 transition-colors hover:bg-amber-500/30 disabled:opacity-40"
+                            disabled={serverOffline}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                useCanvasStore.getState().dismissCompactOffer(id);
+                                void useCanvasStore.getState().createCompact(id);
+                            }}
+                        >
+                            Compact
+                        </button>
+                        <button
+                            type="button"
+                            className="nodrag shrink-0 rounded p-0.5 text-amber-300/80 transition-colors hover:bg-amber-500/20 hover:text-amber-100"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                useCanvasStore.getState().dismissCompactOffer(id);
+                            }}
+                            title="Dismiss"
+                        >
+                            <X className="size-3.5" />
+                        </button>
+                    </div>
+                ) : null}
                 {view === 'trajectory' ? trajectoryBody : messagesBody(scrollRef)}
                 {card.debug === true && <DebugConsole logs={card.logs ?? []} />}
                 {footerInput}
             </div>
 
-            {maximized &&
-                createPortal(
-                    <div
-                        className="fixed inset-0 z-[999] flex flex-col bg-card"
-                        role="dialog"
-                        aria-modal="true"
-                        aria-label={card.title || 'Chat'}
-                    >
-                        {header(true)}
+            {maximized && (
+                <FullscreenShell
+                    cardId={id}
+                    ariaLabel={card.title || 'Chat'}
+                    header={header(true)}
+                    banners={
+                        <>
+                            {card.error && (
+                                <div className="nodrag flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-5 py-2">
+                                    <span className="shrink-0 text-xs">⚠️</span>
+                                    <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-red-300">
+                                        {card.error}
+                                    </span>
+                                    <button
+                                        className="nodrag shrink-0 rounded p-0.5 text-red-400 transition-colors hover:bg-red-500/20 hover:text-red-200"
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            useCanvasStore.getState().clearCardError(id);
+                                        }}
+                                        title="Dismiss error"
+                                    >
+                                        <X className="size-3.5" />
+                                    </button>
+                                </div>
+                            )}
+                            {card.compactOfferOpen && !card.compacting ? (
+                                <div className="nodrag flex flex-wrap items-center px-5 pt-2">
+                                    <div className="flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 py-1 pl-3 pr-1.5 text-[11px] text-amber-200">
+                                        <span className="tabular-nums">Context ~{contextPct ?? 90}% full</span>
+                                        <button
+                                            type="button"
+                                            className="nodrag rounded-full bg-amber-500/20 px-2 py-0.5 font-medium text-amber-100 transition-colors hover:bg-amber-500/30 disabled:opacity-40"
+                                            disabled={serverOffline}
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                useCanvasStore.getState().dismissCompactOffer(id);
+                                                void useCanvasStore.getState().createCompact(id);
+                                            }}
+                                        >
+                                            Compact
+                                        </button>
+                                        <button
+                                            type="button"
+                                            className="nodrag rounded-full p-1 text-amber-300/80 transition-colors hover:bg-amber-500/20 hover:text-amber-100"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                useCanvasStore.getState().dismissCompactOffer(id);
+                                            }}
+                                            title="Dismiss"
+                                            aria-label="Dismiss context warning"
+                                        >
+                                            <X className="size-3" />
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : null}
+                        </>
+                    }
+                >
+                    <div className="relative flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
                         {findOpen && (
-                            <div className="pointer-events-none absolute right-5 top-14 z-40 sm:right-8 sm:top-[3.75rem]">
+                            <div className="pointer-events-none absolute right-5 top-3 z-40 sm:right-8">
                                 <div className="pointer-events-auto">
                                     <MaximizedFindBar
                                         query={findQuery}
@@ -1900,26 +2355,8 @@ function ChatCardNodeInner({
                                 </div>
                             </div>
                         )}
-                        {card.error && (
-                            <div className="nodrag flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-5 py-2">
-                                <span className="shrink-0 text-xs">⚠️</span>
-                                <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-red-300">
-                                    {card.error}
-                                </span>
-                                <button
-                                    className="nodrag shrink-0 rounded p-0.5 text-red-400 transition-colors hover:bg-red-500/20 hover:text-red-200"
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        useCanvasStore.getState().clearCardError(id);
-                                    }}
-                                    title="Dismiss error"
-                                >
-                                    <X className="size-3.5" />
-                                </button>
-                            </div>
-                        )}
                         {view === 'trajectory' ? (
-                            <div className="mx-auto flex min-h-0 w-full max-w-[72rem] flex-1 flex-col px-5 sm:px-8 lg:px-10">
+                            <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col px-5 md:px-8">
                                 <TrajectoryView card={card} />
                             </div>
                         ) : (
@@ -1935,18 +2372,18 @@ function ChatCardNodeInner({
                                 {/* Full-bleed scroll; reading column width is applied inside messagesBody. */}
                                 {messagesBody(maxScrollRef, { roomy: true })}
                                 {card.debug === true && (
-                                    <div className="mx-auto w-full max-w-[72rem] shrink-0 px-5 sm:px-8 lg:px-10">
+                                    <div className="mx-auto w-full max-w-3xl shrink-0 px-5 md:px-8">
                                         <DebugConsole logs={card.logs ?? []} />
                                     </div>
                                 )}
-                                <div className="mx-auto w-full max-w-[72rem] shrink-0 px-5 sm:px-8 lg:px-10">
+                                <div className="mx-auto w-full max-w-3xl shrink-0 px-5 md:px-8">
                                     {footerInput}
                                 </div>
                             </div>
                         )}
-                    </div>,
-                    document.body,
-                )}
+                    </div>
+                </FullscreenShell>
+            )}
         </>
     );
 }
@@ -2011,13 +2448,5 @@ function DebugConsole({ logs }: { logs: string[] }) {
     );
 }
 
-function MaximizeIcon() {
-    return (
-        <svg viewBox="0 0 16 16" className="size-4" fill="none" stroke="currentColor" strokeWidth="1.5">
-            <path d="M2 6V2h4M14 10v4h-4" strokeLinecap="round" />
-            <rect x="2" y="2" width="12" height="12" rx="2" opacity="0.35" />
-        </svg>
-    );
-}
 
 export const ChatCardNode = ReactMemo(ChatCardNodeInner);

@@ -7,6 +7,11 @@
    Edit themes there — not here. */
 
 @layer base {
+    :root {
+        /* Chat type scale (mel supernova's 0.85rem, rounded to 13px). */
+        --text-chat: 13px;
+    }
+
     html,
     body,
     #root {
@@ -17,12 +22,33 @@
         font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI",
             "Noto Sans", Helvetica, Arial, sans-serif;
     }
+
+    /* Keyboard focus must always be visible, even on icon-only buttons. */
+    button:focus-visible,
+    [role="button"]:focus-visible,
+    a:focus-visible,
+    summary:focus-visible {
+        outline: 2px solid hsl(var(--ring));
+        outline-offset: 2px;
+    }
+}
+
+/* Respect the OS reduced-motion preference across every Melon transition. */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+        scroll-behavior: auto !important;
+    }
 }
 
 /* ── Markdown body (assistant blocks) — contained + wrapped ─────────── */
 .md-body {
-    font-size: 12px;
-    line-height: 1.6;
+    font-size: var(--text-chat);
+    line-height: 1.75rem;
     color: hsl(var(--card-foreground));
     overflow-wrap: anywhere;
     word-break: break-word;
