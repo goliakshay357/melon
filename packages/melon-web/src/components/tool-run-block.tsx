@@ -599,7 +599,7 @@ function toolTitleText(kind: ToolKind, pending: boolean, filePath?: string): str
 	const name = fileNameOnly(filePath);
 	switch (kind) {
 		case "bash":
-			return pending ? "Running command" : "Ran command";
+			return "Bash";
 		case "read":
 			return `${pending ? "Reading" : "Read"} ${name ?? "a file"}`;
 		case "write":
@@ -654,6 +654,8 @@ export function ToolRunBlock({ cardId, run }: { cardId: string; run: ToolRunView
 	);
 	const filePath = strArg(args, "path", "file_path", "file", "filePath");
 	const stats = kind === "edit" || kind === "write" ? diffStats(run.output) : undefined;
+	// Show the actual command next to "Bash", not just in the tooltip.
+	const command = kind === "bash" ? (detail ?? "").replace(/^\$ /, "") : "";
 
 	useEffect(() => {
 		if (prevStatus.current === "running" && run.status !== "running" && autoControlled.current) {
@@ -687,9 +689,14 @@ export function ToolRunBlock({ cardId, run }: { cardId: string; run: ToolRunView
 				onClick={toggle}
 			>
 				<ToolKindIcon kind={kind} />
-				<span className="min-w-0 truncate">
+				<span className="min-w-0 shrink-0 truncate">
 					{toolTitleText(kind, run.status === "running", filePath)}
 				</span>
+				{command ? (
+					<span className="min-w-0 flex-1 truncate font-mono text-[11px] text-muted-foreground/80">
+						{command}
+					</span>
+				) : null}
 				{stats ? (
 					<span className="flex shrink-0 items-center gap-1 font-mono text-[11px] leading-none">
 						<span className="text-emerald-500">+{stats.additions}</span>
