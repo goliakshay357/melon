@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
-import { ChevronRight, Maximize2, Minimize2 } from "lucide-react";
+import { ChevronRight, FileText, Maximize2, Minimize2, Search, Terminal, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { escapeHtml, highlightCode, languageFromPath } from "@/lib/prism-highlight";
 
@@ -11,12 +11,6 @@ function uiFlag(key: string, fallback: boolean): boolean {
 }
 function setUiFlag(key: string, v: boolean) {
 	blockUi.set(key, v);
-}
-
-function Spinner() {
-	return (
-		<span className="inline-block size-2.5 animate-spin rounded-full border-2 border-muted-foreground/40 border-t-muted-foreground" />
-	);
 }
 
 export type ToolRunView = {
@@ -72,21 +66,6 @@ function strArg(args: Record<string, unknown> | null, ...keys: string[]): string
 		if (typeof v === "string" && v.length) return v;
 	}
 	return undefined;
-}
-
-function inferExitCode(output: string, status: ToolRunView["status"]): number | null {
-	if (status === "ok") return 0;
-	const m =
-		output.match(/\b(?:exited with code|exit(?:ed)?(?:\s+code)?)\s*[:=]?\s*(-?\d+)\b/i) ??
-		output.match(/\bexit\s+(-?\d+)\b/i);
-	if (m) return Number(m[1]);
-	if (status === "error") return 1;
-	return null;
-}
-
-function lineCount(text: string): number {
-	if (!text) return 0;
-	return text.replace(/\n$/, "").split("\n").length;
 }
 
 function looksLikeDiff(output: string): boolean {
@@ -262,7 +241,7 @@ function GithubDiffView({ output, title }: { output: string; title?: string }) {
 			<pre
 				className={cn(
 					"nowheel m-0 overflow-auto px-0 py-1 font-mono text-[10px] leading-relaxed",
-					tall ? "min-h-0 flex-1" : "max-h-72",
+					tall ? "min-h-0 flex-1" : "max-h-56",
 				)}
 			>
 				{rows.map((row, i) => {
@@ -294,7 +273,7 @@ function GithubDiffView({ output, title }: { output: string; title?: string }) {
 			<pre
 				className={cn(
 					"nowheel m-0 overflow-auto px-0 py-1 font-mono text-[10px] leading-relaxed",
-					tall ? "min-h-0 flex-1" : "max-h-72",
+					tall ? "min-h-0 flex-1" : "max-h-56",
 				)}
 			>
 				{splitPairs.map((pair, i) => {
@@ -513,23 +492,6 @@ function headerDetail(kind: ToolKind, args: Record<string, unknown> | null, rawA
 	}
 }
 
-function statusMeta(
-	kind: ToolKind,
-	run: ToolRunView,
-	exit: number | null,
-): { label: string; tone: "ok" | "error" | "muted" | "running" } {
-	if (run.status === "running") return { label: "running…", tone: "running" };
-	const lines = lineCount(run.output);
-	if (kind === "bash" && exit !== null) {
-		return {
-			label: `exit ${exit} · ${lines} lines`,
-			tone: exit === 0 ? "ok" : "error",
-		};
-	}
-	if (run.status === "error") return { label: `${lines} lines · error`, tone: "error" };
-	return { label: `${lines} lines`, tone: "ok" };
-}
-
 function stripReadLinePrefixes(output: string): string {
 	// pi read often prefixes "NNN|" or "NNN:" — keep body for Prism when dense.
 	const lines = output.replace(/\n$/, "").split("\n");
@@ -544,12 +506,23 @@ function OutputLines({
 	output,
 	isError,
 	filePath,
+	running,
 }: {
 	kind: ToolKind;
 	output: string;
 	isError: boolean;
 	filePath?: string;
+	running?: boolean;
 }) {
+	const scrollRef = useRef<HTMLPreElement>(null);
+
+	// Follow the tail while a command is still producing output, like a terminal.
+	useEffect(() => {
+		if (!running) return;
+		const el = scrollRef.current;
+		if (el) el.scrollTop = el.scrollHeight;
+	}, [output, running]);
+
 	const asDiff = looksLikeDiff(output);
 	const lang = languageFromPath(filePath);
 	const usePrism = kind === "read" && !asDiff && !isError && !!output.trim() && !!lang;
@@ -568,7 +541,7 @@ function OutputLines({
 
 	if (usePrism) {
 		return (
-			<pre className="nowheel tool-prism m-0 max-h-72 overflow-auto border-t border-border/40 px-0 py-1 font-mono text-[10px] leading-relaxed">
+			<pre ref={scrollRef} className="nowheel tool-prism m-0 max-h-56 overflow-auto border-t border-border/40 px-0 py-1 font-mono text-[10px] leading-relaxed">
 				<code className="block">
 					{lines.map((line, i) => {
 						const html = highlightCode(line, lang) ?? escapeHtml(line);
@@ -586,7 +559,7 @@ function OutputLines({
 	}
 
 	return (
-		<pre className="nowheel m-0 max-h-72 overflow-auto border-t border-border/40 px-0 py-1 font-mono text-[10px] leading-relaxed">
+		<pre ref={scrollRef} className="nowheel m-0 max-h-56 overflow-auto border-t border-border/40 px-0 py-1 font-mono text-[10px] leading-relaxed">
 			{lines.map((line, i) => {
 				let row = "tool-out-line";
 				let bodyLine = line;
@@ -614,6 +587,59 @@ function OutputLines({
 	);
 }
 
+function fileNameOnly(path?: string): string | undefined {
+	if (!path) return undefined;
+	const trimmed = path.replace(/[\\/]+$/, "");
+	const parts = trimmed.split(/[\\/]/);
+	return parts[parts.length - 1] || trimmed;
+}
+
+/** Supernova-style verb phrase for the tool row. */
+function toolTitleText(kind: ToolKind, pending: boolean, filePath?: string): string {
+	const name = fileNameOnly(filePath);
+	switch (kind) {
+		case "bash":
+			return pending ? "Running command" : "Ran command";
+		case "read":
+			return `${pending ? "Reading" : "Read"} ${name ?? "a file"}`;
+		case "write":
+			return `${pending ? "Writing" : "Wrote"} ${name ?? "a file"}`;
+		case "edit":
+			return `${pending ? "Editing" : "Edited"} ${name ?? "a file"}`;
+		case "ls":
+			return pending ? "Listing files" : "Listed files";
+		case "find":
+			return pending ? "Exploring files" : "Explored files";
+		case "grep":
+			return pending ? "Searching files" : "Searched files";
+		default:
+			return pending ? "Running tool" : "Ran tool";
+	}
+}
+
+function ToolKindIcon({ kind }: { kind: ToolKind }) {
+	const cls = "size-3.5 shrink-0";
+	if (kind === "bash") return <Terminal className={cls} />;
+	if (kind === "find" || kind === "grep") return <Search className={cls} />;
+	if (kind === "ls" || kind === "read" || kind === "write" || kind === "edit") {
+		return <FileText className={cls} />;
+	}
+	return <Wrench className={cls} />;
+}
+
+/** Added/removed line counts for file mutations, mirroring Supernova's stats. */
+function diffStats(output: string): { additions: number; deletions: number } | undefined {
+	if (!output) return undefined;
+	let additions = 0;
+	let deletions = 0;
+	for (const line of output.split("\n")) {
+		if (line.startsWith("+++") || line.startsWith("---")) continue;
+		if (line.startsWith("+")) additions++;
+		else if (line.startsWith("-")) deletions++;
+	}
+	return additions || deletions ? { additions, deletions } : undefined;
+}
+
 export function ToolRunBlock({ cardId, run }: { cardId: string; run: ToolRunView }) {
 	const key = `${cardId}:tool:${run.callId}`;
 	const [open, setOpen] = useState(() => uiFlag(key, run.status === "running"));
@@ -626,9 +652,8 @@ export function ToolRunBlock({ cardId, run }: { cardId: string; run: ToolRunView
 		() => headerDetail(kind, args, run.args),
 		[kind, args, run.args],
 	);
-	const exit = useMemo(() => inferExitCode(run.output, run.status), [run.output, run.status]);
-	const meta = statusMeta(kind, run, exit);
 	const filePath = strArg(args, "path", "file_path", "file", "filePath");
+	const stats = kind === "edit" || kind === "write" ? diffStats(run.output) : undefined;
 
 	useEffect(() => {
 		if (prevStatus.current === "running" && run.status !== "running" && autoControlled.current) {
@@ -645,73 +670,51 @@ export function ToolRunBlock({ cardId, run }: { cardId: string; run: ToolRunView
 		setUiFlag(key, next);
 	};
 
-	const borderTone =
-		run.status === "error" || (kind === "bash" && exit !== null && exit !== 0)
-			? "border-[#ff5555]/40 bg-[#2a1e28]"
-			: run.status === "running"
-				? "border-[#f1fa8c]/30 bg-[#21222c]"
-				: "border-border/70 bg-[#21222c]";
-
 	return (
-		<div className={cn("overflow-hidden rounded-lg border", borderTone)}>
+		<div className="min-w-0 text-[13px]">
 			<button
 				type="button"
-				className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left font-mono text-[10px]"
+				aria-expanded={open}
+				title={detail}
+				className={cn(
+					"flex w-full min-w-0 items-center gap-2 rounded-md py-1.5 text-left transition-colors",
+					run.status === "error"
+						? "text-red-400"
+						: run.status === "running"
+							? "shimmer-text text-muted-foreground"
+							: "text-muted-foreground hover:text-foreground",
+				)}
 				onClick={toggle}
 			>
-				<ChevronRight
-					className={cn("size-3 shrink-0 text-muted-foreground transition-transform", open && "rotate-90")}
-				/>
-				{run.status === "running" ? (
-					<Spinner />
-				) : meta.tone === "error" ? (
-					<span className="text-[#ff5555]">✗</span>
-				) : (
-					<span className="text-[#50fa7b]">✓</span>
-				)}
-				<span
-					className={cn(
-						"shrink-0 font-semibold",
-						meta.tone === "error" ? "text-[#ffb3b3]" : "text-[#f8f8f2]",
-					)}
-				>
-					{run.name}
+				<ToolKindIcon kind={kind} />
+				<span className="min-w-0 truncate">
+					{toolTitleText(kind, run.status === "running", filePath)}
 				</span>
-				{detail ? (
-					<span className="min-w-0 flex-1 truncate text-muted-foreground" title={detail}>
-						{detail}
+				{stats ? (
+					<span className="flex shrink-0 items-center gap-1 font-mono text-[11px] leading-none">
+						<span className="text-emerald-500">+{stats.additions}</span>
+						<span className="text-red-400">-{stats.deletions}</span>
 					</span>
-				) : (
-					<span className="min-w-0 flex-1" />
-				)}
-				<span
-					className={cn(
-						"shrink-0 tabular-nums",
-						meta.tone === "error"
-							? "text-[#ff5555]"
-							: meta.tone === "ok"
-								? "text-[#50fa7b]/80"
-								: "text-muted-foreground",
-					)}
-				>
-					{meta.label}
-				</span>
+				) : null}
+				<ChevronRight
+					className={cn("ml-auto size-3.5 shrink-0 transition-transform", open && "rotate-90")}
+				/>
 			</button>
 
 			{open && (
 				<>
 					{kind === "other" && run.args ? (
-						<pre className="m-0 whitespace-pre-wrap break-words border-t border-border/40 px-2.5 py-1 text-[10px] leading-relaxed text-muted-foreground">
+						<pre className="m-0 mt-1.5 whitespace-pre-wrap break-words rounded-md bg-secondary/30 px-2.5 py-1 text-[10px] leading-relaxed text-muted-foreground">
 							{run.args}
 						</pre>
 					) : null}
 					{kind === "bash" && typeof args?.timeout === "number" ? (
-						<div className="border-t border-border/40 px-2.5 py-0.5 text-[9px] text-muted-foreground">
+						<div className="mt-1 px-0.5 text-[10px] text-muted-foreground">
 							timeout {args.timeout}s
 						</div>
 					) : null}
 					{run.status === "running" && !run.output ? (
-						<div className="border-t border-border/40 px-2.5 py-1.5 text-[10px] text-muted-foreground">
+						<div className="mt-1.5 px-0.5 py-1 text-[11px] text-muted-foreground">
 							<span className="shimmer-text">Streaming output…</span>
 						</div>
 					) : (
@@ -720,6 +723,7 @@ export function ToolRunBlock({ cardId, run }: { cardId: string; run: ToolRunView
 							output={run.output}
 							isError={run.status === "error"}
 							filePath={filePath}
+							running={run.status === "running"}
 						/>
 					)}
 				</>

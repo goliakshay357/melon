@@ -21,6 +21,9 @@ import { createAgentSessionFromServices, createAgentSessionRuntime, createAgentS
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
+import { boxMailInboundText, deliverBoxMailToRecipient, recordBoxMailOutbound, sessionIsStreaming, } from "./box-mail.js";
+import { approveBoxInboxItem, dismissBoxInboxItem, enqueueBoxMail, getBoxInboxItem, inboxSnapshot, markBoxInboxDelivered, takeNextApprovedInbox, } from "./box-inbox.js";
+import { createAgentProfile, deleteAgentProfile, formatAgentStandingInstructions, isValidAgentId, listAgentProfiles, readAgentProfile, topAgentProfiles, touchAgentProfileRecent, updateAgentProfile, } from "./agents.js";
 import { ANTIGRAVITY_PROVIDER_ID, antigravityExtensionEntryPath, antigravitySessionIsolationAvailable, getAntigravityCatalogStatus, hasAntigravityAuth, loadAntigravityProviderInto, } from "./antigravity-extension.js";
 import { cancelAntigravityLogin, getAntigravityLoginStatus, logoutAntigravity, startAntigravityLogin, waitAntigravityLogin, } from "./antigravity-login.js";
 import { runInBoundAntigravitySession, stripAntigravitySessionEntriesFromSessionFile, } from "./antigravity-session-binding.js";
@@ -35,7 +38,9 @@ import { runInBoundCursorSession, stripCursorResumeEntriesFromSessionFile } from
 import { CardExtensionUiBridge } from "./extension-ui.js";
 import { fileExists, noteFiles, readTextFile, resolveInside, searchFiles } from "./files.js";
 import { fuzzyScore } from "./fuzzy.js";
+import { bindBoxMailHost, formatBoxDirectory, getBoxPeers, setBoxPeers, unbindBoxMailHost, } from "./box-mail-host.js";
 import { melonAskQuestionExtensionPath } from "./melon-ask-question.js";
+import { melonSendToBoxExtensionPath } from "./melon-send-to-box.js";
 import { createDeltaPump, createNoteJob, emitNoteJob, getNoteJob } from "./note-jobs.js";
 import { createManual, hashBody, isValidNoteId, listNotes, listTrashedNotes, loadNote, newNoteId, notePath, parseNote, renameNoteFile, restoreNote, saveNote, slugifyTitle, snapshotRevision, trashNote, uniqueHandoffFileName, wireIsStale, } from "./notes.js";
 import { abortCurrentIsolationTurn, beginIsolationTurn, isCurrentIsolationTurn, isIsolationSensitiveSession, isIsolationTurnAborted, queueDisplays, SessionRegistry, } from "./session-registry.js";
@@ -136,6 +141,9 @@ function bundledSessionExtensionPaths() {
     const askQuestion = melonAskQuestionExtensionPath();
     if (askQuestion)
         paths.push(askQuestion);
+    const sendToBox = melonSendToBoxExtensionPath();
+    if (sendToBox)
+        paths.push(sendToBox);
     if (cursorSessionIsolationAvailable() && cursorExtensionPath()) {
         paths.push(cursorExtensionPath());
     }
@@ -279,6 +287,119 @@ export async function buildApp(deps = {}) {
      * inherently racy) — this array is the single source of truth and runs one
      * prompt at a time whenever the agent goes idle. Cancel = array splice.
      */
+    function broadcastInbox(cardId) {
+        const snap = inboxSnapshot(cardId);
+        registry.broadcast(cardId, {
+            type: "box_inbox",
+            items: snap.items,
+            pendingCount: snap.pendingCount,
+        });
+    }
+    /**
+     * Deliver the next approved inbox item only when the user prompt queue is
+     * empty and the card is idle (queue first, then inbox).
+     *
+     * Idle wake uses the same prompt() path as a user message — queue+drain with
+     * streamingBehavior:"followUp" was leaving mail visible in chat without the
+     * model actually running (sticky busy / no real turn).
+     */
+    async function flushNextApprovedInbox(cardId) {
+        const s = registry.get(cardId);
+        if (!s || s.draining) {
+            console.log("[box-mail] flush skip", { cardId, reason: !s ? "missing" : "draining" });
+            return;
+        }
+        if (s.promptQueue.length > 0) {
+            console.log("[box-mail] flush defer — draining user queue first", {
+                cardId,
+                queue: s.promptQueue.length,
+            });
+            // Must kick the drain; a bare return left approved mail stuck forever.
+            drainPromptQueue(cardId);
+            return;
+        }
+        const streaming = sessionIsStreaming(registry, cardId);
+        if (streaming) {
+            console.log("[box-mail] flush defer — session streaming (will retry on agent_end)", { cardId });
+            return;
+        }
+        // Heal sticky busy: Melon flag true but pi session idle.
+        if (s.busy && !streaming) {
+            console.log("[box-mail] clearing sticky busy before flush", { cardId });
+            s.busy = false;
+        }
+        const item = takeNextApprovedInbox(cardId);
+        if (!item)
+            return;
+        console.log("[box-mail] flush deliver", {
+            cardId,
+            mailId: item.id,
+            from: item.fromCardId,
+            policy: item.envelope?.replyPolicy,
+            hop: item.envelope?.hop,
+        });
+        try {
+            const result = await deliverBoxMailToRecipient({
+                registry,
+                toCardId: cardId,
+                fromTitle: item.fromTitle,
+                fromCardId: item.fromCardId,
+                body: item.body,
+                mailId: item.id,
+                envelope: item.envelope,
+            });
+            markBoxInboxDelivered(cardId, item.id);
+            broadcastInbox(cardId);
+            console.log("[box-mail] flush done", { cardId, mailId: item.id, delivery: result.delivery });
+            if (result.delivery === "queued") {
+                console.log("[box-mail] wake queued for afterAgentIdle", { cardId });
+                return;
+            }
+            // Direct wake — identical ownership/prompt path as POST /prompt.
+            const isolationTurnId = beginIsolationTurn(s);
+            registry.broadcast(cardId, { type: "user_message", text: result.display });
+            console.log("[box-mail] wake prompt:start", {
+                cardId,
+                wakeChars: result.wake.length,
+                display: result.display,
+            });
+            try {
+                await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => s.runtime.session.prompt(result.wake));
+                console.log("[box-mail] wake prompt:end", { cardId });
+            }
+            catch (e) {
+                console.error(`[box-mail] wake prompt THREW ${cardId}:`, e?.stack ?? e);
+                s.extensionUi?.cancelAll();
+                registry.broadcast(cardId, { type: "error", message: rewriteCursorError(e.message) });
+                registry.broadcast(cardId, { type: "status", status: "error" });
+            }
+            finally {
+                if (isolationTurnId === undefined) {
+                    afterAgentIdle(cardId);
+                }
+                else if (registry.get(cardId) === s && isCurrentIsolationTurn(s, isolationTurnId)) {
+                    if (!s.draining)
+                        s.busy = false;
+                    if (!isIsolationTurnAborted(s, isolationTurnId))
+                        afterAgentIdle(cardId);
+                }
+            }
+        }
+        catch (e) {
+            console.error(`[box-mail] flush failed ${cardId}:`, e?.message ?? e);
+        }
+    }
+    /** After the agent goes idle: drain user queue first, then approved inbox. */
+    function afterAgentIdle(cardId) {
+        const s = registry.get(cardId);
+        if (!s || s.busy || s.draining)
+            return;
+        if (s.promptQueue.length > 0) {
+            drainPromptQueue(cardId);
+            return;
+        }
+        void flushNextApprovedInbox(cardId);
+    }
     function drainPromptQueue(cardId) {
         const s = registry.get(cardId);
         if (!s || s.draining || s.promptQueue.length === 0)
@@ -307,7 +428,11 @@ export async function buildApp(deps = {}) {
                             display: false,
                         }, { deliverAs: "nextTurn" });
                     }
-                    await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => s.runtime.session.prompt(next.text, { streamingBehavior: "followUp" }));
+                    await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => 
+                    // followUp only when already mid-run; idle drains must start a real turn.
+                    s.runtime.session.isStreaming
+                        ? s.runtime.session.prompt(next.text, { streamingBehavior: "followUp" })
+                        : s.runtime.session.prompt(next.text));
                     if (isolationTurnId !== undefined && isIsolationTurnAborted(s, isolationTurnId))
                         return;
                 }
@@ -328,6 +453,7 @@ export async function buildApp(deps = {}) {
             // An older queue drain must not mark that newer turn idle.
             if (lastIsolationTurnId === undefined || isCurrentIsolationTurn(s, lastIsolationTurnId))
                 s.busy = false;
+            afterAgentIdle(cardId);
         });
     }
     /**
@@ -371,7 +497,7 @@ export async function buildApp(deps = {}) {
      * always-on).
      */
     const ALWAYS_ON_SKILLS = ["diagram-design"];
-    async function createRuntimeFor(sessionManager, enabledSkills = [], cardId) {
+    async function createRuntimeFor(sessionManager, enabledSkills = [], cardId, agentProfileId) {
         const factory = async ({ cwd, sessionManager: sm, sessionStartEvent, }) => {
             // Restrict the skill CATALOG to the card's enabled skills plus the
             // always-on ones, so the model's system prompt doesn't list (and
@@ -382,8 +508,19 @@ export async function buildApp(deps = {}) {
                 skills: (result.skills ?? []).filter((sk) => enabledSet.has(sk.name)),
             });
             // Keep the agent OUT of its own installation. One-time system-prompt
-            // addition (not per-prompt, no context bloat).
-            const appendSystemPromptOverride = (base) => [...base, MELON_GUARDRAIL];
+            // addition (not per-prompt, no context bloat). Specialized boxes also
+            // get standing instructions from Settings → Agents (re-read on reload).
+            const appendSystemPromptOverride = (base) => {
+                const parts = [...base, MELON_GUARDRAIL];
+                if (agentProfileId) {
+                    const profile = readAgentProfile(agentProfileId);
+                    if (profile)
+                        parts.push(formatAgentStandingInstructions(profile));
+                }
+                if (cardId)
+                    parts.push(formatBoxDirectory(getBoxPeers(cardId)));
+                return parts;
+            };
             const bundledExtensions = bundledSessionExtensionPaths();
             const services = await createAgentSessionServices({
                 cwd,
@@ -428,18 +565,18 @@ export async function buildApp(deps = {}) {
         }
         return { runtime, extensionUi };
     }
-    async function attachSession(cardId, sessionManager, explicitModel, skills = [], mode = "replace", explicitThinkingLevel) {
+    async function attachSession(cardId, sessionManager, explicitModel, skills = [], mode = "replace", explicitThinkingLevel, agentProfileId) {
         const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
         const wantedProvider = splitModel(wanted)[0].toLowerCase();
         const existingProvider = (registry.get(cardId)?.runtime.session.model?.provider ?? "").toLowerCase();
         const needsIsolationLocks = isIsolationProviderId(wantedProvider) || isIsolationProviderId(existingProvider);
         if (!needsIsolationLocks) {
-            return attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode, explicitThinkingLevel);
+            return attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode, explicitThinkingLevel, agentProfileId);
         }
         const sessionFile = sessionManager.getSessionFile?.();
-        return withSessionAttachLocks([`card:${cardId}`, ...(sessionFile ? [`session:${sessionFile}`] : [])], () => attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode, explicitThinkingLevel));
+        return withSessionAttachLocks([`card:${cardId}`, ...(sessionFile ? [`session:${sessionFile}`] : [])], () => attachSessionUnlocked(cardId, sessionManager, explicitModel, skills, mode, explicitThinkingLevel, agentProfileId));
     }
-    async function attachSessionUnlocked(cardId, sessionManager, explicitModel, skills = [], mode = "replace", explicitThinkingLevel) {
+    async function attachSessionUnlocked(cardId, sessionManager, explicitModel, skills = [], mode = "replace", explicitThinkingLevel, agentProfileId) {
         const wanted = explicitModel?.trim() || getDefaultModel(config.defaultModel);
         const [wantedProvider, wantedId] = splitModel(wanted);
         const wantsCursor = wantedProvider.toLowerCase() === CURSOR_PROVIDER_ID;
@@ -472,11 +609,13 @@ export async function buildApp(deps = {}) {
         // SSE reconnects call /sessions/resume. For a live isolation-sensitive card
         // this must reconnect to the existing runtime, not create a second runtime
         // writing the same jsonl and broadcasting under the same card id.
+        // mode "create" is always a fresh session (e.g. /compact) — never reuse.
         if (existing &&
             existingIsIsolation &&
             wantsIsolation &&
             existingProvider === wantedProvider.toLowerCase() &&
-            (mode === "create" || existingSessionFile === incomingSessionFile)) {
+            mode !== "create" &&
+            existingSessionFile === incomingSessionFile) {
             return existing.runtime;
         }
         // Cursor / Claude bridge sessions are keyed by session file. Two live
@@ -495,9 +634,9 @@ export async function buildApp(deps = {}) {
                 }
             }
         }
-        // Only change replacement behavior when an isolation-sensitive provider
-        // is involved. Other providers retain their existing attach/resume semantics.
-        if (existing && (existingIsIsolation || wantsIsolation)) {
+        // Replace the live runtime when creating a fresh session (/compact) or when
+        // an isolation-sensitive provider is involved (Cursor / Claude / Antigravity).
+        if (existing && (mode === "create" || existingIsIsolation || wantsIsolation)) {
             existing.extensionUi?.cancelAll();
             if (existing.busy) {
                 try {
@@ -508,6 +647,7 @@ export async function buildApp(deps = {}) {
                 }
             }
             await existing.runtime.dispose();
+            unbindBoxMailHost(cardId);
             if (registry.get(cardId) === existing)
                 registry.delete(cardId);
         }
@@ -516,7 +656,7 @@ export async function buildApp(deps = {}) {
         // that card's extension runner; Cursor's multicard patch / Claude's isolated
         // entry keep sibling cards from sharing process-global bridge state.
         await getModelRuntime();
-        const { runtime, extensionUi } = await createRuntimeFor(sessionManager, skills, cardId);
+        const { runtime, extensionUi } = await createRuntimeFor(sessionManager, skills, cardId, agentProfileId);
         try {
             const model = (await getModelRuntime()).getModel(wantedProvider, wantedId);
             if (model) {
@@ -537,9 +677,17 @@ export async function buildApp(deps = {}) {
             clients: new Set(),
             busy: false,
             activeSkills: skills,
+            ...(agentProfileId ? { agentProfileId } : {}),
             promptQueue: [],
             extensionUi,
         });
+        try {
+            const sessionId = runtime.session.sessionManager.getSessionId?.();
+            bindBoxMailHost(cardId, (payload) => registry.broadcast(cardId, payload), sessionId);
+        }
+        catch (e) {
+            console.error(`[${cardId}] box-mail host bind failed:`, e?.message ?? e);
+        }
         return runtime;
     }
     function wireEvents(cardId, runtime) {
@@ -646,7 +794,7 @@ export async function buildApp(deps = {}) {
                     if (stopReason === "aborted" || stopReason === "error")
                         entry?.extensionUi?.cancelAll();
                     if (stopReason !== "aborted")
-                        drainPromptQueue(cardId);
+                        afterAgentIdle(cardId);
                 }
                 if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_delta") {
                     registry.broadcast(cardId, {
@@ -835,6 +983,35 @@ export async function buildApp(deps = {}) {
         }
         return dir;
     }
+    function resolveAgentProfileId(raw) {
+        if (typeof raw !== "string")
+            return undefined;
+        const id = raw.trim();
+        if (!id || !isValidAgentId(id))
+            return undefined;
+        return readAgentProfile(id) ? id : undefined;
+    }
+    function mergeProfileSkills(skills, agentProfileId) {
+        if (!agentProfileId)
+            return skills;
+        const profile = readAgentProfile(agentProfileId);
+        if (!profile?.defaultSkillIds.length)
+            return skills;
+        return [...new Set([...profile.defaultSkillIds, ...skills])];
+    }
+    /** Idle specialized boxes re-read description.md after a Settings edit (FR-1.5). */
+    async function refreshIdleProfileSessions(profileId) {
+        for (const [cardId, s] of registry.entries()) {
+            if (s.agentProfileId !== profileId || s.busy)
+                continue;
+            try {
+                await s.runtime.session.reload?.();
+            }
+            catch (e) {
+                console.error(`[${cardId}] agent profile reload failed:`, e?.message ?? e);
+            }
+        }
+    }
     app.post("/sessions", async (req, reply) => {
         const body = req.body;
         const cardId = body?.cardId ?? randomUUID();
@@ -845,10 +1022,13 @@ export async function buildApp(deps = {}) {
         catch (e) {
             return reply.code(400).send({ error: e.message });
         }
-        const skills = Array.isArray(body?.skills)
+        const agentProfileId = resolveAgentProfileId(body?.agentProfileId);
+        const skills = mergeProfileSkills(Array.isArray(body?.skills)
             ? body.skills.filter((x) => typeof x === "string")
-            : [];
-        const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model, skills, "create", typeof body?.thinkingLevel === "string" ? body.thinkingLevel : undefined);
+            : [], agentProfileId);
+        const runtime = await attachSession(cardId, SessionManager.create(dir), body?.model, skills, "create", typeof body?.thinkingLevel === "string" ? body.thinkingLevel : undefined, agentProfileId);
+        if (agentProfileId)
+            touchAgentProfileRecent(agentProfileId);
         ensureManualWatcher(dir);
         return {
             cardId,
@@ -859,6 +1039,7 @@ export async function buildApp(deps = {}) {
             thinkingLevel: runtime.session.thinkingLevel,
             thinkingLevels: runtime.session.getAvailableThinkingLevels(),
             followUp: [...runtime.session.getFollowUpMessages()],
+            agentProfileId: agentProfileId ?? null,
         };
     });
     app.post("/sessions/resume", async (req, reply) => {
@@ -867,9 +1048,10 @@ export async function buildApp(deps = {}) {
         const sessionFile = body?.sessionFile;
         if (!sessionFile)
             return reply.code(400).send({ error: "sessionFile required" });
-        const skills = Array.isArray(body?.skills)
+        const agentProfileId = resolveAgentProfileId(body?.agentProfileId);
+        const skills = mergeProfileSkills(Array.isArray(body?.skills)
             ? body.skills.filter((x) => typeof x === "string")
-            : [];
+            : [], agentProfileId);
         let cwdOverride;
         if (typeof body?.cwd === "string" && body.cwd.trim()) {
             try {
@@ -879,7 +1061,9 @@ export async function buildApp(deps = {}) {
                 return reply.code(400).send({ error: e.message });
             }
         }
-        const runtime = await attachSession(cardId, SessionManager.open(sessionFile, undefined, cwdOverride), body?.model, skills, "resume", typeof body?.thinkingLevel === "string" ? body.thinkingLevel : undefined);
+        const runtime = await attachSession(cardId, SessionManager.open(sessionFile, undefined, cwdOverride), body?.model, skills, "resume", typeof body?.thinkingLevel === "string" ? body.thinkingLevel : undefined, agentProfileId);
+        if (agentProfileId)
+            touchAgentProfileRecent(agentProfileId);
         const resumedCwd = String(runtime.session.sessionManager.getCwd?.() ?? "");
         if (resumedCwd)
             ensureManualWatcher(resumedCwd);
@@ -892,6 +1076,7 @@ export async function buildApp(deps = {}) {
             thinkingLevel: runtime.session.thinkingLevel,
             thinkingLevels: runtime.session.getAvailableThinkingLevels(),
             followUp: [...runtime.session.getFollowUpMessages()],
+            agentProfileId: agentProfileId ?? null,
         };
     });
     app.get("/projects", async () => {
@@ -972,7 +1157,12 @@ export async function buildApp(deps = {}) {
         if (!parentSessionFile) {
             return reply.code(400).send({ error: "nothing to fork yet — send a message first" });
         }
-        const leaf = s.runtime.session.sessionManager.getLeafEntry();
+        const leaf = typeof body?.atEntryId === "string" && body.atEntryId.trim()
+            ? s.runtime.session.sessionManager.getEntry(body.atEntryId.trim())
+            : s.runtime.session.sessionManager.getLeafEntry();
+        if (typeof body?.atEntryId === "string" && body.atEntryId.trim() && !leaf) {
+            return reply.code(400).send({ error: "unknown fork entry" });
+        }
         const parentModel = modelToString(s.runtime.session.model);
         const parentSkills = s.activeSkills ?? [];
         const parentProvider = splitModel(parentModel)[0].toLowerCase();
@@ -1001,6 +1191,7 @@ export async function buildApp(deps = {}) {
         if (isIsolationProviderId(parentProvider)) {
             s.extensionUi?.cancelAll();
             await s.runtime.dispose();
+            unbindBoxMailHost(parentCardId);
             if (registry.get(parentCardId) === s)
                 registry.delete(parentCardId);
         }
@@ -1021,6 +1212,59 @@ export async function buildApp(deps = {}) {
             strippedClaudeBridgeSessionEntries: strippedClaude,
             strippedAntigravitySessionEntries: strippedAntigravity,
         };
+    });
+    /**
+     * Edit/revert in place (no new card). pi's `navigateTree` moves the active leaf:
+     * a user-message target reverts to just before it and returns its text for the
+     * composer; any other target truncates after that entry.
+     */
+    app.post("/sessions/:cardId/tree", async (req, reply) => {
+        const cardId = req.params.cardId;
+        const body = req.body;
+        const entryId = typeof body?.entryId === "string" ? body.entryId.trim() : "";
+        if (!entryId)
+            return reply.code(400).send({ error: "entryId required" });
+        let s = registry.get(cardId);
+        const wasLive = Boolean(s);
+        if (!s && typeof body?.sessionFile === "string" && body.sessionFile) {
+            const opened = await createRuntimeFor(SessionManager.open(body.sessionFile), [], cardId);
+            s = {
+                runtime: opened.runtime,
+                clients: new Set(),
+                busy: false,
+                promptQueue: [],
+            };
+        }
+        if (!s)
+            return reply.code(404).send({ error: "unknown card" });
+        if (s.busy)
+            return reply.code(409).send({ error: "card is streaming" });
+        const sessionFile = s.runtime.session.sessionFile;
+        const model = modelToString(s.runtime.session.model);
+        const skills = s.activeSkills ?? [];
+        try {
+            const result = await s.runtime.session.navigateTree(entryId, { summarize: false });
+            if (result.cancelled)
+                return reply.code(409).send({ error: "navigation cancelled" });
+            // RCA: navigateTree only moves the IN-MEMORY leaf. Nothing is written to the
+            // session file, so /transcript (which reopens the file) and any re-attach
+            // snap the leaf back to the old tail and the next prompt continues from the
+            // wrong place. Persist the new leaf with a hidden entry that does not enter
+            // LLM context, so reopen/transcript/attach all follow the new branch.
+            s.runtime.session.sessionManager.appendCustomEntry("melon.branch");
+            console.log(`[${cardId}] tree:navigate entry=${entryId} live=${wasLive} -> leaf=${s.runtime.session.sessionManager.getLeafId()}`);
+            // A reopened runtime is a temporary owner: hand the navigated session to the
+            // registry so the next prompt continues on the new branch.
+            if (!wasLive && sessionFile) {
+                await s.runtime.dispose();
+                await attachSession(cardId, SessionManager.open(sessionFile), model, skills);
+            }
+            return { ok: true, editorText: result.editorText ?? "" };
+        }
+        catch (e) {
+            console.error(`[${cardId}] tree:navigate failed`, e.stack);
+            return reply.code(400).send({ error: e.message });
+        }
     });
     // ── Canvas persistence: <folder>/.melon/canvases/<id>.json ──
     function canvasesDir(cwd) {
@@ -1529,6 +1773,108 @@ export async function buildApp(deps = {}) {
         writeFileSync(join(cvDir2, `${ws.id}.json`), JSON.stringify(ws));
         return { ok: true };
     });
+    /**
+     * Name a fresh canvas from its first exchange. Only runs while the canvas still
+     * has a placeholder name ("Untitled" / "Canvas N"), so a manual rename wins.
+     */
+    app.post("/canvases/:id/autoname", async (req, reply) => {
+        const body = (req.body ?? {});
+        let dir;
+        try {
+            dir = assertCwd(body.cwd);
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        const id = req.params.id;
+        const file = join(canvasesDir(dir), `${id}.json`);
+        let canvas;
+        try {
+            canvas = JSON.parse(readFileSync(file, "utf8"));
+        }
+        catch {
+            return reply.code(404).send({ error: "canvas not found" });
+        }
+        const current = typeof canvas.name === "string" ? canvas.name.trim() : "";
+        if (current && !/^(untitled|canvas\s*\d+)$/i.test(current)) {
+            return { skipped: true, name: current };
+        }
+        const card = (canvas.cards ?? []).find((c) => typeof c?.sessionFile === "string");
+        if (!card?.sessionFile)
+            return { skipped: true, reason: "no chat yet" };
+        let firstUser = "";
+        let firstAssistant = "";
+        try {
+            const sm = SessionManager.open(card.sessionFile);
+            const ctx = sm.buildContextEntries();
+            const textOf = (content) => (Array.isArray(content) ? content : [])
+                .filter((b) => b.type === "text")
+                .map((b) => b.text)
+                .join("");
+            for (const e of ctx) {
+                if (e.type !== "message")
+                    continue;
+                const m = e.message;
+                if (m.role === "user" && !firstUser)
+                    firstUser = textOf(m.content).trim();
+                else if (m.role === "assistant" && firstUser && !firstAssistant) {
+                    const t = textOf(m.content).trim();
+                    if (t)
+                        firstAssistant = t;
+                }
+                if (firstUser && firstAssistant)
+                    break;
+            }
+        }
+        catch {
+            /* unreadable session — fall through to a generic skip */
+        }
+        if (!firstUser)
+            return { skipped: true, reason: "no user message" };
+        let name = "";
+        try {
+            const mr = await getModelRuntime();
+            const [providerId, modelId] = splitModel(String(card.model ?? ""));
+            const model = (providerId && modelId ? mr.getModel(providerId, modelId) : undefined) ??
+                mr.getAvailableSnapshot()[0];
+            if (!model)
+                return { skipped: true, reason: "no model available" };
+            const res = await mr.completeSimple(model, {
+                systemPrompt: "You name chat workspaces. Reply with ONLY a short title of 2 to 5 words, Title Case. No quotes, no ending punctuation, no explanation.",
+                messages: [
+                    {
+                        role: "user",
+                        content: [
+                            {
+                                type: "text",
+                                text: `First user message:\n${firstUser.slice(0, 1500)}\n\nFirst reply:\n${firstAssistant.slice(0, 1500) || "(not answered yet)"}`,
+                            },
+                        ],
+                        timestamp: Date.now(),
+                    },
+                ],
+            }, { maxTokens: 32 });
+            name = res.content
+                .filter((b) => b.type === "text")
+                .map((b) => b.text)
+                .join(" ");
+        }
+        catch (e) {
+            return { skipped: true, reason: e.message };
+        }
+        name = name
+            .replace(/["'`]/g, "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .replace(/[.!,;:]+$/, "")
+            .slice(0, 48);
+        if (!name)
+            return { skipped: true, reason: "empty title" };
+        canvas.name = name;
+        canvas.modified = new Date().toISOString();
+        writeFileSync(file, JSON.stringify(canvas));
+        return { name };
+    });
     // Rename a manual: file follows the name; a leading H1 is rewritten too.
     app.post("/notes/manual/rename", async (req, reply) => {
         const body = req.body;
@@ -1755,13 +2101,14 @@ export async function buildApp(deps = {}) {
         if (sourceCard) {
             const sm = sourceCard.runtime.session.sessionManager;
             const sessionFile = sm.getSessionFile() ?? "";
-            if (!sessionFile || !existsSync(sessionFile)) {
-                throw httpError(422, "source card has no flushed session yet — send a message first");
+            if (sessionFile && existsSync(sessionFile)) {
+                const leafId = sm.getLeafEntry()?.id;
+                if (!leafId)
+                    throw httpError(422, "nothing to distill — session is empty");
+                return { sm, sessionFile, leafId };
             }
-            const leafId = sm.getLeafEntry()?.id;
-            if (!leafId)
-                throw httpError(422, "nothing to distill — session is empty");
-            return { sm, sessionFile, leafId };
+            // Live runtime not flushed yet — fall through to body.sessionFile if the
+            // client already knows the path (common for /compact right after attach).
         }
         if (typeof body?.sessionFile === "string" && body.sessionFile.trim()) {
             const file = expandHome(body.sessionFile);
@@ -1775,6 +2122,9 @@ export async function buildApp(deps = {}) {
             if (!leafId)
                 throw httpError(422, "nothing to distill — session is empty");
             return { sm, sessionFile: sm.getSessionFile() ?? file, leafId };
+        }
+        if (sourceCard) {
+            throw httpError(422, "source card has no flushed session yet — send a message first");
         }
         throw httpError(400, "sourceCardId or sessionFile required");
     }
@@ -2771,7 +3121,7 @@ export async function buildApp(deps = {}) {
                         .filter((c) => c.sessionFile)
                         .map((c) => {
                         bound.add(c.sessionFile);
-                        return { file: c.sessionFile, title: c.title };
+                        return { file: c.sessionFile, title: c.title, cardId: c.id };
                     });
                     const iso = isolationMeta(cv, dir);
                     canvases.push({
@@ -2866,7 +3216,9 @@ export async function buildApp(deps = {}) {
         const all = mr.getModels().map((m) => ({
             label: `${m.provider}/${m.id}`,
             provider: m.provider,
+            providerName: mr.getProvider(m.provider)?.name ?? providerLabel(m.provider),
             id: m.id,
+            name: typeof m.name === "string" && m.name.trim() ? m.name : m.id,
         }));
         const denied = new Set((loadSettings().denylistedModels ?? []).map((x) => x));
         const filtered = all.filter((m) => !denied.has(m.label));
@@ -2947,6 +3299,333 @@ export async function buildApp(deps = {}) {
         catch {
             return reply.code(404).send({ error: "not found" });
         }
+    });
+    // Agent profiles (Settings → Agents). Disk: getAgentDir()/agents/<id>/.
+    app.get("/agents", async () => {
+        const agents = listAgentProfiles().map((a) => ({
+            id: a.id,
+            name: a.name,
+            role: a.role,
+            defaultSkillIds: a.defaultSkillIds,
+            createdAt: a.createdAt,
+            updatedAt: a.updatedAt,
+            lastUsedAt: a.lastUsedAt,
+        }));
+        return { agents, top: topAgentProfiles(5).map((a) => a.id) };
+    });
+    app.get("/agents/:id", async (req, reply) => {
+        const id = req.params.id;
+        const agent = readAgentProfile(id);
+        if (!agent)
+            return reply.code(404).send({ error: `unknown agent: ${id}` });
+        return agent;
+    });
+    app.post("/agents", async (req, reply) => {
+        const b = req.body;
+        const id = String(b?.id ?? "").trim();
+        const name = String(b?.name ?? "").trim();
+        const role = String(b?.role ?? "").trim();
+        const descriptionMd = typeof b?.descriptionMd === "string" ? b.descriptionMd : "";
+        const defaultSkillIds = Array.isArray(b?.defaultSkillIds)
+            ? b.defaultSkillIds.filter((x) => typeof x === "string")
+            : [];
+        if (!id || !name)
+            return reply.code(400).send({ error: "id and name are required" });
+        if (!isValidAgentId(id))
+            return reply.code(400).send({ error: "id must be lowercase letters, numbers and dashes (max 64)" });
+        try {
+            const agent = createAgentProfile({ id, name, role, descriptionMd, defaultSkillIds });
+            return { ok: true, agent };
+        }
+        catch (e) {
+            const err = e;
+            return reply.code(err.statusCode ?? 500).send({ error: err.message });
+        }
+    });
+    app.put("/agents/:id", async (req, reply) => {
+        const id = req.params.id;
+        if (!isValidAgentId(id))
+            return reply.code(400).send({ error: "invalid agent id" });
+        const b = req.body;
+        const name = String(b?.name ?? "").trim();
+        const role = String(b?.role ?? "").trim();
+        const descriptionMd = typeof b?.descriptionMd === "string" ? b.descriptionMd : "";
+        const defaultSkillIds = Array.isArray(b?.defaultSkillIds)
+            ? b.defaultSkillIds.filter((x) => typeof x === "string")
+            : undefined;
+        if (!name)
+            return reply.code(400).send({ error: "name is required" });
+        try {
+            const agent = updateAgentProfile(id, { name, role, descriptionMd, defaultSkillIds });
+            if (b?.touchRecent === true)
+                touchAgentProfileRecent(id);
+            await refreshIdleProfileSessions(id);
+            return { ok: true, agent: readAgentProfile(id) ?? agent };
+        }
+        catch (e) {
+            const err = e;
+            return reply.code(err.statusCode ?? 500).send({ error: err.message });
+        }
+    });
+    app.delete("/agents/:id", async (req, reply) => {
+        const id = req.params.id;
+        if (!isValidAgentId(id))
+            return reply.code(400).send({ error: "invalid agent id" });
+        if (!readAgentProfile(id))
+            return reply.code(404).send({ error: `unknown agent: ${id}` });
+        const detachedCardIds = [];
+        for (const [cardId, s] of registry.entries()) {
+            if (s.agentProfileId === id) {
+                s.agentProfileId = undefined;
+                detachedCardIds.push(cardId);
+            }
+        }
+        deleteAgentProfile(id);
+        return { ok: true, id, detachedCardIds };
+    });
+    app.post("/agents/:id/touch", async (req, reply) => {
+        const id = req.params.id;
+        if (!isValidAgentId(id))
+            return reply.code(400).send({ error: "invalid agent id" });
+        if (!readAgentProfile(id))
+            return reply.code(404).send({ error: `unknown agent: ${id}` });
+        touchAgentProfileRecent(id);
+        return { ok: true, id };
+    });
+    /**
+     * Enqueue box mail into the recipient's inbox (pending). Optional auto-approve
+     * via Settings boxMailAutoSend. Agent delivery waits until Approve (or auto)
+     * and the recipient's user prompt queue is empty.
+     */
+    app.post("/boxes/mail/send", async (req, reply) => {
+        const body = req.body;
+        const fromCardId = String(body?.fromCardId ?? "").trim();
+        const toCardId = String(body?.toCardId ?? "").trim();
+        const mailBody = typeof body?.body === "string" ? body.body.trim() : "";
+        console.log("[box-mail] POST /boxes/mail/send", {
+            fromCardId,
+            toCardId,
+            bodyChars: mailBody.length,
+            createdBy: body?.createdBy,
+            fromAttached: Boolean(registry.get(fromCardId)),
+            toAttached: Boolean(registry.get(toCardId)),
+            replyPolicy: body?.replyPolicy ?? body?.envelope?.replyPolicy,
+            replyReason: body?.replyReason ?? body?.envelope?.replyReason,
+            inReplyToMailId: body?.inReplyToMailId,
+        });
+        if (!fromCardId || !toCardId)
+            return reply.code(400).send({ error: "fromCardId and toCardId required" });
+        if (!mailBody)
+            return reply.code(400).send({ error: "body required" });
+        if (fromCardId === toCardId)
+            return reply.code(400).send({ error: "cannot mail a node to itself" });
+        const fromTitle = String(body?.fromTitle ?? "Node").trim() || "Node";
+        const toTitle = String(body?.toTitle ?? "Node").trim() || "Node";
+        const createdBy = body?.createdBy === "agent" ? "agent" : "user";
+        const envelopeInput = body?.envelope && typeof body.envelope === "object" && !Array.isArray(body.envelope)
+            ? { ...body.envelope }
+            : {};
+        if (body?.replyPolicy !== undefined)
+            envelopeInput.replyPolicy = body.replyPolicy;
+        if (body?.replyReason !== undefined)
+            envelopeInput.replyReason = body.replyReason;
+        if (body?.threadId !== undefined)
+            envelopeInput.threadId = body.threadId;
+        if (body?.parentMailId !== undefined)
+            envelopeInput.parentMailId = body.parentMailId;
+        const inReplyToMailId = typeof body?.inReplyToMailId === "string" ? body.inReplyToMailId : undefined;
+        const resolveMailCwd = () => {
+            const attachedFrom = registry.get(fromCardId);
+            return assertCwd((typeof body?.cwd === "string" && body.cwd.trim()) ||
+                String(attachedFrom?.runtime.session.sessionManager.getCwd?.() ?? "") ||
+                config.defaultCwd);
+        };
+        const ensureMailCardAttached = async (args) => {
+            if (registry.get(args.cardId))
+                return;
+            let dir;
+            try {
+                dir = resolveMailCwd();
+            }
+            catch (e) {
+                throw Object.assign(e, { statusCode: e.statusCode ?? 400 });
+            }
+            const agentProfileId = resolveAgentProfileId(args.agentProfileId);
+            const skills = mergeProfileSkills(Array.isArray(args.skills) ? args.skills.filter((x) => typeof x === "string") : [], agentProfileId);
+            const sessionFile = args.sessionFile?.trim();
+            console.log(`[box-mail] auto-attach ${args.role}`, {
+                cardId: args.cardId,
+                mode: sessionFile ? "resume" : "create",
+                model: args.model,
+                agentProfileId,
+            });
+            await attachSession(args.cardId, sessionFile ? SessionManager.open(sessionFile, undefined, dir) : SessionManager.create(dir), args.model, skills, sessionFile ? "resume" : "create", undefined, agentProfileId);
+            if (!registry.get(args.cardId)) {
+                throw Object.assign(new Error(`failed to attach ${args.role}`), { statusCode: 500 });
+            }
+        };
+        try {
+            await ensureMailCardAttached({
+                cardId: fromCardId,
+                role: "sender",
+                sessionFile: typeof body?.fromSessionFile === "string" ? body.fromSessionFile : undefined,
+                model: (typeof body?.fromModel === "string" && body.fromModel) ||
+                    (typeof body?.model === "string" ? body.model : undefined),
+                skills: body?.fromSkills,
+                agentProfileId: body?.fromAgentProfileId,
+            });
+            await ensureMailCardAttached({
+                cardId: toCardId,
+                role: "recipient",
+                sessionFile: typeof body?.toSessionFile === "string" ? body.toSessionFile : undefined,
+                model: (typeof body?.toModel === "string" && body.toModel) ||
+                    (typeof body?.model === "string" ? body.model : undefined),
+                skills: body?.toSkills,
+                agentProfileId: body?.toAgentProfileId,
+            });
+        }
+        catch (e) {
+            const err = e;
+            console.error("[box-mail] auto-attach failed:", err.message);
+            return reply.code(err.statusCode ?? 500).send({ error: err.message });
+        }
+        const from = registry.get(fromCardId);
+        const to = registry.get(toCardId);
+        if (!from || !to)
+            return reply.code(500).send({ error: "mail cards not attached" });
+        try {
+            const { inbound, outbound } = enqueueBoxMail({
+                fromCardId,
+                fromTitle,
+                toCardId,
+                toTitle,
+                body: mailBody,
+                createdBy,
+                envelope: envelopeInput,
+                inReplyToMailId,
+                // User @ /send starts a fresh thread unless they explicitly reply.
+                autoLinkParent: createdBy === "agent" ? undefined : false,
+            });
+            await recordBoxMailOutbound({
+                registry,
+                fromCardId,
+                toTitle,
+                toCardId,
+                body: mailBody,
+                mailId: inbound.id,
+                envelope: inbound.envelope,
+            });
+            broadcastInbox(fromCardId);
+            broadcastInbox(toCardId);
+            let status = "pending";
+            if (loadSettings().boxMailAutoSend === true) {
+                console.log("[box-mail] auto-approve ON — skipping human Approve", { toCardId, mailId: inbound.id });
+                approveBoxInboxItem(toCardId, inbound.id, { auto: true });
+                broadcastInbox(toCardId);
+                await flushNextApprovedInbox(toCardId);
+                const after = getBoxInboxItem(toCardId, inbound.id);
+                status = after?.status === "delivered" ? "delivered" : "approved";
+            }
+            else {
+                console.log("[box-mail] pending human Approve", { toCardId, mailId: inbound.id });
+            }
+            const recipient = registry.get(toCardId);
+            const sender = registry.get(fromCardId);
+            console.log("[box-mail] enqueue ok", {
+                mailId: inbound.id,
+                status,
+                pendingCount: inboxSnapshot(toCardId).pendingCount,
+                policy: inbound.envelope?.replyPolicy,
+                hop: inbound.envelope?.hop,
+                threadId: inbound.envelope?.threadId,
+            });
+            return {
+                ok: true,
+                mailId: inbound.id,
+                status,
+                outboundId: outbound.id,
+                pendingCount: inboxSnapshot(toCardId).pendingCount,
+                envelope: inbound.envelope,
+                sessionFile: recipient?.runtime.session.sessionFile,
+                model: recipient ? modelToString(recipient.runtime.session.model) : undefined,
+                fromSessionFile: sender?.runtime.session.sessionFile,
+                fromModel: sender ? modelToString(sender.runtime.session.model) : undefined,
+            };
+        }
+        catch (e) {
+            const err = e;
+            console.error("[box-mail] enqueue failed:", err.message);
+            return reply.code(err.statusCode ?? 500).send({ error: err.message });
+        }
+    });
+    app.get("/sessions/:cardId/inbox", async (req) => {
+        const cardId = req.params.cardId;
+        return inboxSnapshot(cardId);
+    });
+    app.post("/sessions/:cardId/inbox/:mailId/approve", async (req, reply) => {
+        const { cardId, mailId } = req.params;
+        const body = (req.body ?? {});
+        console.log("[box-mail] approve", {
+            cardId,
+            mailId,
+            attached: Boolean(registry.get(cardId)),
+            busy: registry.get(cardId)?.busy,
+            queue: registry.get(cardId)?.promptQueue.length,
+        });
+        const item = approveBoxInboxItem(cardId, mailId);
+        if (!item)
+            return reply.code(404).send({ error: "no pending inbox item" });
+        broadcastInbox(cardId);
+        // Approve must be able to wake even if the card was never attached this process.
+        if (!registry.get(cardId)) {
+            try {
+                const dir = assertCwd((typeof body.cwd === "string" && body.cwd.trim()) || config.defaultCwd);
+                const agentProfileId = resolveAgentProfileId(body.agentProfileId);
+                const skills = mergeProfileSkills(Array.isArray(body.skills) ? body.skills.filter((x) => typeof x === "string") : [], agentProfileId);
+                const sessionFile = typeof body.sessionFile === "string" ? body.sessionFile.trim() : "";
+                console.log("[box-mail] approve auto-attach", { cardId, mode: sessionFile ? "resume" : "create" });
+                await attachSession(cardId, sessionFile ? SessionManager.open(sessionFile, undefined, dir) : SessionManager.create(dir), typeof body.model === "string" ? body.model : undefined, skills, sessionFile ? "resume" : "create", undefined, agentProfileId);
+            }
+            catch (e) {
+                const err = e;
+                console.error("[box-mail] approve auto-attach failed:", err.message);
+                return reply.code(err.statusCode ?? 500).send({
+                    error: err.message,
+                    item: getBoxInboxItem(cardId, mailId),
+                    ...inboxSnapshot(cardId),
+                });
+            }
+        }
+        await flushNextApprovedInbox(cardId);
+        const after = getBoxInboxItem(cardId, mailId);
+        const snap = inboxSnapshot(cardId);
+        console.log("[box-mail] approve result", {
+            cardId,
+            mailId,
+            status: after?.status,
+            pendingCount: snap.pendingCount,
+        });
+        return {
+            ok: true,
+            item: after,
+            ...snap,
+            delivered: after?.status === "delivered",
+            injectedText: after?.status === "delivered" || after?.status === "approved"
+                ? boxMailInboundText({
+                    fromTitle: after.fromTitle,
+                    fromCardId: after.fromCardId,
+                    body: after.body,
+                })
+                : undefined,
+        };
+    });
+    app.post("/sessions/:cardId/inbox/:mailId/dismiss", async (req, reply) => {
+        const { cardId, mailId } = req.params;
+        const item = dismissBoxInboxItem(cardId, mailId);
+        if (!item)
+            return reply.code(404).send({ error: "no pending inbox item" });
+        broadcastInbox(cardId);
+        return { ok: true, item, ...inboxSnapshot(cardId) };
     });
     // Available skills for the per-card toggle.
     app.get("/skills", async () => {
@@ -3110,6 +3789,19 @@ export async function buildApp(deps = {}) {
             }
             next.theme = body.theme.trim();
         }
+        if ("boxMailAutoSend" in body) {
+            if (typeof body.boxMailAutoSend !== "boolean") {
+                return reply.code(400).send({ error: "boxMailAutoSend must be a boolean" });
+            }
+            next.boxMailAutoSend = body.boxMailAutoSend;
+        }
+        if ("favoriteModels" in body) {
+            const raw = body.favoriteModels;
+            if (!Array.isArray(raw) || raw.some((m) => typeof m !== "string" || !m.trim())) {
+                return reply.code(400).send({ error: "favoriteModels must be an array of non-empty strings" });
+            }
+            next.favoriteModels = [...new Set(raw.map((m) => m.trim()))].slice(0, 50);
+        }
         saveSettings(next);
         return { ok: true, settings: next };
     });
@@ -3194,11 +3886,38 @@ export async function buildApp(deps = {}) {
                                 : pid === ANTIGRAVITY_PROVIDER_ID && !configured
                                     ? "Log in with Google for Antigravity"
                                     : undefined;
+            const name = mr.getProvider(pid)?.name ?? providerLabel(pid);
+            const authTypes = pid === CLAUDE_BRIDGE_PROVIDER_ID || pid === ANTIGRAVITY_PROVIDER_ID
+                ? ["oauth"]
+                : ["api_key"];
+            // Only credentials Melon itself stored can be removed from the UI.
+            // Environment / config / models.json sources are managed elsewhere.
+            const stored = pid === CLAUDE_BRIDGE_PROVIDER_ID
+                ? hasClaudeBridgeAuth(authEntries)
+                : pid === ANTIGRAVITY_PROVIDER_ID
+                    ? hasAntigravityAuth(authEntries)
+                    : Boolean(entry || melonKey);
+            const sourceLabel = !configured
+                ? undefined
+                : stored
+                    ? authTypes[0] === "oauth"
+                        ? "Subscription"
+                        : "API key"
+                    : status.source === "environment"
+                        ? (status.label ?? "Environment variable")
+                        : status.source === "runtime"
+                            ? "Runtime override"
+                            : "Configured externally";
             result.push({
                 id: pid,
                 provider: pid,
+                name,
                 configured,
+                connected: configured,
+                disconnectable: stored,
+                authTypes,
                 source: status.source ?? undefined,
+                sourceLabel,
                 keyPreview,
                 authType,
                 ...(error ? { error } : {}),
@@ -3381,7 +4100,7 @@ export async function buildApp(deps = {}) {
                     if (cm.display !== false) {
                         const text = clean(textOf(cm.content));
                         if (text)
-                            messages.push({ role: "user", text, injected: cm.customType === "melon.handoff" });
+                            messages.push({ role: "user", text, injected: cm.customType === "melon.handoff", entryId: e.id });
                     }
                     continue;
                 }
@@ -3391,7 +4110,7 @@ export async function buildApp(deps = {}) {
                 if (m.role === "user") {
                     const text = clean(textOf(m.content));
                     if (text)
-                        messages.push({ role: "user", text });
+                        messages.push({ role: "user", text, entryId: e.id });
                 }
                 else if (m.role === "assistant") {
                     let text = "";
@@ -3413,6 +4132,7 @@ export async function buildApp(deps = {}) {
                             role: "assistant",
                             text: text.trim(),
                             thinking: thinking.trim() || undefined,
+                            entryId: e.id,
                         });
                 }
                 else if (m.role === "toolResult") {
@@ -3431,6 +4151,9 @@ export async function buildApp(deps = {}) {
                                 argsStructured,
                                 args: argsStructured ? preview(argsStructured) : undefined,
                             });
+                            // Fork point must include the tool result, so track the last entry
+                            // that belongs to this UI message.
+                            lastA.entryId = e.id;
                         }
                     }
                 }
@@ -3465,6 +4188,47 @@ export async function buildApp(deps = {}) {
         req.raw.on("close", () => s.clients.delete(reply));
     });
     // Answer (or cancel) a pending extension UI dialog for this card.
+    /**
+     * Sync canvas chat boxes this card may address with send_to_box.
+     * Client pushes whenever cards change; used for system-prompt directory + resolve.
+     */
+    app.post("/sessions/:cardId/box-peers", async (req, reply) => {
+        const cardId = req.params.cardId;
+        if (!registry.get(cardId)) {
+            // Not attached yet — client syncs before first message; not an error.
+            return { ok: true, skipped: true, count: 0 };
+        }
+        const body = req.body;
+        if (!Array.isArray(body?.peers))
+            return reply.code(400).send({ error: "peers array required" });
+        const peers = [];
+        for (const raw of body.peers) {
+            if (!raw || typeof raw !== "object")
+                continue;
+            const p = raw;
+            const id = typeof p.cardId === "string" ? p.cardId.trim() : "";
+            if (!id || id === cardId)
+                continue;
+            peers.push({
+                cardId: id,
+                title: typeof p.title === "string" ? p.title : id,
+                ...(typeof p.agentProfileId === "string" && p.agentProfileId
+                    ? { agentProfileId: p.agentProfileId }
+                    : {}),
+                ...(typeof p.agentInstanceName === "string" && p.agentInstanceName
+                    ? { agentInstanceName: p.agentInstanceName }
+                    : {}),
+                ...(p.status === "idle" ||
+                    p.status === "thinking" ||
+                    p.status === "error" ||
+                    p.status === "offline"
+                    ? { status: p.status }
+                    : {}),
+            });
+        }
+        setBoxPeers(cardId, peers);
+        return { ok: true, count: peers.length };
+    });
     app.post("/sessions/:cardId/extension-ui", async (req, reply) => {
         const cardId = req.params.cardId;
         const s = registry.get(cardId);
@@ -3540,7 +4304,7 @@ export async function buildApp(deps = {}) {
         finally {
             if (isolationTurnId === undefined) {
                 // Preserve existing behavior for ordinary providers.
-                drainPromptQueue(cardId);
+                afterAgentIdle(cardId);
             }
             else if (registry.get(cardId) === s && isCurrentIsolationTurn(s, isolationTurnId)) {
                 // agent_end may already have started the next queued turn. Only
@@ -3549,7 +4313,7 @@ export async function buildApp(deps = {}) {
                 if (!s.draining)
                     s.busy = false;
                 if (!isIsolationTurnAborted(s, isolationTurnId))
-                    drainPromptQueue(cardId);
+                    afterAgentIdle(cardId);
             }
         }
     });
@@ -3669,6 +4433,7 @@ export async function buildApp(deps = {}) {
             }
         }
         await s.runtime.dispose();
+        unbindBoxMailHost(cardId);
         if (registry.get(cardId) === s)
             registry.delete(cardId);
         for (const client of s.clients)

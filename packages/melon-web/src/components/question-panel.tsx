@@ -52,19 +52,19 @@ export function QuestionPanel({
 
     return (
         <div
-            className="nodrag mb-1.5 rounded-md border border-sky-500/35 bg-sky-500/10 px-2 py-2 text-[11px] text-foreground"
+            className="nodrag mb-1.5 rounded-lg border border-border bg-secondary/30 px-3 py-2.5 text-[12px] text-card-foreground"
             onMouseDown={(e) => e.stopPropagation()}
         >
-            <div className="mb-1.5 flex items-start gap-1">
+            <div className="mb-2 flex items-start gap-1.5">
                 <div className="min-w-0 flex-1">
-                    <div className="font-medium leading-snug text-foreground">{pending.title}</div>
+                    <div className="font-medium leading-snug text-card-foreground">{pending.title}</div>
                     {pending.method === 'confirm' && pending.message ? (
                         <div className="mt-0.5 text-muted-foreground">{pending.message}</div>
                     ) : null}
                 </div>
                 <button
                     type="button"
-                    className="shrink-0 rounded p-0.5 text-muted-foreground hover:bg-sky-500/20 hover:text-foreground"
+                    className="shrink-0 rounded-md p-0.5 text-muted-foreground hover:bg-secondary hover:text-foreground"
                     title="Cancel (Esc)"
                     disabled={sending}
                     onClick={() => respond({ id: pending.id, cancelled: true })}
@@ -81,8 +81,8 @@ export function QuestionPanel({
                             type="button"
                             disabled={sending}
                             className={cn(
-                                'rounded border border-sky-500/25 bg-background/40 px-2 py-1.5 text-left leading-snug',
-                                'hover:border-sky-400/50 hover:bg-sky-500/15 disabled:opacity-50',
+                                'rounded-lg border border-border px-2.5 py-1.5 text-left leading-snug',
+                                'hover:bg-secondary disabled:opacity-50',
                             )}
                             onClick={() => respond({ id: pending.id, value: opt })}
                         >
@@ -97,7 +97,7 @@ export function QuestionPanel({
                     <button
                         type="button"
                         disabled={sending}
-                        className="rounded border border-sky-500/30 bg-sky-500/20 px-2.5 py-1 font-medium hover:bg-sky-500/30 disabled:opacity-50"
+                        className="rounded-lg bg-secondary px-2.5 py-1 text-card-foreground hover:bg-secondary/80 disabled:opacity-50"
                         onClick={() => respond({ id: pending.id, confirmed: true })}
                     >
                         Yes
@@ -105,7 +105,7 @@ export function QuestionPanel({
                     <button
                         type="button"
                         disabled={sending}
-                        className="rounded border border-border bg-background/40 px-2.5 py-1 hover:bg-secondary disabled:opacity-50"
+                        className="rounded-lg bg-secondary px-2.5 py-1 text-card-foreground hover:bg-secondary/80 disabled:opacity-50"
                         onClick={() => respond({ id: pending.id, confirmed: false })}
                     >
                         No
@@ -113,7 +113,7 @@ export function QuestionPanel({
                     <button
                         type="button"
                         disabled={sending}
-                        className="ml-auto rounded px-2 py-1 text-muted-foreground hover:bg-sky-500/15 hover:text-foreground disabled:opacity-50"
+                        className="ml-auto rounded-lg px-2 py-1 text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-50"
                         onClick={() => respond({ id: pending.id, cancelled: true })}
                     >
                         Cancel
@@ -136,7 +136,7 @@ export function QuestionPanel({
                 >
                     <input
                         autoFocus
-                        className="nodrag w-full rounded border border-sky-500/30 bg-background px-2 py-1.5 text-[11px] outline-none focus:border-sky-400"
+                        className="nodrag w-full rounded-lg border border-input bg-background px-2.5 py-1.5 text-[12px] outline-none focus:border-ring"
                         placeholder={pending.placeholder ?? 'Type your answer'}
                         value={custom}
                         disabled={sending}
@@ -163,14 +163,14 @@ export function QuestionPanel({
                         <button
                             type="submit"
                             disabled={sending || !custom.trim()}
-                            className="rounded border border-sky-500/30 bg-sky-500/20 px-2.5 py-1 font-medium hover:bg-sky-500/30 disabled:opacity-50"
+                            className="rounded-lg bg-secondary px-2.5 py-1 text-card-foreground hover:bg-secondary/80 disabled:opacity-50"
                         >
                             Submit
                         </button>
                         <button
                             type="button"
                             disabled={sending}
-                            className="rounded px-2 py-1 text-muted-foreground hover:bg-sky-500/15 hover:text-foreground disabled:opacity-50"
+                            className="rounded-lg px-2 py-1 text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-50"
                             onClick={() => respond({ id: pending.id, cancelled: true })}
                         >
                             Cancel

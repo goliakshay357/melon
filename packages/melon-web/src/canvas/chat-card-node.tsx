@@ -8,12 +8,13 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { BookMarked, Bug, Check, ChevronDown, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, Shrink, X } from 'lucide-react';
+import { BookMarked, Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, Shrink, X } from 'lucide-react';
 import { askChoice } from '@/components/dialogs';
 import { useCanvasStore } from '@/store/canvas-store';
 import { boxMailLog } from '@/lib/box-mail-brief';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { PromptComposer } from '@/components/prompt-composer';
+import { MatrixLoader } from '@/components/matrix-loader';
 import { QuestionPanel } from '@/components/question-panel';
 import { ToolRunBlock } from '@/components/tool-run-block';
 import { DEFAULT_CARD_SIZE, type TraceEvent } from '@/types/session-card';
@@ -95,12 +96,6 @@ function uiFlag(key: string, fallback: boolean): boolean {
 }
 function setUiFlag(key: string, v: boolean) {
     blockUi.set(key, v);
-}
-
-function Spinner() {
-    return (
-        <span className="inline-block size-2.5 animate-spin rounded-full border-2 border-muted-foreground/40 border-t-muted-foreground" />
-    );
 }
 
 // ── 💭 Thinking ──────────────────────────────────────────────────────────
@@ -365,7 +360,6 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
             <MessageActions
                 align="start"
                 text={m.text}
-                onFork={!streaming && onFork ? () => onFork(index) : undefined}
             />
         </div>
     );
@@ -907,14 +901,14 @@ function ThinkingBlock({
     }, [findQuery, findActive, text, key]);
 
     return (
-        <div
-            className={cn(
-                'rounded-lg border bg-background/40',
-                active ? 'border-primary/35' : 'border-border/70',
-            )}
-        >
+        <div className="min-w-0 text-[13px]">
             <button
-                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left"
+                type="button"
+                aria-expanded={open}
+                className={cn(
+                    'flex w-full min-w-0 items-center gap-2 py-0.5 text-left text-muted-foreground transition-colors hover:text-foreground',
+                    active && 'shimmer-text',
+                )}
                 onClick={() => {
                     autoControlled.current = false;
                     const next = !open;
@@ -922,21 +916,16 @@ function ThinkingBlock({
                     setUiFlag(key, next);
                 }}
             >
-                {active ? <Spinner /> : <span className="text-muted-foreground">💭</span>}
-                <span
-                    className={cn(
-                        'flex-1 text-[10px] font-medium uppercase tracking-wide',
-                        active ? 'shimmer-text' : 'text-muted-foreground',
-                    )}
-                >
-                    {active ? 'Thinking…' : 'Thought process'}
-                </span>
-                <span className="text-[9px] text-muted-foreground/60">{text.length} chars</span>
+                <Brain className="size-3.5 shrink-0" />
+                <span className="min-w-0 truncate">{active ? 'Thinking…' : 'Thought process'}</span>
+                <ChevronRight
+                    className={cn('ml-auto size-3.5 shrink-0 transition-transform', open && 'rotate-90')}
+                />
             </button>
             {open && (
                 <div
                     ref={bodyRef}
-                    className="nowheel max-h-56 overflow-y-auto whitespace-pre-wrap border-t border-border/50 px-2.5 py-1.5 text-[10px] italic leading-relaxed text-muted-foreground"
+                    className="nowheel mt-1.5 max-h-56 overflow-y-auto whitespace-pre-wrap text-[12px] leading-relaxed text-muted-foreground"
                 >
                     {findQuery.trim() ? (
                         <HighlightedPlainText
@@ -2164,13 +2153,14 @@ function ChatCardNodeInner({
                 </div>
             )}
             {activityLabel && (
-                <div
-                    className="mb-1.5 flex items-center gap-1.5 px-0.5 text-muted-foreground"
+                <p
+                    className="mb-2 flex w-fit items-center gap-2.5 px-0.5 text-[length:var(--text-chat)] text-muted-foreground"
+                    role="status"
                     aria-live="polite"
                 >
-                    <span className="size-1.5 shrink-0 rounded-full bg-[#50fa7b] animate-pulse" />
-                    <span className="text-[11px] tracking-tight">{activityLabel}</span>
-                </div>
+                    <MatrixLoader />
+                    <span className="shimmer-text">{activityLabel}</span>
+                </p>
             )}
             <PromptComposer
                 value={draft}
