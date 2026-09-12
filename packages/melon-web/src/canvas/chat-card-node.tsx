@@ -191,6 +191,26 @@ function MessageActions({
     );
 }
 
+/**
+ * Wraps one work section. When `connector` is set, an animated vertical line
+ * grows out of the gap above it (bottom-full of the 8px space-y gap), so each
+ * time a new section starts the line draws from the previous one. It is removed
+ * with the wrapper once the turn ends.
+ */
+function TurnSection({ connector, children }: { connector: boolean; children: ReactNode }) {
+    return (
+        <div className="relative">
+            {connector ? (
+                <span
+                    aria-hidden
+                    className="turn-connector-line absolute bottom-full left-[6.5px] h-3 w-px bg-border"
+                />
+            ) : null}
+            {children}
+        </div>
+    );
+}
+
 const MessageBlocks = ReactMemo(function MessageBlocks({
     m,
     index,
@@ -314,15 +334,16 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     // Thinking is live until this turn produces tools or answer text.
     const thinkingActive =
         isStreamingTail && !!m.thinking && !m.text.trim() && !hasTools;
-    return (
-        <div
-            className={cn(
-                'group/msg min-w-0 space-y-2 pl-1 rounded-lg transition-colors duration-500',
-                highlighted && 'ring-2 ring-primary/40 ring-offset-2 ring-offset-card',
-            )}
-            data-msg-index={index}
-        >
-            {m.thinking != null && m.thinking.length > 0 && (
+    const hasAnswer = isStreamingTail ? m.text.length > 0 : m.text.trim().length > 0;
+
+    // Render the turn as an ordered list of work sections. A connector is drawn
+    // before every section except the first, so a new connector mounts exactly
+    // when the next section starts and animates into place.
+    const sections: Array<{ key: string; node: ReactNode }> = [];
+    if (m.thinking != null && m.thinking.length > 0) {
+        sections.push({
+            key: 'thinking',
+            node: (
                 <ThinkingBlock
                     cardId={cardId}
                     index={index}
@@ -331,10 +352,14 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
                     findQuery={q}
                     findActive={findActive}
                 />
-            )}
-            {(m.tools ?? []).map((t) => (
+            ),
+        });
+    }
+    for (const t of m.tools ?? []) {
+        sections.push({
+            key: `tool:${t.callId}`,
+            node: (
                 <ToolRunBlock
-                    key={t.callId}
                     cardId={cardId}
                     run={{
                         callId: t.callId,
@@ -345,8 +370,13 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
                         output: t.output,
                     }}
                 />
-            ))}
-            {(isStreamingTail ? m.text.length > 0 : m.text.trim()) ? (
+            ),
+        });
+    }
+    if (hasAnswer) {
+        sections.push({
+            key: 'answer',
+            node: (
                 <div>
                     {q ? (
                         <FindHighlightHost query={q} current={findActive}>
@@ -356,11 +386,24 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
                         <MarkdownBlock content={m.text} streaming={isStreamingTail} />
                     )}
                 </div>
-            ) : null}
-            <MessageActions
-                align="start"
-                text={m.text}
-            />
+            ),
+        });
+    }
+
+    return (
+        <div
+            className={cn(
+                'group/msg min-w-0 space-y-2 pl-1 rounded-lg transition-colors duration-500',
+                highlighted && 'ring-2 ring-primary/40 ring-offset-2 ring-offset-card',
+            )}
+            data-msg-index={index}
+        >
+            {sections.map((section, i) => (
+                <TurnSection key={section.key} connector={i > 0 && isStreamingTail}>
+                    {section.node}
+                </TurnSection>
+            ))}
+            <MessageActions align="start" text={m.text} />
         </div>
     );
 });
@@ -2103,7 +2146,7 @@ function ChatCardNodeInner({
         card.status === 'streaming' ? PHASE_LABEL[deriveActivityPhase(card)] : null;
 
     const footerInput = (
-        <div className={cn('shrink-0 border-t border-border', maximized ? 'px-0 py-3' : 'p-2')}>
+        <div className={cn('shrink-0', maximized ? 'px-0 py-3' : 'p-2')}>
             {card.pendingExtensionUi && (
                 <QuestionPanel
                     pending={card.pendingExtensionUi}

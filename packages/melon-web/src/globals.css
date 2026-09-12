@@ -675,3 +675,26 @@
     0% { background-position: 100% 0; }
     100% { background-position: -100% 0; }
 }
+
+/* Animated vertical link between two work sections of a live turn. */
+.turn-connector-line {
+    transform-origin: top;
+    animation: melon-draw-line 240ms ease-out both;
+}
+
+@keyframes melon-draw-line {
+    from {
+        transform: scaleY(0);
+        opacity: 0;
+    }
+    to {
+        transform: scaleY(1);
+        opacity: 1;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .turn-connector-line {
+        animation: none;
+    }
+}
