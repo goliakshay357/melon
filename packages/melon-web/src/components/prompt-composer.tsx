@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { ArrowUp, Square } from 'lucide-react';
 import { ModelPicker } from '@/components/model-picker';
 import { SkillsPicker } from '@/components/skills-picker';
@@ -6,6 +6,7 @@ import { ThinkingPicker } from '@/components/thinking-picker';
 import { boxMentionLabel } from '@/lib/agent-names';
 import { boxMailLog } from '@/lib/box-mail-brief';
 import { useCanvasStore } from '@/store/canvas-store';
+import { insertPlainAt, plainTextFromClipboard } from '@/lib/composer-paste';
 import {
     activeMention,
     fetchFileCandidates,
@@ -19,6 +20,30 @@ export type ComposerPermission = 'full' | 'readonly';
 
 const CARD_TEXT = 'text-[length:var(--text-chat)] leading-5';
 const HERO_TEXT = 'text-sm leading-relaxed';
+/**
+ * Shared wrap + font metrics so the transparent textarea caret tracks the
+ * mention backdrop (arrow keys / Shift+Enter). Do not diverge these.
+ */
+const FIELD_METRICS =
+    'break-words whitespace-pre-wrap font-[inherit] tracking-normal [font-kerning:none] [tab-size:4]';
+/** Transparent glyphs + visible caret; fill-color blocks WebKit black-on-paste. */
+const TA_INVISIBLE: CSSProperties = {
+    color: 'transparent',
+    // WebKit paints fill separately from `color` — keep both transparent.
+    WebkitTextFillColor: 'transparent',
+};
+
+function assertInvisibleTextarea(el: HTMLTextAreaElement | null) {
+    if (!el) return;
+    el.style.color = 'transparent';
+    el.style.webkitTextFillColor = 'transparent';
+}
+
+function syncBackdropScroll(from: HTMLTextAreaElement, to: HTMLDivElement | null) {
+    if (!to) return;
+    to.scrollTop = from.scrollTop;
+    to.scrollLeft = from.scrollLeft;
+}
 
 type MentionItem =
     | { kind: 'agent'; token: string; label: string; cardId: string; status: string }
@@ -52,7 +77,9 @@ function MentionBackdropSpans({
                         {s.text}
                     </span>
                 ) : (
-                    <span key={i}>{s.text}</span>
+                    <span key={i} className="text-foreground">
+                        {s.text}
+                    </span>
                 ),
             )}
         </>
@@ -325,22 +352,31 @@ export function PromptComposer({
                     ref={backdropRef}
                     aria-hidden
                     className={cn(
-                        'pointer-events-none absolute inset-0 overflow-hidden break-words whitespace-pre-wrap',
+                        'composer-backdrop pointer-events-none absolute inset-0 overflow-hidden text-foreground',
+                        FIELD_METRICS,
                         hero ? `px-4 pt-4 pb-2 ${HERO_TEXT}` : `px-3 pt-2.5 pb-1 ${CARD_TEXT}`,
                     )}
                 >
                     <MentionBackdropSpans spans={spans} cwd={cwd} agentTokens={agentTokens} />
+                    {/* Textarea paints a blank line for a trailing \\n; a div does not
+                        unless we mirror it — otherwise arrows drift on the last line. */}
+                    {value.endsWith('\n') ? '\n' : null}
                 </div>
                 <textarea
                     autoFocus={autoFocus}
                     rows={hero ? 4 : 1}
                     value={value}
+                    spellCheck={false}
+                    autoCorrect="off"
+                    autoCapitalize="off"
                     ref={(el) => {
                         taRef.current = el;
+                        assertInvisibleTextarea(el);
                         growTextarea(el);
                     }}
                     disabled={disabled}
                     onChange={(e) => {
+                        assertInvisibleTextarea(e.currentTarget);
                         onChange(e.target.value);
                         growTextarea(e.target);
                         setCaret(e.target.selectionStart ?? 0);
@@ -349,25 +385,52 @@ export function PromptComposer({
                     }}
                     onPaste={(e) => {
                         e.preventDefault();
-                        const raw = e.clipboardData.getData('text/plain');
-                        const clean = raw
-                            .replace(/<[^>]*>/g, '')
-                            .replace(/style=["'][^"']*["']/gi, '')
-                            .replace(/\\n/g, '\n')
-                            .replace(/\\r/g, '');
+                        // Plain text only — never HTML — so the mention backdrop stays in sync.
+                        const clean = plainTextFromClipboard(e.clipboardData);
                         const start = e.currentTarget.selectionStart ?? 0;
                         const end = e.currentTarget.selectionEnd ?? 0;
-                        const next = value.slice(0, start) + clean + value.slice(end);
+                        const { next, caret: pos } = insertPlainAt(value, start, end, clean);
                         onChange(next);
                         requestAnimationFrame(() => {
                             const el = e.currentTarget;
                             el.focus();
-                            const pos = start + clean.length;
+                            assertInvisibleTextarea(el);
+                            el.setSelectionRange(pos, pos);
+                            setCaret(pos);
+                            growTextarea(el);
+                            syncBackdropScroll(el, backdropRef.current);
+                        });
+                    }}
+                    onDragOver={(e) => {
+                        // Allow dropping plain text into the field (same path as paste).
+                        if (Array.from(e.dataTransfer.types).some((t) => t === 'text/plain' || t === 'text/html' || t === 'text')) {
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = 'copy';
+                        }
+                    }}
+                    onDrop={(e) => {
+                        const types = Array.from(e.dataTransfer.types);
+                        if (!types.some((t) => t === 'text/plain' || t === 'text/html' || t === 'text' || t === 'text/uri-list')) {
+                            return;
+                        }
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const clean = plainTextFromClipboard(e.dataTransfer);
+                        if (!clean) return;
+                        const start = e.currentTarget.selectionStart ?? value.length;
+                        const end = e.currentTarget.selectionEnd ?? start;
+                        const { next, caret: pos } = insertPlainAt(value, start, end, clean);
+                        onChange(next);
+                        requestAnimationFrame(() => {
+                            const el = e.currentTarget;
+                            el.focus();
+                            assertInvisibleTextarea(el);
                             el.setSelectionRange(pos, pos);
                             setCaret(pos);
                             growTextarea(el);
                         });
                     }}
+                    onFocus={(e) => assertInvisibleTextarea(e.currentTarget)}
                     onSelect={(e) => syncCaret(e.currentTarget)}
                     onClick={(e) => {
                         syncCaret(e.currentTarget);
@@ -375,7 +438,7 @@ export function PromptComposer({
                     }}
                     onKeyUp={(e) => syncCaret(e.currentTarget)}
                     onScroll={(e) => {
-                        if (backdropRef.current) backdropRef.current.scrollTop = e.currentTarget.scrollTop;
+                        syncBackdropScroll(e.currentTarget, backdropRef.current);
                     }}
                     onKeyDown={(e) => {
                         // Keep canvas layout undo/redo from seeing composer keys, but
@@ -483,10 +546,13 @@ export function PromptComposer({
                     }}
                     placeholder={placeholder}
                     className={cn(
-                        'nodrag nowheel relative block w-full resize-none bg-transparent caret-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60',
+                        'composer-input nodrag nowheel relative block w-full resize-none bg-transparent caret-foreground outline-none disabled:cursor-not-allowed disabled:opacity-60',
+                        // Placeholder must set fill-color too, or WebKit inherits transparent fill.
+                        'placeholder:text-muted-foreground placeholder:[-webkit-text-fill-color:hsl(var(--muted-foreground))]',
+                        FIELD_METRICS,
                         hero ? `min-h-[112px] max-h-[220px] px-4 pt-4 pb-2 ${HERO_TEXT}` : `max-h-[120px] px-3 pt-2.5 pb-1 ${CARD_TEXT}`,
                     )}
-                    style={{ color: 'transparent' }}
+                    style={TA_INVISIBLE}
                 />
                 {cmdOpen && (
                     <div

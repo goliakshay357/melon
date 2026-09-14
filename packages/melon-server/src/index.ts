@@ -132,6 +132,7 @@ import {
 	loadCursorProviderInto,
 	rewriteCursorError,
 } from "./cursor-extension.ts";
+import { cursorAutoDisplayName } from "./cursor-model-labels.ts";
 import { runInBoundCursorSession, stripCursorResumeEntriesFromSessionFile } from "./cursor-session-binding.ts";
 import { CardExtensionUiBridge } from "./extension-ui.ts";
 import { fileExists, noteFiles, readTextFile, resolveInside, searchFiles } from "./files.ts";
@@ -3538,13 +3539,20 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	app.get("/models", async (req) => {
 		const provider = String((req.query as any)?.provider ?? "");
 		const mr = await getModelRuntime();
-		const all = mr.getModels().map((m: any) => ({
-			label: `${m.provider}/${m.id}`,
-			provider: m.provider,
-			providerName: mr.getProvider(m.provider)?.name ?? providerLabel(m.provider),
-			id: m.id,
-			name: typeof m.name === "string" && m.name.trim() ? m.name : m.id,
-		}));
+		const all = mr.getModels().map((m: any) => {
+			const id = m.id as string;
+			const provider = m.provider as string;
+			const rawName = typeof m.name === "string" && m.name.trim() ? m.name : id;
+			const name =
+				provider.toLowerCase() === CURSOR_PROVIDER_ID ? cursorAutoDisplayName(id, rawName) : rawName;
+			return {
+				label: `${provider}/${id}`,
+				provider,
+				providerName: mr.getProvider(provider)?.name ?? providerLabel(provider),
+				id,
+				name,
+			};
+		});
 		const denied = new Set((loadSettings().denylistedModels ?? []).map((x) => x));
 		const filtered = all.filter((m) => !denied.has(m.label));
 		const models = provider ? filtered.filter((m) => m.provider === provider) : filtered;

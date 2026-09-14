@@ -28,6 +28,11 @@ import {
     splitMentionSpans,
     subscribeExistence,
 } from '@/lib/mentions';
+import {
+    attachStickUnlock,
+    stickToBottomIfNeeded,
+    syncStuckToBottom,
+} from '@/lib/stick-to-bottom';
 import { cn } from '@/lib/utils';
 
 /**
@@ -913,6 +918,7 @@ function ThinkingBlock({
     const prevActive = useRef(active);
     const autoControlled = useRef(true);
     const bodyRef = useRef<HTMLDivElement>(null);
+    const atBottomRef = useRef(true);
 
     useEffect(() => {
         // Live thinking: force open so the stream is visible.
@@ -927,12 +933,21 @@ function ThinkingBlock({
         prevActive.current = active;
     }, [active, key]);
 
-    // Keep the latest thought in view while it streams.
+    // New live thought: re-pin to the tail so first tokens are visible.
+    useEffect(() => {
+        if (active) atBottomRef.current = true;
+    }, [active]);
+
+    // Follow the stream only while the reader stays at the bottom of this box.
     useEffect(() => {
         if (!active || !open) return;
-        const el = bodyRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
+        stickToBottomIfNeeded(bodyRef.current, atBottomRef);
     }, [text, active, open]);
+
+    useEffect(() => {
+        if (!open) return;
+        return attachStickUnlock(bodyRef.current, atBottomRef);
+    }, [open, active]);
 
     // Open thinking when a find hit lives inside it.
     useEffect(() => {
@@ -968,6 +983,7 @@ function ThinkingBlock({
             {open && (
                 <div
                     ref={bodyRef}
+                    onScroll={(e) => syncStuckToBottom(e.currentTarget, atBottomRef)}
                     className="nowheel mt-1.5 max-h-56 overflow-y-auto whitespace-pre-wrap text-[12px] leading-relaxed text-muted-foreground"
                 >
                     {findQuery.trim() ? (
@@ -1378,8 +1394,7 @@ function ChatCardNodeInner({
     const findMatches = findMatchingMessageIndexes(card?.messages ?? [], findQuery);
 
     const handleMessagesScroll = (el: HTMLDivElement) => {
-        const near = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-        atBottomRef.current = near;
+        const near = syncStuckToBottom(el, atBottomRef);
         setShowDown(!near); // React bails out when unchanged
         if (maximized) {
             const next = resolveViewportPromptIndex(el);
@@ -1467,11 +1482,9 @@ function ChatCardNodeInner({
     // Auto-follow ONLY while the user is at the bottom. If they scroll away,
     // new output must NOT yank them down — the ↓ button returns them instead.
     useEffect(() => {
-        if (!atBottomRef.current) return; // user scrolled away — DO NOT yank
-        const el = scrollRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
-        const el2 = maxScrollRef.current;
-        if (el2) el2.scrollTop = el2.scrollHeight;
+        stickToBottomIfNeeded(scrollRef.current, atBottomRef);
+        stickToBottomIfNeeded(maxScrollRef.current, atBottomRef);
+        setShowDown(!atBottomRef.current);
     }, [card?.messages.length, lastMsg?.text, lastMsg?.thinking, lastMsg?.tools, card?.status]);
 
     // Fixed-height card: growing the input footer shrinks the messages viewport.
@@ -1481,16 +1494,20 @@ function ChatCardNodeInner({
         const attach = (el: HTMLDivElement | null) => {
             if (!el) return;
             const ro = new ResizeObserver(() => {
-                if (atBottomRef.current) el.scrollTop = el.scrollHeight;
+                stickToBottomIfNeeded(el, atBottomRef);
             });
             ro.observe(el);
             return () => ro.disconnect();
         };
         const d1 = attach(scrollRef.current);
         const d2 = attach(maxScrollRef.current);
+        const u1 = attachStickUnlock(scrollRef.current, atBottomRef, () => setShowDown(true));
+        const u2 = attachStickUnlock(maxScrollRef.current, atBottomRef, () => setShowDown(true));
         return () => {
             d1?.();
             d2?.();
+            u1?.();
+            u2?.();
         };
     }, [maximized]);
 

@@ -10,6 +10,22 @@ export interface ModelInfo {
 
 export type ModelSection = { title: string; models: ModelInfo[] };
 
+/**
+ * Cursor ships two catalog rows both named "Auto":
+ * - `auto-smart` — Cursor Router (Optimize For: Intelligence / Balance / Cost)
+ * - `default` (alias `auto`) — legacy cost-oriented Auto
+ * Disambiguate in the Melon picker so users can tell them apart.
+ */
+export function cursorAutoDisplayName(id: string, name: string): string {
+	const trimmed = name.trim();
+	if (!/^auto$/i.test(trimmed)) return name;
+	// Strip context (@272k) and fast (:fast / :slow) suffixes from pi ids.
+	const base = (id.split(/[@:]/)[0] ?? id).trim();
+	if (base === 'auto-smart') return 'Auto · Smart';
+	if (base === 'default' || base === 'auto') return 'Auto · Cost';
+	return name;
+}
+
 /** Tolerate an older /models payload that lacks `name` / `providerName`. */
 export function normalizeModel(raw: Record<string, unknown>): ModelInfo | null {
 	const provider = typeof raw.provider === 'string' ? raw.provider : '';
@@ -21,13 +37,20 @@ export function normalizeModel(raw: Record<string, unknown>): ModelInfo | null {
 				? `${provider}/${id}`
 				: '';
 	if (!label) return null;
+	const resolvedProvider = provider || label.split('/')[0] || 'unknown';
+	const resolvedId = id || label.split('/').slice(1).join('/');
+	const rawName = typeof raw.name === 'string' && raw.name ? raw.name : resolvedId || label;
+	const name =
+		resolvedProvider.toLowerCase() === 'cursor'
+			? cursorAutoDisplayName(resolvedId, rawName)
+			: rawName;
 	return {
 		label,
-		provider: provider || label.split('/')[0] || 'unknown',
+		provider: resolvedProvider,
 		providerName:
 			typeof raw.providerName === 'string' && raw.providerName ? raw.providerName : provider || 'Other',
-		id: id || label.split('/').slice(1).join('/'),
-		name: typeof raw.name === 'string' && raw.name ? raw.name : id || label,
+		id: resolvedId,
+		name,
 	};
 }
 
