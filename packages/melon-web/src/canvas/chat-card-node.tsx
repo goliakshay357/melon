@@ -8,7 +8,7 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { BookMarked, Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, X } from 'lucide-react';
+import { Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, X } from 'lucide-react';
 import { askChoice } from '@/components/dialogs';
 import { useImageLightbox } from '@/components/image-lightbox';
 import { useCanvasStore } from '@/store/canvas-store';
@@ -2034,21 +2034,6 @@ function ChatCardNodeInner({
                             </span>
                         </button>
                     ) : null}
-                    {/* HANDOFF NOTE BUTTON HIDDEN — re-enable later by changing {false && ...} to {true && ...} */}
-                    {false && (
-                        <button
-                            className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-                            disabled={serverOffline || Boolean(card.compacting)}
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                if (serverOffline) return;
-                                void useCanvasStore.getState().createHandoff(id);
-                            }}
-                            title={serverOffline ? 'Reconnecting to server…' : 'Distill this conversation into a handoff note'}
-                        >
-                            <BookMarked className="size-4" />
-                        </button>
-                    )}
                     <button
                         className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
                         disabled={serverOffline}
