@@ -1,5 +1,6 @@
 import { app, BrowserWindow, Menu, ipcMain, dialog, shell } from 'electron';
 import { spawn } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -7,6 +8,34 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // Melon owns its data dir, isolated from the terminal pi CLI (~/.pi/agent).
 const MELON_AGENT_DIR = join(homedir(), '.melon', 'agent');
+const SETTINGS_FILE = join(MELON_AGENT_DIR, 'melon', 'settings.json');
+
+function loadDeveloperDebuggerEnabled() {
+    try {
+        const raw = JSON.parse(readFileSync(SETTINGS_FILE, 'utf8'));
+        return raw?.developerDebugger === true;
+    } catch {
+        return false;
+    }
+}
+
+/** Gated by Settings → Developer options → Debugger (default off). */
+let developerDebuggerEnabled = loadDeveloperDebuggerEnabled();
+
+function closeDevToolsIfDisabled() {
+    if (developerDebuggerEnabled) return;
+    for (const win of BrowserWindow.getAllWindows()) {
+        if (win.webContents.isDevToolsOpened()) win.webContents.closeDevTools();
+    }
+}
+
+function isInspectShortcut(input) {
+    if (input.type !== 'keyDown') return false;
+    const key = String(input.key || '').toLowerCase();
+    if (key !== 'i') return false;
+    if (process.platform === 'darwin') return Boolean(input.meta && input.alt && !input.control && !input.shift);
+    return Boolean(input.control && input.shift && !input.alt && !input.meta);
+}
 
 // Spawn the server child on a FREE port (MELON_PORT=0 → OS assigns).
 const serverProc = spawn(
@@ -76,6 +105,10 @@ if (!serverPort) {
         const r = await dialog.showOpenDialog({ title: 'Choose folder', properties: ['openDirectory'] });
         return r.canceled ? null : r.filePaths[0];
     });
+    ipcMain.on('developer-debugger', (_event, enabled) => {
+        developerDebuggerEnabled = enabled === true;
+        closeDevToolsIfDisabled();
+    });
 
     const createWindow = () => {
         const win = new BrowserWindow({
@@ -105,11 +138,18 @@ if (!serverPort) {
                 /* malformed URL — ignore */
             }
         });
+        win.webContents.on('before-input-event', (event, input) => {
+            if (isInspectShortcut(input) && !developerDebuggerEnabled) {
+                event.preventDefault();
+            }
+        });
+        win.webContents.on('devtools-opened', () => {
+            if (!developerDebuggerEnabled) win.webContents.closeDevTools();
+        });
         win.loadURL(`http://127.0.0.1:${serverPort}`);
     };
     app.whenReady().then(() => {
-        // Standard app menu so the packaged app has DevTools (Cmd+Alt+I),
-        // reload, zoom — just like a browser.
+        // DevTools (Cmd+Alt+I / Ctrl+Shift+I) only when Settings → Debugger is on.
         Menu.setApplicationMenu(
             Menu.buildFromTemplate([
                 { role: 'appMenu' },
@@ -118,7 +158,14 @@ if (!serverPort) {
                     label: 'View',
                     submenu: [
                         { role: 'reload' },
-                        { role: 'toggleDevTools' },
+                        {
+                            label: 'Toggle Developer Tools',
+                            accelerator: process.platform === 'darwin' ? 'Alt+Command+I' : 'Ctrl+Shift+I',
+                            click: (_item, focusedWindow) => {
+                                if (!developerDebuggerEnabled || !focusedWindow) return;
+                                focusedWindow.webContents.toggleDevTools();
+                            },
+                        },
                         { type: 'separator' },
                         { role: 'resetZoom' },
                         { role: 'zoomIn' },

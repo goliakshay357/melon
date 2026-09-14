@@ -4202,6 +4202,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			}
 			next.boxMailAutoSend = body.boxMailAutoSend;
 		}
+		if ("developerDebugger" in body) {
+			if (typeof body.developerDebugger !== "boolean") {
+				return reply.code(400).send({ error: "developerDebugger must be a boolean" });
+			}
+			next.developerDebugger = body.developerDebugger;
+		}
 		if ("favoriteModels" in body) {
 			const raw = body.favoriteModels;
 			if (!Array.isArray(raw) || raw.some((m: unknown) => typeof m !== "string" || !m.trim())) {

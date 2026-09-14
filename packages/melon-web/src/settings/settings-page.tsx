@@ -5,15 +5,17 @@ import { ProvidersSection } from '@/settings/providers-section';
 import { confirmAction } from '@/components/dialogs';
 import { THEMES } from '@/theme/themes';
 import { useThemeStore } from '@/theme/theme-store';
+import { useDeveloperStore } from '@/settings/developer-store';
 import { useCanvasStore, type AppView } from '@/store/canvas-store';
 import { cn } from '@/lib/utils';
 
-type SettingsSection = 'agents' | 'skills' | 'themes' | 'providers';
+type SettingsSection = 'agents' | 'skills' | 'themes' | 'providers' | 'developer';
 
 function sectionFromView(view: AppView): SettingsSection {
     if (view === 'agents') return 'agents';
     if (view === 'themes') return 'themes';
     if (view === 'providers') return 'providers';
+    if (view === 'developer') return 'developer';
     return 'skills';
 }
 
@@ -111,6 +113,8 @@ export function SettingsPage() {
 
     const themeId = useThemeStore((s) => s.themeId);
     const setTheme = useThemeStore((s) => s.setTheme);
+    const debuggerEnabled = useDeveloperStore((s) => s.debuggerEnabled);
+    const setDebuggerEnabled = useDeveloperStore((s) => s.setDebuggerEnabled);
 
     const inEditor = creating || editingId !== null;
 
@@ -170,6 +174,46 @@ export function SettingsPage() {
                 ) : section === 'providers' ? (
                     <div className="mx-auto flex h-full w-full max-w-3xl flex-col p-5">
                         <ProvidersSection />
+                    </div>
+                ) : section === 'developer' ? (
+                    <div className="mx-auto h-full w-full max-w-3xl overflow-y-auto p-5">
+                        <div className="space-y-3">
+                            <div>
+                                <h2 className="text-sm font-medium text-card-foreground">Developer options</h2>
+                                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                                    Tools for inspecting Melon itself. Off by default.
+                                </p>
+                            </div>
+                            <div className="rounded-lg border border-border px-3 py-2">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div className="min-w-0">
+                                        <p className="text-xs font-medium text-card-foreground">Debugger</p>
+                                        <p className="text-[10px] text-muted-foreground">
+                                            Show the debugger control on every card, and allow Inspect
+                                            (Cmd+Option+I) in the desktop app.
+                                        </p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        role="switch"
+                                        aria-checked={debuggerEnabled}
+                                        aria-label="Debugger"
+                                        onClick={() => setDebuggerEnabled(!debuggerEnabled)}
+                                        className={cn(
+                                            'relative h-5 w-9 shrink-0 rounded-full transition-colors',
+                                            debuggerEnabled ? 'bg-primary' : 'bg-muted',
+                                        )}
+                                    >
+                                        <span
+                                            className={cn(
+                                                'absolute top-0.5 size-4 rounded-full bg-background shadow transition-transform',
+                                                debuggerEnabled ? 'translate-x-4' : 'translate-x-0.5',
+                                            )}
+                                        />
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 ) : (
                     <div className="mx-auto h-full w-full max-w-3xl overflow-y-auto p-5">

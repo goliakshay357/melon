@@ -460,7 +460,7 @@ export interface CanvasMeta {
 	worktreeName?: string;
 }
 
-export type AppView = "canvas" | "agents" | "skills" | "themes" | "providers";
+export type AppView = "canvas" | "agents" | "skills" | "themes" | "providers" | "developer";
 
 interface CanvasState {
 	cards: SessionCard[];

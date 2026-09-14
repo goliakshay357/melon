@@ -11,6 +11,7 @@ import {
 import { BookMarked, Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, X } from 'lucide-react';
 import { askChoice } from '@/components/dialogs';
 import { useCanvasStore } from '@/store/canvas-store';
+import { useDeveloperStore } from '@/settings/developer-store';
 import { boxMailLog } from '@/lib/box-mail-brief';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { PromptComposer } from '@/components/prompt-composer';
@@ -1271,10 +1272,12 @@ function TrajectoryView({
 
 function CardMoreMenu({
     debug,
+    showDebug,
     onToggleDebug,
     contextLabel,
 }: {
     debug: boolean;
+    showDebug: boolean;
     onToggleDebug: () => void;
     contextLabel: string | null;
 }) {
@@ -1299,6 +1302,8 @@ function CardMoreMenu({
             window.removeEventListener('keydown', onKey, true);
         };
     }, [open]);
+
+    if (!showDebug && !contextLabel) return null;
 
     return (
         <div ref={rootRef} className="relative">
@@ -1327,17 +1332,19 @@ function CardMoreMenu({
                             Context · {contextLabel}
                         </div>
                     )}
-                    <button
-                        type="button"
-                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-card-foreground hover:bg-secondary"
-                        onClick={() => {
-                            onToggleDebug();
-                            setOpen(false);
-                        }}
-                    >
-                        <Bug className={cn('size-3.5', debug ? 'text-amber-500' : 'text-muted-foreground')} />
-                        {debug ? 'Hide debug' : 'Show debug'}
-                    </button>
+                    {showDebug ? (
+                        <button
+                            type="button"
+                            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-card-foreground hover:bg-secondary"
+                            onClick={() => {
+                                onToggleDebug();
+                                setOpen(false);
+                            }}
+                        >
+                            <Bug className={cn('size-3.5', debug ? 'text-amber-500' : 'text-muted-foreground')} />
+                            {debug ? 'Hide debug' : 'Show debug'}
+                        </button>
+                    ) : null}
                 </div>
             )}
         </div>
@@ -1355,6 +1362,8 @@ function ChatCardNodeInner({
     const deleteCards = useCanvasStore((s) => s.deleteCards);
     const sendMessage = useCanvasStore((s) => s.sendMessage);
     const serverOffline = useCanvasStore((s) => s.serverOffline);
+    const debuggerEnabled = useDeveloperStore((s) => s.debuggerEnabled);
+    const showDebugConsole = debuggerEnabled && card?.debug === true;
     const { setCenter, getZoom } = useReactFlow();
     // The composer draft lives on the card in the store, not in component state:
     // ReactFlow unmounts off-screen nodes (onlyRenderVisibleElements), so local
@@ -1869,6 +1878,7 @@ function ChatCardNodeInner({
                     ) : null}
                     <CardMoreMenu
                         debug={card.debug === true}
+                        showDebug={debuggerEnabled}
                         contextLabel={contextLabel}
                         onToggleDebug={() =>
                             useCanvasStore.getState().updateCard(id, { debug: !card.debug })
@@ -1935,22 +1945,24 @@ function ChatCardNodeInner({
                             </span>
                         ) : null}
                     </button>
-                    <button
-                        className={cn(
-                            'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
-                            card.debug === true
-                                ? 'bg-amber-500/15 text-amber-500 ring-1 ring-inset ring-amber-500/40'
-                                : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-                        )}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            useCanvasStore.getState().updateCard(id, { debug: !card.debug });
-                        }}
-                        title={card.debug === true ? 'Debug console ON' : 'Debug console OFF'}
-                    >
-                        <Bug className="size-3.5" />
-                        DBG
-                    </button>
+                    {debuggerEnabled ? (
+                        <button
+                            className={cn(
+                                'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
+                                card.debug === true
+                                    ? 'bg-amber-500/15 text-amber-500 ring-1 ring-inset ring-amber-500/40'
+                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                            )}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                useCanvasStore.getState().updateCard(id, { debug: !card.debug });
+                            }}
+                            title={card.debug === true ? 'Debug console ON' : 'Debug console OFF'}
+                        >
+                            <Bug className="size-3.5" />
+                            DBG
+                        </button>
+                    ) : null}
                     {historyEntries.length > 0 ? (
                         <button
                             className={cn(
@@ -2296,7 +2308,7 @@ function ChatCardNodeInner({
                     </div>
                 ) : null}
                 {view === 'trajectory' ? trajectoryBody : messagesBody(scrollRef)}
-                {card.debug === true && <DebugConsole logs={card.logs ?? []} />}
+                {showDebugConsole && <DebugConsole logs={card.logs ?? []} />}
                 {footerInput}
             </div>
 
@@ -2392,7 +2404,7 @@ function ChatCardNodeInner({
                                 />
                                 {/* Full-bleed scroll; reading column width is applied inside messagesBody. */}
                                 {messagesBody(maxScrollRef, { roomy: true })}
-                                {card.debug === true && (
+                                {showDebugConsole && (
                                     <div className="mx-auto w-full max-w-3xl shrink-0 px-5 md:px-8">
                                         <DebugConsole logs={card.logs ?? []} />
                                     </div>

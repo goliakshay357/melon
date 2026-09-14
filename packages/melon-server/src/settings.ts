@@ -21,6 +21,11 @@ export interface MelonSettings {
 	boxMailAutoSend?: boolean;
 	/** Recently used agent profile ids (spawn / mail); drives Settings top-5. */
 	agentProfileRecentIds?: string[];
+	/**
+	 * When true, Melon shows the per-card debugger control and allows
+	 * Electron DevTools (Cmd+Option+I). Default / absent = false.
+	 */
+	developerDebugger?: boolean;
 }
 
 const settingsFile = () => join(getAgentDir(), "melon", "settings.json");
