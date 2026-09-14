@@ -18,6 +18,7 @@ import { ForkEdge } from './fork-edge';
 import { EmptyCanvasHero } from './empty-canvas-hero';
 import { Toolbar } from './toolbar';
 import { Sidebar } from './sidebar';
+import { ImageLightboxLayer } from '@/components/image-lightbox';
 import { VizFullscreenLayer } from '@/components/viz-fullscreen-layer';
 import { CanvasNoticeBanner } from '@/components/canvas-notice-banner';
 // import { TopBar } from './topbar';  // DISABLED — re-enable later
@@ -621,6 +622,8 @@ export function Canvas() {
             {/* Fullscreen viz layer — one global portal (z-1000). Renders the
                 promoted iframe node from any card; auto-closes off-canvas. */}
             <VizFullscreenLayer />
+            {/* Image zoom — composer chips + message thumbs (z-1001). */}
+            <ImageLightboxLayer />
 
             {/* Content-area PAGE (never a dialog) right of the navbar: inbox or settings. */}
             {(showCanvasInbox || activeView !== 'canvas') && (

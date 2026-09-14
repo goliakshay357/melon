@@ -106,6 +106,20 @@ export function plainTextFromClipboard(data: DataTransfer): string {
 	return sanitizePastedText(clipboardPlainText(data));
 }
 
+/** Collect image/file blobs from a clipboard paste (Cmd/Ctrl+V screenshots). */
+export function filesFromClipboard(data: DataTransfer | null | undefined): File[] {
+	if (!data) return [];
+	if (data.files?.length) return Array.from(data.files);
+	const items = data.items ? Array.from(data.items) : [];
+	const out: File[] = [];
+	for (const item of items) {
+		if (item.kind !== "file") continue;
+		const file = item.getAsFile();
+		if (file) out.push(file);
+	}
+	return out;
+}
+
 /** Insert cleaned clipboard text into a controlled string at [start, end). */
 export function insertPlainAt(
 	value: string,

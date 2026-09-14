@@ -37,17 +37,26 @@ export interface AttachedSession {
 	extensionUi?: CardExtensionUiBridge;
 }
 
+/** Pi ImageContent — kept structural so melon-server does not import ai types. */
+export interface QueuedPromptImage {
+	type: "image";
+	data: string;
+	mimeType: string;
+}
+
 /**
  * One queued prompt. `text` is what the model receives; `display` is what the
  * UI shows everywhere (queue chips, cancel-to-draft, the user_message frame).
  * Command expansions like /diagram append a model-facing directive to `text`
  * — without `display`, that directive would leak into the user's composer and
- * transcript.
+ * transcript. `images` must travel with the queue or busy sends silently drop
+ * vision attachments.
  */
 export interface QueuedPrompt {
 	text: string;
 	display?: string;
 	context?: string;
+	images?: QueuedPromptImage[];
 }
 
 export function queueDisplays(queue: QueuedPrompt[]): string[] {

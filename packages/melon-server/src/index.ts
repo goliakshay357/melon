@@ -175,9 +175,32 @@ import {
 	isIsolationSensitiveSession,
 	isIsolationTurnAborted,
 	type QueuedPrompt,
+	type QueuedPromptImage,
 	queueDisplays,
 	SessionRegistry,
 } from "./session-registry.ts";
+
+const IMAGE_MIME_OK = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+/** Parse and validate image attachments from a prompt body. */
+function parsePromptImages(raw: unknown): QueuedPromptImage[] | undefined {
+	if (!Array.isArray(raw) || raw.length === 0) return undefined;
+	const out: QueuedPromptImage[] = [];
+	for (const item of raw) {
+		if (!item || typeof item !== "object") continue;
+		const rec = item as Record<string, unknown>;
+		const data = typeof rec.data === "string" ? rec.data : "";
+		const mimeType =
+			typeof rec.mimeType === "string"
+				? rec.mimeType
+				: typeof rec.mime === "string"
+					? rec.mime
+					: "";
+		if (!data || !IMAGE_MIME_OK.has(mimeType)) continue;
+		out.push({ type: "image", data, mimeType });
+	}
+	return out.length > 0 ? out : undefined;
+}
 import {
 	clearProviderDenylist,
 	denylistModel,
@@ -549,7 +572,18 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				// The client never optimistically renders queued messages — this
 				// event is the moment the text actually reaches the model. The
 				// user bubble shows the DISPLAY text (model directives stay hidden).
-				registry.broadcast(cardId, { type: "user_message", text: next.display ?? next.text });
+				registry.broadcast(cardId, {
+					type: "user_message",
+					text: next.display ?? next.text,
+					...(next.images?.length
+						? {
+								images: next.images.map((img) => ({
+									mimeType: img.mimeType,
+									data: img.data,
+								})),
+							}
+						: {}),
+				});
 				const isolationTurnId = beginIsolationTurn(s);
 				lastIsolationTurnId = isolationTurnId ?? lastIsolationTurnId;
 				if (isolationTurnId === undefined) s.busy = true;
@@ -565,10 +599,14 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 							{ deliverAs: "nextTurn" },
 						);
 					}
+					const promptOpts = {
+						...(next.images?.length ? { images: next.images } : {}),
+						...(s.runtime.session.isStreaming ? { streamingBehavior: "followUp" as const } : {}),
+					};
 					await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () =>
 						// followUp only when already mid-run; idle drains must start a real turn.
-						s.runtime.session.isStreaming
-							? s.runtime.session.prompt(next.text, { streamingBehavior: "followUp" })
+						Object.keys(promptOpts).length > 0
+							? s.runtime.session.prompt(next.text, promptOpts)
 							: s.runtime.session.prompt(next.text),
 					);
 					if (isolationTurnId !== undefined && isIsolationTurnAborted(s, isolationTurnId)) return;
@@ -3545,12 +3583,16 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			const rawName = typeof m.name === "string" && m.name.trim() ? m.name : id;
 			const name =
 				provider.toLowerCase() === CURSOR_PROVIDER_ID ? cursorAutoDisplayName(id, rawName) : rawName;
+			const input = Array.isArray(m.input)
+				? (m.input as unknown[]).filter((x): x is "text" | "image" => x === "text" || x === "image")
+				: undefined;
 			return {
 				label: `${provider}/${id}`,
 				provider,
 				providerName: mr.getProvider(provider)?.name ?? providerLabel(provider),
 				id,
 				name,
+				...(input?.length ? { input } : {}),
 			};
 		});
 		const denied = new Set((loadSettings().denylistedModels ?? []).map((x) => x));
@@ -4545,7 +4587,18 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				const m: any = e.message;
 				if (m.role === "user") {
 					const text = clean(textOf(m.content));
-					if (text) messages.push({ role: "user", text, entryId: e.id });
+					const images = (Array.isArray(m.content) ? m.content : [])
+						.filter((b: any) => b?.type === "image" && typeof b.data === "string" && typeof b.mimeType === "string")
+						.map((b: any) => ({ mimeType: b.mimeType as string, data: b.data as string }));
+					// Image-only turns still belong in the transcript.
+					if (text || images.length > 0) {
+						messages.push({
+							role: "user",
+							text,
+							...(images.length > 0 ? { images } : {}),
+							entryId: e.id,
+						});
+					}
 				} else if (m.role === "assistant") {
 					let text = "";
 					let thinking = "";
@@ -4699,9 +4752,10 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			const text = String((req.body as any)?.text ?? "");
 			const display = String((req.body as any)?.display ?? "") || undefined;
 			const context = (req.body as any)?.context ?? "";
-			s.promptQueue.push({ text, display, context: context || undefined });
+			const images = parsePromptImages((req.body as any)?.images);
+			s.promptQueue.push({ text, display, context: context || undefined, images });
 			console.log(
-				`[${cardId}] queue:push "${(display ?? text).slice(0, 40)}" (queue=${JSON.stringify(queueDisplays(s.promptQueue))})`,
+				`[${cardId}] queue:push "${(display ?? text).slice(0, 40)}" images=${images?.length ?? 0} (queue=${JSON.stringify(queueDisplays(s.promptQueue))})`,
 			);
 			registry.broadcast(cardId, { type: "queue", followUp: queueDisplays(s.promptQueue) });
 			reply.send({ ok: true, queued: true });
@@ -4715,6 +4769,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		try {
 			const text = (req.body as any)?.text ?? "";
 			const context = (req.body as any)?.context ?? "";
+			const images = parsePromptImages((req.body as any)?.images);
 			// Inject diagram directives and file contents as custom context
 			// messages (not user text) so the model doesn't echo them back.
 			if (context) {
@@ -4728,7 +4783,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				);
 			}
 			await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () =>
-				s.runtime.session.prompt(text),
+				images?.length ? s.runtime.session.prompt(text, { images }) : s.runtime.session.prompt(text),
 			);
 			console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
 		} catch (e) {

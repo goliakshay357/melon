@@ -28,9 +28,29 @@ export interface ToolRun {
 	output: string;
 }
 
+/** In-composer / transcript image (base64 payload, no data: prefix). */
+export interface ChatImage {
+	mimeType: string;
+	data: string;
+	/** Original file name when known (composer chips). */
+	name?: string;
+}
+
+/** Unsent composer attachment. Lives on SessionCard like `draft`. */
+export interface ComposerAttachment {
+	id: string;
+	kind: "image";
+	name: string;
+	mime: string;
+	size: number;
+	contentBase64: string;
+}
+
 export interface ChatMessage {
 	role: "user" | "assistant" | "system";
 	text: string;
+	/** User-attached images for this turn (vision models). */
+	images?: ChatImage[];
 	/** Model reasoning stream (thinking models only). */
 	thinking?: string;
 	/** Tool executions that happened during this turn. */
@@ -250,6 +270,11 @@ export interface SessionCard {
 	 * switched, silently erasing what the user typed.
 	 */
 	draft?: string;
+	/**
+	 * Unsent image attachments for the composer. Parallel to `draft` for the
+	 * same React Flow unmount reason. Not persisted to canvas JSON (stripped on save).
+	 */
+	draftAttachments?: ComposerAttachment[];
 	/** Blocking extension UI (select/confirm/input) above the inbox. */
 	pendingExtensionUi?: PendingExtensionUi;
 	/** Full trajectory trace — meta + every lifecycle event (for debugging). */

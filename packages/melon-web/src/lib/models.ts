@@ -6,6 +6,8 @@ export interface ModelInfo {
 	providerName: string;
 	id: string;
 	name: string;
+	/** Modalities the model accepts (from pi catalog). */
+	input?: Array<"text" | "image">;
 }
 
 export type ModelSection = { title: string; models: ModelInfo[] };
@@ -44,6 +46,9 @@ export function normalizeModel(raw: Record<string, unknown>): ModelInfo | null {
 		resolvedProvider.toLowerCase() === 'cursor'
 			? cursorAutoDisplayName(resolvedId, rawName)
 			: rawName;
+	const input = Array.isArray(raw.input)
+		? (raw.input as unknown[]).filter((x): x is 'text' | 'image' => x === 'text' || x === 'image')
+		: undefined;
 	return {
 		label,
 		provider: resolvedProvider,
@@ -51,7 +56,14 @@ export function normalizeModel(raw: Record<string, unknown>): ModelInfo | null {
 			typeof raw.providerName === 'string' && raw.providerName ? raw.providerName : provider || 'Other',
 		id: resolvedId,
 		name,
+		...(input?.length ? { input } : {}),
 	};
+}
+
+/** Whether the model catalog row advertises image/vision input. Unknown → true. */
+export function modelSupportsImages(model: ModelInfo | null | undefined): boolean {
+	if (!model?.input?.length) return true;
+	return model.input.includes('image');
 }
 
 /**

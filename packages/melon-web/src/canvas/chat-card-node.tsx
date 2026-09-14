@@ -10,6 +10,7 @@ import {
 } from '@xyflow/react';
 import { BookMarked, Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, X } from 'lucide-react';
 import { askChoice } from '@/components/dialogs';
+import { useImageLightbox } from '@/components/image-lightbox';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useDeveloperStore } from '@/settings/developer-store';
 import { boxMailLog } from '@/lib/box-mail-brief';
@@ -18,7 +19,8 @@ import { PromptComposer } from '@/components/prompt-composer';
 import { MatrixLoader } from '@/components/matrix-loader';
 import { QuestionPanel } from '@/components/question-panel';
 import { ToolRunBlock } from '@/components/tool-run-block';
-import { DEFAULT_CARD_SIZE, type TraceEvent } from '@/types/session-card';
+import { DEFAULT_CARD_SIZE, type ComposerAttachment, type TraceEvent } from '@/types/session-card';
+import { chatImageDataUrl } from '@/lib/composer-attachments';
 import { MinimizedCardBar } from './minimized-card-bar';
 import { MaximizeIcon } from './canvas-boxes-side-nav';
 import { FullscreenExitButton, FullscreenShell } from './fullscreen-shell';
@@ -112,6 +114,8 @@ type MessageShape = {
     role: string;
     text: string;
     thinking?: string;
+    /** User-attached images for this turn. */
+    images?: Array<{ mimeType: string; data: string; name?: string }>;
     /** pi session entry id — lets a message be a fork point. */
     entryId?: string;
     tools?: Array<{
@@ -245,6 +249,7 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     const q = findQuery?.trim() ?? '';
     const [editing, setEditing] = useState(false);
     const [draft, setDraft] = useState('');
+    const openLightbox = useImageLightbox((s) => s.open);
     if (m.role === 'system') {
         const bad = m.text.startsWith('✗');
         return (
@@ -313,11 +318,40 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
                 data-user-prompt="true"
             >
                 <div className="max-w-[92%] overflow-hidden rounded-xl bg-primary/10 px-3 py-1.5 text-[length:var(--text-chat)] leading-relaxed text-primary whitespace-pre-wrap break-words">
-                    {q ? (
-                        <HighlightedPlainText text={m.text} query={q} current={findActive} />
-                    ) : (
-                        <UserTextWithMentions text={m.text} />
+                    {m.images && m.images.length > 0 && (
+                        <div className="mb-1.5 flex flex-wrap gap-1.5">
+                            {m.images.map((img, ii) => {
+                                const src = chatImageDataUrl(img);
+                                const name = img.name ?? 'Attached image';
+                                return (
+                                    <button
+                                        key={ii}
+                                        type="button"
+                                        className="nodrag overflow-hidden rounded-md"
+                                        title="View image"
+                                        aria-label={`View ${name}`}
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            openLightbox(src, name);
+                                        }}
+                                    >
+                                        <img
+                                            alt={name}
+                                            className="max-h-24 max-w-[140px] cursor-zoom-in object-cover"
+                                            src={src}
+                                            draggable={false}
+                                        />
+                                    </button>
+                                );
+                            })}
+                        </div>
                     )}
+                    {m.text.trim().length > 0 && m.text !== '(image)' &&
+                        (q ? (
+                            <HighlightedPlainText text={m.text} query={q} current={findActive} />
+                        ) : (
+                            <UserTextWithMentions text={m.text} />
+                        ))}
                 </div>
                 <MessageActions
                     align="end"
@@ -1374,6 +1408,12 @@ function ChatCardNodeInner({
         (next: string | ((prev: string) => string)) => useCanvasStore.getState().setCardDraft(id, next),
         [id],
     );
+    const draftAttachments = card?.draftAttachments ?? [];
+    const setDraftAttachments = useCallback(
+        (next: ComposerAttachment[] | ((prev: ComposerAttachment[]) => ComposerAttachment[])) =>
+            useCanvasStore.getState().setCardDraftAttachments(id, next),
+        [id],
+    );
     const maximizedCardId = useCanvasStore((s) => s.maximizedCardId);
     const maximized = maximizedCardId === id;
     const setMaximized = useCallback(
@@ -1664,16 +1704,27 @@ function ChatCardNodeInner({
 
     const submit = async () => {
         const text = draft.trim();
-        boxMailLog('card submit', { cardId: id, textPreview: text.slice(0, 100) });
-        if (!text) {
+        const attachments = [...draftAttachments];
+        boxMailLog('card submit', {
+            cardId: id,
+            textPreview: text.slice(0, 100),
+            images: attachments.length,
+        });
+        if (!text && attachments.length === 0) {
             boxMailLog('card submit abort: empty');
             return;
         }
         setDraft('');
-        const ok = await sendMessage(id, text);
+        setDraftAttachments([]);
+        const ok = await sendMessage(id, text, { attachments });
         boxMailLog('card submit done', { ok });
-        // Failed — hand the text back behind anything typed since, never over it.
-        if (!ok) setDraft((prev) => (prev ? `${prev}\n\n${text}` : text));
+        // Failed — hand the text/images back behind anything typed since, never over it.
+        if (!ok) {
+            setDraft((prev) => (prev ? `${prev}\n\n${text}` : text));
+            if (attachments.length > 0) {
+                setDraftAttachments((prev) => [...attachments, ...prev]);
+            }
+        }
     };
 
     /** Reveal a freshly forked card next to its parent. */
@@ -1983,18 +2034,21 @@ function ChatCardNodeInner({
                             </span>
                         </button>
                     ) : null}
-                    <button
-                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-                        disabled={serverOffline || Boolean(card.compacting)}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            if (serverOffline) return;
-                            void useCanvasStore.getState().createHandoff(id);
-                        }}
-                        title={serverOffline ? 'Reconnecting to server…' : 'Distill this conversation into a handoff note'}
-                    >
-                        <BookMarked className="size-4" />
-                    </button>
+                    {/* HANDOFF NOTE BUTTON HIDDEN — re-enable later by changing {false && ...} to {true && ...} */}
+                    {false && (
+                        <button
+                            className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                            disabled={serverOffline || Boolean(card.compacting)}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (serverOffline) return;
+                                void useCanvasStore.getState().createHandoff(id);
+                            }}
+                            title={serverOffline ? 'Reconnecting to server…' : 'Distill this conversation into a handoff note'}
+                        >
+                            <BookMarked className="size-4" />
+                        </button>
+                    )}
                     <button
                         className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
                         disabled={serverOffline}
@@ -2164,7 +2218,15 @@ function ChatCardNodeInner({
                                         const r = await useCanvasStore.getState().dropQueued(id, q);
                                         // Consumed items belong to the transcript, not the composer.
                                         if (r === 'removed' || r === 'dead') {
-                                            setDraft((prev) => (prev ? `${prev}\n\n${q}` : q));
+                                            const restored =
+                                                useCanvasStore.getState().takeQueuedAttachments(id, q);
+                                            const restoreText = q === '(image)' && restored.length > 0 ? '' : q;
+                                            if (restoreText) {
+                                                setDraft((prev) => (prev ? `${prev}\n\n${restoreText}` : restoreText));
+                                            }
+                                            if (restored.length > 0) {
+                                                setDraftAttachments((prev) => [...restored, ...prev]);
+                                            }
                                         }
                                     })();
                                 }}
@@ -2199,6 +2261,8 @@ function ChatCardNodeInner({
                 value={draft}
                 onChange={setDraft}
                 onSubmit={submit}
+                attachments={draftAttachments}
+                onAttachmentsChange={setDraftAttachments}
                 model={card.model ?? ''}
                 onModelChange={(model) => useCanvasStore.getState().setModel(id, model)}
                 thinkingLevel={card.thinkingLevel}
