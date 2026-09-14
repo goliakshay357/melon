@@ -8,7 +8,7 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { BookMarked, Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, Shrink, X } from 'lucide-react';
+import { BookMarked, Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, X } from 'lucide-react';
 import { askChoice } from '@/components/dialogs';
 import { useCanvasStore } from '@/store/canvas-store';
 import { boxMailLog } from '@/lib/box-mail-brief';
@@ -1850,26 +1850,6 @@ function ChatCardNodeInner({
                             </span>
                         </button>
                     ) : null}
-                    <button
-                        type="button"
-                        className="nodrag rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-                        disabled={serverOffline || Boolean(card.compacting) || viewingHistory}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            if (serverOffline || card.compacting) return;
-                            useCanvasStore.getState().dismissCompactOffer(id);
-                            void useCanvasStore.getState().createCompact(id);
-                        }}
-                        title={
-                            serverOffline
-                                ? 'Reconnecting to server…'
-                                : card.compacting
-                                  ? 'Compacting…'
-                                  : 'Compact — archive chat, fresh session, handoff in input'
-                        }
-                    >
-                        <Shrink className="size-4" />
-                    </button>
                     <CardMoreMenu
                         debug={card.debug === true}
                         contextLabel={contextLabel}
@@ -1974,25 +1954,6 @@ function ChatCardNodeInner({
                             </span>
                         </button>
                     ) : null}
-                    <button
-                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-                        disabled={serverOffline || Boolean(card.compacting) || viewingHistory}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            if (serverOffline || card.compacting) return;
-                            useCanvasStore.getState().dismissCompactOffer(id);
-                            void useCanvasStore.getState().createCompact(id);
-                        }}
-                        title={
-                            serverOffline
-                                ? 'Reconnecting to server…'
-                                : card.compacting
-                                  ? 'Compacting…'
-                                  : 'Compact — archive chat, fresh session, handoff in input'
-                        }
-                    >
-                        <Shrink className="size-4" />
-                    </button>
                     <button
                         className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
                         disabled={serverOffline || Boolean(card.compacting)}
