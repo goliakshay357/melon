@@ -200,14 +200,14 @@ export function SettingsPage() {
                                         aria-label="Debugger"
                                         onClick={() => setDebuggerEnabled(!debuggerEnabled)}
                                         className={cn(
-                                            'relative h-5 w-9 shrink-0 rounded-full transition-colors',
+                                            'relative h-5 w-9 shrink-0 overflow-hidden rounded-full transition-colors',
                                             debuggerEnabled ? 'bg-primary' : 'bg-muted',
                                         )}
                                     >
                                         <span
                                             className={cn(
-                                                'absolute top-0.5 size-4 rounded-full bg-background shadow transition-transform',
-                                                debuggerEnabled ? 'translate-x-4' : 'translate-x-0.5',
+                                                'absolute top-0.5 left-0.5 size-4 rounded-full bg-background shadow-sm transition-transform duration-200 ease-out',
+                                                debuggerEnabled && 'translate-x-4',
                                             )}
                                         />
                                     </button>
