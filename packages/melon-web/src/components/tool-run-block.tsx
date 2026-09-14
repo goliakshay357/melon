@@ -3,6 +3,11 @@ import { createPortal } from "react-dom";
 import { ChevronRight, FileText, Maximize2, Minimize2, Search, Terminal, Wrench } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { escapeHtml, highlightCode, languageFromPath } from "@/lib/prism-highlight";
+import {
+	attachStickUnlock,
+	stickToBottomIfNeeded,
+	syncStuckToBottom,
+} from "@/lib/stick-to-bottom";
 
 /** Survives remounts so expand/collapse state does not flicker. */
 const blockUi = new Map<string, boolean>();
@@ -515,13 +520,7 @@ function OutputLines({
 	running?: boolean;
 }) {
 	const scrollRef = useRef<HTMLPreElement>(null);
-
-	// Follow the tail while a command is still producing output, like a terminal.
-	useEffect(() => {
-		if (!running) return;
-		const el = scrollRef.current;
-		if (el) el.scrollTop = el.scrollHeight;
-	}, [output, running]);
+	const atBottomRef = useRef(true);
 
 	const asDiff = looksLikeDiff(output);
 	const lang = languageFromPath(filePath);
@@ -529,6 +528,23 @@ function OutputLines({
 	const body = usePrism ? stripReadLinePrefixes(output) : output;
 	const lines = body.length ? body.replace(/\n$/, "").split("\n") : [];
 	const nw = Math.max(2, String(Math.max(lines.length, 1)).length);
+	const hasScrollable = lines.length > 0 && !(asDiff && kind !== "bash");
+
+	// Fresh run: re-pin so the first lines are visible.
+	useEffect(() => {
+		if (running) atBottomRef.current = true;
+	}, [running]);
+
+	// Follow the tail while producing output — but stop if the user scrolls up.
+	useEffect(() => {
+		if (!running || !hasScrollable) return;
+		stickToBottomIfNeeded(scrollRef.current, atBottomRef);
+	}, [output, running, hasScrollable]);
+
+	useEffect(() => {
+		if (!hasScrollable) return;
+		return attachStickUnlock(scrollRef.current, atBottomRef);
+	}, [hasScrollable, running, usePrism]);
 
 	if (!lines.length) {
 		return <div className="px-2.5 py-1.5 text-[10px] text-muted-foreground">(no output)</div>;
@@ -541,7 +557,11 @@ function OutputLines({
 
 	if (usePrism) {
 		return (
-			<pre ref={scrollRef} className="nowheel tool-prism m-0 max-h-56 overflow-auto border-t border-border/40 px-0 py-1 font-mono text-[10px] leading-relaxed">
+			<pre
+				ref={scrollRef}
+				onScroll={(e) => syncStuckToBottom(e.currentTarget, atBottomRef)}
+				className="nowheel tool-prism m-0 max-h-56 overflow-auto border-t border-border/40 px-0 py-1 font-mono text-[10px] leading-relaxed"
+			>
 				<code className="block">
 					{lines.map((line, i) => {
 						const html = highlightCode(line, lang) ?? escapeHtml(line);
@@ -559,7 +579,11 @@ function OutputLines({
 	}
 
 	return (
-		<pre ref={scrollRef} className="nowheel m-0 max-h-56 overflow-auto border-t border-border/40 px-0 py-1 font-mono text-[10px] leading-relaxed">
+		<pre
+			ref={scrollRef}
+			onScroll={(e) => syncStuckToBottom(e.currentTarget, atBottomRef)}
+			className="nowheel m-0 max-h-56 overflow-auto border-t border-border/40 px-0 py-1 font-mono text-[10px] leading-relaxed"
+		>
 			{lines.map((line, i) => {
 				let row = "tool-out-line";
 				let bodyLine = line;

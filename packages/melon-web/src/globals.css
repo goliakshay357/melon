@@ -698,3 +698,27 @@
         animation: none;
     }
 }
+
+/*
+ * Dual-layer composer: textarea glyphs stay invisible; backdrop paints text.
+ * Selection uses a tinted background so you can still see the range.
+ */
+.composer-input {
+    color: transparent !important;
+    -webkit-text-fill-color: transparent !important;
+    caret-color: hsl(var(--foreground));
+}
+.composer-input::placeholder {
+    color: hsl(var(--muted-foreground));
+    -webkit-text-fill-color: hsl(var(--muted-foreground));
+    opacity: 1;
+}
+.composer-input::selection {
+    background: hsl(var(--accent) / 0.35);
+    color: transparent;
+    -webkit-text-fill-color: transparent;
+}
+.composer-backdrop {
+    color: hsl(var(--foreground));
+}
+

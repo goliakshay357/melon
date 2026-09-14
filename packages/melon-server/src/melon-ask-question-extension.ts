@@ -215,7 +215,7 @@ export default function melonAskQuestionExtension(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Use ask_question when user input would materially change the plan, scope, platform, or implementation path.",
 			"Prefer ask_question with 2-4 concrete options instead of guessing.",
-			"Write like you're talking to a smart friend who is new here. Short. Everyday words.",
+			"Write ask_question text like the user never opened the repo: short everyday words, outcome-first options, no file/symbol jargon or AI-slop.",
 		],
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const questions = normalizeQuestions(params as MelonAskQuestionParams);

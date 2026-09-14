@@ -8,16 +8,19 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { BookMarked, Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, Shrink, X } from 'lucide-react';
+import { BookMarked, Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, X } from 'lucide-react';
 import { askChoice } from '@/components/dialogs';
+import { useImageLightbox } from '@/components/image-lightbox';
 import { useCanvasStore } from '@/store/canvas-store';
+import { useDeveloperStore } from '@/settings/developer-store';
 import { boxMailLog } from '@/lib/box-mail-brief';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { PromptComposer } from '@/components/prompt-composer';
 import { MatrixLoader } from '@/components/matrix-loader';
 import { QuestionPanel } from '@/components/question-panel';
 import { ToolRunBlock } from '@/components/tool-run-block';
-import { DEFAULT_CARD_SIZE, type TraceEvent } from '@/types/session-card';
+import { DEFAULT_CARD_SIZE, type ComposerAttachment, type TraceEvent } from '@/types/session-card';
+import { chatImageDataUrl } from '@/lib/composer-attachments';
 import { MinimizedCardBar } from './minimized-card-bar';
 import { MaximizeIcon } from './canvas-boxes-side-nav';
 import { FullscreenExitButton, FullscreenShell } from './fullscreen-shell';
@@ -28,6 +31,11 @@ import {
     splitMentionSpans,
     subscribeExistence,
 } from '@/lib/mentions';
+import {
+    attachStickUnlock,
+    stickToBottomIfNeeded,
+    syncStuckToBottom,
+} from '@/lib/stick-to-bottom';
 import { cn } from '@/lib/utils';
 
 /**
@@ -106,6 +114,8 @@ type MessageShape = {
     role: string;
     text: string;
     thinking?: string;
+    /** User-attached images for this turn. */
+    images?: Array<{ mimeType: string; data: string; name?: string }>;
     /** pi session entry id — lets a message be a fork point. */
     entryId?: string;
     tools?: Array<{
@@ -239,6 +249,7 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
     const q = findQuery?.trim() ?? '';
     const [editing, setEditing] = useState(false);
     const [draft, setDraft] = useState('');
+    const openLightbox = useImageLightbox((s) => s.open);
     if (m.role === 'system') {
         const bad = m.text.startsWith('✗');
         return (
@@ -307,11 +318,40 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
                 data-user-prompt="true"
             >
                 <div className="max-w-[92%] overflow-hidden rounded-xl bg-primary/10 px-3 py-1.5 text-[length:var(--text-chat)] leading-relaxed text-primary whitespace-pre-wrap break-words">
-                    {q ? (
-                        <HighlightedPlainText text={m.text} query={q} current={findActive} />
-                    ) : (
-                        <UserTextWithMentions text={m.text} />
+                    {m.images && m.images.length > 0 && (
+                        <div className="mb-1.5 flex flex-wrap gap-1.5">
+                            {m.images.map((img, ii) => {
+                                const src = chatImageDataUrl(img);
+                                const name = img.name ?? 'Attached image';
+                                return (
+                                    <button
+                                        key={ii}
+                                        type="button"
+                                        className="nodrag overflow-hidden rounded-md"
+                                        title="View image"
+                                        aria-label={`View ${name}`}
+                                        onClick={(e) => {
+                                            e.stopPropagation();
+                                            openLightbox(src, name);
+                                        }}
+                                    >
+                                        <img
+                                            alt={name}
+                                            className="max-h-24 max-w-[140px] cursor-zoom-in object-cover"
+                                            src={src}
+                                            draggable={false}
+                                        />
+                                    </button>
+                                );
+                            })}
+                        </div>
                     )}
+                    {m.text.trim().length > 0 && m.text !== '(image)' &&
+                        (q ? (
+                            <HighlightedPlainText text={m.text} query={q} current={findActive} />
+                        ) : (
+                            <UserTextWithMentions text={m.text} />
+                        ))}
                 </div>
                 <MessageActions
                     align="end"
@@ -913,6 +953,7 @@ function ThinkingBlock({
     const prevActive = useRef(active);
     const autoControlled = useRef(true);
     const bodyRef = useRef<HTMLDivElement>(null);
+    const atBottomRef = useRef(true);
 
     useEffect(() => {
         // Live thinking: force open so the stream is visible.
@@ -927,12 +968,21 @@ function ThinkingBlock({
         prevActive.current = active;
     }, [active, key]);
 
-    // Keep the latest thought in view while it streams.
+    // New live thought: re-pin to the tail so first tokens are visible.
+    useEffect(() => {
+        if (active) atBottomRef.current = true;
+    }, [active]);
+
+    // Follow the stream only while the reader stays at the bottom of this box.
     useEffect(() => {
         if (!active || !open) return;
-        const el = bodyRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
+        stickToBottomIfNeeded(bodyRef.current, atBottomRef);
     }, [text, active, open]);
+
+    useEffect(() => {
+        if (!open) return;
+        return attachStickUnlock(bodyRef.current, atBottomRef);
+    }, [open, active]);
 
     // Open thinking when a find hit lives inside it.
     useEffect(() => {
@@ -968,6 +1018,7 @@ function ThinkingBlock({
             {open && (
                 <div
                     ref={bodyRef}
+                    onScroll={(e) => syncStuckToBottom(e.currentTarget, atBottomRef)}
                     className="nowheel mt-1.5 max-h-56 overflow-y-auto whitespace-pre-wrap text-[12px] leading-relaxed text-muted-foreground"
                 >
                     {findQuery.trim() ? (
@@ -1255,10 +1306,12 @@ function TrajectoryView({
 
 function CardMoreMenu({
     debug,
+    showDebug,
     onToggleDebug,
     contextLabel,
 }: {
     debug: boolean;
+    showDebug: boolean;
     onToggleDebug: () => void;
     contextLabel: string | null;
 }) {
@@ -1283,6 +1336,8 @@ function CardMoreMenu({
             window.removeEventListener('keydown', onKey, true);
         };
     }, [open]);
+
+    if (!showDebug && !contextLabel) return null;
 
     return (
         <div ref={rootRef} className="relative">
@@ -1311,17 +1366,19 @@ function CardMoreMenu({
                             Context · {contextLabel}
                         </div>
                     )}
-                    <button
-                        type="button"
-                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-card-foreground hover:bg-secondary"
-                        onClick={() => {
-                            onToggleDebug();
-                            setOpen(false);
-                        }}
-                    >
-                        <Bug className={cn('size-3.5', debug ? 'text-amber-500' : 'text-muted-foreground')} />
-                        {debug ? 'Hide debug' : 'Show debug'}
-                    </button>
+                    {showDebug ? (
+                        <button
+                            type="button"
+                            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-card-foreground hover:bg-secondary"
+                            onClick={() => {
+                                onToggleDebug();
+                                setOpen(false);
+                            }}
+                        >
+                            <Bug className={cn('size-3.5', debug ? 'text-amber-500' : 'text-muted-foreground')} />
+                            {debug ? 'Hide debug' : 'Show debug'}
+                        </button>
+                    ) : null}
                 </div>
             )}
         </div>
@@ -1339,6 +1396,8 @@ function ChatCardNodeInner({
     const deleteCards = useCanvasStore((s) => s.deleteCards);
     const sendMessage = useCanvasStore((s) => s.sendMessage);
     const serverOffline = useCanvasStore((s) => s.serverOffline);
+    const debuggerEnabled = useDeveloperStore((s) => s.debuggerEnabled);
+    const showDebugConsole = debuggerEnabled && card?.debug === true;
     const { setCenter, getZoom } = useReactFlow();
     // The composer draft lives on the card in the store, not in component state:
     // ReactFlow unmounts off-screen nodes (onlyRenderVisibleElements), so local
@@ -1347,6 +1406,12 @@ function ChatCardNodeInner({
     const draft = card?.draft ?? '';
     const setDraft = useCallback(
         (next: string | ((prev: string) => string)) => useCanvasStore.getState().setCardDraft(id, next),
+        [id],
+    );
+    const draftAttachments = card?.draftAttachments ?? [];
+    const setDraftAttachments = useCallback(
+        (next: ComposerAttachment[] | ((prev: ComposerAttachment[]) => ComposerAttachment[])) =>
+            useCanvasStore.getState().setCardDraftAttachments(id, next),
         [id],
     );
     const maximizedCardId = useCanvasStore((s) => s.maximizedCardId);
@@ -1378,8 +1443,7 @@ function ChatCardNodeInner({
     const findMatches = findMatchingMessageIndexes(card?.messages ?? [], findQuery);
 
     const handleMessagesScroll = (el: HTMLDivElement) => {
-        const near = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
-        atBottomRef.current = near;
+        const near = syncStuckToBottom(el, atBottomRef);
         setShowDown(!near); // React bails out when unchanged
         if (maximized) {
             const next = resolveViewportPromptIndex(el);
@@ -1467,11 +1531,9 @@ function ChatCardNodeInner({
     // Auto-follow ONLY while the user is at the bottom. If they scroll away,
     // new output must NOT yank them down — the ↓ button returns them instead.
     useEffect(() => {
-        if (!atBottomRef.current) return; // user scrolled away — DO NOT yank
-        const el = scrollRef.current;
-        if (el) el.scrollTop = el.scrollHeight;
-        const el2 = maxScrollRef.current;
-        if (el2) el2.scrollTop = el2.scrollHeight;
+        stickToBottomIfNeeded(scrollRef.current, atBottomRef);
+        stickToBottomIfNeeded(maxScrollRef.current, atBottomRef);
+        setShowDown(!atBottomRef.current);
     }, [card?.messages.length, lastMsg?.text, lastMsg?.thinking, lastMsg?.tools, card?.status]);
 
     // Fixed-height card: growing the input footer shrinks the messages viewport.
@@ -1481,16 +1543,20 @@ function ChatCardNodeInner({
         const attach = (el: HTMLDivElement | null) => {
             if (!el) return;
             const ro = new ResizeObserver(() => {
-                if (atBottomRef.current) el.scrollTop = el.scrollHeight;
+                stickToBottomIfNeeded(el, atBottomRef);
             });
             ro.observe(el);
             return () => ro.disconnect();
         };
         const d1 = attach(scrollRef.current);
         const d2 = attach(maxScrollRef.current);
+        const u1 = attachStickUnlock(scrollRef.current, atBottomRef, () => setShowDown(true));
+        const u2 = attachStickUnlock(maxScrollRef.current, atBottomRef, () => setShowDown(true));
         return () => {
             d1?.();
             d2?.();
+            u1?.();
+            u2?.();
         };
     }, [maximized]);
 
@@ -1638,16 +1704,27 @@ function ChatCardNodeInner({
 
     const submit = async () => {
         const text = draft.trim();
-        boxMailLog('card submit', { cardId: id, textPreview: text.slice(0, 100) });
-        if (!text) {
+        const attachments = [...draftAttachments];
+        boxMailLog('card submit', {
+            cardId: id,
+            textPreview: text.slice(0, 100),
+            images: attachments.length,
+        });
+        if (!text && attachments.length === 0) {
             boxMailLog('card submit abort: empty');
             return;
         }
         setDraft('');
-        const ok = await sendMessage(id, text);
+        setDraftAttachments([]);
+        const ok = await sendMessage(id, text, { attachments });
         boxMailLog('card submit done', { ok });
-        // Failed — hand the text back behind anything typed since, never over it.
-        if (!ok) setDraft((prev) => (prev ? `${prev}\n\n${text}` : text));
+        // Failed — hand the text/images back behind anything typed since, never over it.
+        if (!ok) {
+            setDraft((prev) => (prev ? `${prev}\n\n${text}` : text));
+            if (attachments.length > 0) {
+                setDraftAttachments((prev) => [...attachments, ...prev]);
+            }
+        }
     };
 
     /** Reveal a freshly forked card next to its parent. */
@@ -1850,28 +1927,9 @@ function ChatCardNodeInner({
                             </span>
                         </button>
                     ) : null}
-                    <button
-                        type="button"
-                        className="nodrag rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground disabled:cursor-not-allowed disabled:opacity-40"
-                        disabled={serverOffline || Boolean(card.compacting) || viewingHistory}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            if (serverOffline || card.compacting) return;
-                            useCanvasStore.getState().dismissCompactOffer(id);
-                            void useCanvasStore.getState().createCompact(id);
-                        }}
-                        title={
-                            serverOffline
-                                ? 'Reconnecting to server…'
-                                : card.compacting
-                                  ? 'Compacting…'
-                                  : 'Compact — archive chat, fresh session, handoff in input'
-                        }
-                    >
-                        <Shrink className="size-4" />
-                    </button>
                     <CardMoreMenu
                         debug={card.debug === true}
+                        showDebug={debuggerEnabled}
                         contextLabel={contextLabel}
                         onToggleDebug={() =>
                             useCanvasStore.getState().updateCard(id, { debug: !card.debug })
@@ -1938,22 +1996,24 @@ function ChatCardNodeInner({
                             </span>
                         ) : null}
                     </button>
-                    <button
-                        className={cn(
-                            'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
-                            card.debug === true
-                                ? 'bg-amber-500/15 text-amber-500 ring-1 ring-inset ring-amber-500/40'
-                                : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-                        )}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            useCanvasStore.getState().updateCard(id, { debug: !card.debug });
-                        }}
-                        title={card.debug === true ? 'Debug console ON' : 'Debug console OFF'}
-                    >
-                        <Bug className="size-3.5" />
-                        DBG
-                    </button>
+                    {debuggerEnabled ? (
+                        <button
+                            className={cn(
+                                'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
+                                card.debug === true
+                                    ? 'bg-amber-500/15 text-amber-500 ring-1 ring-inset ring-amber-500/40'
+                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                            )}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                useCanvasStore.getState().updateCard(id, { debug: !card.debug });
+                            }}
+                            title={card.debug === true ? 'Debug console ON' : 'Debug console OFF'}
+                        >
+                            <Bug className="size-3.5" />
+                            DBG
+                        </button>
+                    ) : null}
                     {historyEntries.length > 0 ? (
                         <button
                             className={cn(
@@ -1974,37 +2034,21 @@ function ChatCardNodeInner({
                             </span>
                         </button>
                     ) : null}
-                    <button
-                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-                        disabled={serverOffline || Boolean(card.compacting) || viewingHistory}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            if (serverOffline || card.compacting) return;
-                            useCanvasStore.getState().dismissCompactOffer(id);
-                            void useCanvasStore.getState().createCompact(id);
-                        }}
-                        title={
-                            serverOffline
-                                ? 'Reconnecting to server…'
-                                : card.compacting
-                                  ? 'Compacting…'
-                                  : 'Compact — archive chat, fresh session, handoff in input'
-                        }
-                    >
-                        <Shrink className="size-4" />
-                    </button>
-                    <button
-                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
-                        disabled={serverOffline || Boolean(card.compacting)}
-                        onClick={(e) => {
-                            e.stopPropagation();
-                            if (serverOffline) return;
-                            void useCanvasStore.getState().createHandoff(id);
-                        }}
-                        title={serverOffline ? 'Reconnecting to server…' : 'Distill this conversation into a handoff note'}
-                    >
-                        <BookMarked className="size-4" />
-                    </button>
+                    {/* HANDOFF NOTE BUTTON HIDDEN — re-enable later by changing {false && ...} to {true && ...} */}
+                    {false && (
+                        <button
+                            className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                            disabled={serverOffline || Boolean(card.compacting)}
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                if (serverOffline) return;
+                                void useCanvasStore.getState().createHandoff(id);
+                            }}
+                            title={serverOffline ? 'Reconnecting to server…' : 'Distill this conversation into a handoff note'}
+                        >
+                            <BookMarked className="size-4" />
+                        </button>
+                    )}
                     <button
                         className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
                         disabled={serverOffline}
@@ -2174,7 +2218,15 @@ function ChatCardNodeInner({
                                         const r = await useCanvasStore.getState().dropQueued(id, q);
                                         // Consumed items belong to the transcript, not the composer.
                                         if (r === 'removed' || r === 'dead') {
-                                            setDraft((prev) => (prev ? `${prev}\n\n${q}` : q));
+                                            const restored =
+                                                useCanvasStore.getState().takeQueuedAttachments(id, q);
+                                            const restoreText = q === '(image)' && restored.length > 0 ? '' : q;
+                                            if (restoreText) {
+                                                setDraft((prev) => (prev ? `${prev}\n\n${restoreText}` : restoreText));
+                                            }
+                                            if (restored.length > 0) {
+                                                setDraftAttachments((prev) => [...restored, ...prev]);
+                                            }
                                         }
                                     })();
                                 }}
@@ -2209,6 +2261,8 @@ function ChatCardNodeInner({
                 value={draft}
                 onChange={setDraft}
                 onSubmit={submit}
+                attachments={draftAttachments}
+                onAttachmentsChange={setDraftAttachments}
                 model={card.model ?? ''}
                 onModelChange={(model) => useCanvasStore.getState().setModel(id, model)}
                 thinkingLevel={card.thinkingLevel}
@@ -2318,7 +2372,7 @@ function ChatCardNodeInner({
                     </div>
                 ) : null}
                 {view === 'trajectory' ? trajectoryBody : messagesBody(scrollRef)}
-                {card.debug === true && <DebugConsole logs={card.logs ?? []} />}
+                {showDebugConsole && <DebugConsole logs={card.logs ?? []} />}
                 {footerInput}
             </div>
 
@@ -2414,7 +2468,7 @@ function ChatCardNodeInner({
                                 />
                                 {/* Full-bleed scroll; reading column width is applied inside messagesBody. */}
                                 {messagesBody(maxScrollRef, { roomy: true })}
-                                {card.debug === true && (
+                                {showDebugConsole && (
                                     <div className="mx-auto w-full max-w-3xl shrink-0 px-5 md:px-8">
                                         <DebugConsole logs={card.logs ?? []} />
                                     </div>

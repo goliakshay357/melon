@@ -1,5 +1,10 @@
 import { expect, it } from "vitest";
-import { buildModelSections, normalizeModel, type ModelInfo } from "@/lib/models";
+import {
+	buildModelSections,
+	cursorAutoDisplayName,
+	normalizeModel,
+	type ModelInfo,
+} from "@/lib/models";
 
 function model(provider: string, providerName: string, id: string, name: string): ModelInfo {
 	return { label: `${provider}/${id}`, provider, providerName, id, name };
@@ -58,4 +63,30 @@ it("normalizes an old /models payload", () => {
 		name: "claude-sonnet-4",
 	});
 	expect(normalizeModel({})).toBeNull();
+});
+
+it("disambiguates Cursor's duplicate Auto labels", () => {
+	expect(cursorAutoDisplayName("auto-smart", "Auto")).toBe("Auto · Smart");
+	expect(cursorAutoDisplayName("default", "Auto")).toBe("Auto · Cost");
+	expect(cursorAutoDisplayName("auto", "Auto")).toBe("Auto · Cost");
+	expect(cursorAutoDisplayName("auto-smart:fast", "Auto")).toBe("Auto · Smart");
+	expect(cursorAutoDisplayName("claude-4", "Auto")).toBe("Auto");
+	expect(cursorAutoDisplayName("auto-smart", "Claude")).toBe("Claude");
+
+	const smart = normalizeModel({
+		provider: "cursor",
+		providerName: "Cursor",
+		id: "auto-smart",
+		name: "Auto",
+		label: "cursor/auto-smart",
+	});
+	const legacy = normalizeModel({
+		provider: "cursor",
+		providerName: "Cursor",
+		id: "default",
+		name: "Auto",
+		label: "cursor/default",
+	});
+	expect(smart?.name).toBe("Auto · Smart");
+	expect(legacy?.name).toBe("Auto · Cost");
 });

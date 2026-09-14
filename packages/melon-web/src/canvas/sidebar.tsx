@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
     ArrowLeft,
     Bot,
+    Bug,
     Check,
     ChevronRight,
     FileText,
@@ -114,7 +115,7 @@ export function Sidebar() {
     const closeInbox = useCanvasStore((s) => s.closeInbox);
     const inboxOpen = useCanvasStore((s) => s.inboxOpen);
     const totalPending = cards.reduce((n, c) => n + (c.boxInboxPending ?? 0), 0);
-    const openView = (v: 'agents' | 'skills' | 'themes' | 'providers') => {
+    const openView = (v: 'agents' | 'skills' | 'themes' | 'providers' | 'developer') => {
         closeInbox();
         setActiveView(v);
     };
@@ -620,6 +621,18 @@ export function Sidebar() {
                         onClick={() => openView('themes')}
                     >
                         <Palette className="size-4" />
+                    </button>
+                    <button
+                        className={cn(
+                            'rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
+                            activeView === 'developer' && 'bg-secondary text-foreground',
+                        )}
+                        title="Developer options"
+                        aria-label="Developer options"
+                        aria-current={activeView === 'developer' ? 'page' : undefined}
+                        onClick={() => openView('developer')}
+                    >
+                        <Bug className="size-4" />
                     </button>
                     <button
                         className="mt-auto rounded-lg p-2 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
@@ -1155,6 +1168,17 @@ export function Sidebar() {
                                     )}
                                 >
                                     <Palette className="size-3.5 shrink-0" /> Themes
+                                </button>
+                                <button
+                                    onClick={() => openView('developer')}
+                                    className={cn(
+                                        'flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left text-xs transition-colors',
+                                        activeView === 'developer'
+                                            ? 'bg-secondary font-medium text-card-foreground'
+                                            : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                                    )}
+                                >
+                                    <Bug className="size-3.5 shrink-0" /> Developer options
                                 </button>
                             </div>
                         </div>

@@ -4,12 +4,14 @@ import { ReactFlowProvider } from '@xyflow/react';
 import { DialogHost } from '@/components/dialogs';
 import { Canvas } from '@/canvas/canvas';
 import { initTheme } from '@/theme/theme-store';
+import { initDeveloper } from '@/settings/developer-store';
 import '@xyflow/react/dist/style.css';
 import 'streamdown/styles.css';
 import '@/globals.css';
 
 // Apply the persisted theme to :root before the first render (no FOUC).
 initTheme();
+initDeveloper();
 
 
 class Boundary extends React.Component<

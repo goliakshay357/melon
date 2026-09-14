@@ -1,11 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowUp, Square } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { ArrowUp, Paperclip, Square, X } from 'lucide-react';
 import { ModelPicker } from '@/components/model-picker';
 import { SkillsPicker } from '@/components/skills-picker';
 import { ThinkingPicker } from '@/components/thinking-picker';
+import { useComposerAttachments } from '@/hooks/use-composer-attachments';
 import { boxMentionLabel } from '@/lib/agent-names';
 import { boxMailLog } from '@/lib/box-mail-brief';
-import { useCanvasStore } from '@/store/canvas-store';
+import { useImageLightbox } from '@/components/image-lightbox';
+import {
+    attachmentDataUrl,
+    COMPOSER_IMAGE_ACCEPT,
+    dataTransferHasFiles,
+    filesFromDataTransfer,
+} from '@/lib/composer-attachments';
+import { filesFromClipboard, insertPlainAt, plainTextFromClipboard } from '@/lib/composer-paste';
 import {
     activeMention,
     fetchFileCandidates,
@@ -13,12 +21,39 @@ import {
     type MentionSpan,
     splitMentionSpans,
 } from '@/lib/mentions';
+import { modelSupportsImages, normalizeModel, type ModelInfo } from '@/lib/models';
 import { cn } from '@/lib/utils';
+import { useCanvasStore } from '@/store/canvas-store';
+import type { ComposerAttachment } from '@/types/session-card';
 
 export type ComposerPermission = 'full' | 'readonly';
 
 const CARD_TEXT = 'text-[length:var(--text-chat)] leading-5';
 const HERO_TEXT = 'text-sm leading-relaxed';
+/**
+ * Shared wrap + font metrics so the transparent textarea caret tracks the
+ * mention backdrop (arrow keys / Shift+Enter). Do not diverge these.
+ */
+const FIELD_METRICS =
+    'break-words whitespace-pre-wrap font-[inherit] tracking-normal [font-kerning:none] [tab-size:4]';
+/** Transparent glyphs + visible caret; fill-color blocks WebKit black-on-paste. */
+const TA_INVISIBLE: CSSProperties = {
+    color: 'transparent',
+    // WebKit paints fill separately from `color` — keep both transparent.
+    WebkitTextFillColor: 'transparent',
+};
+
+function assertInvisibleTextarea(el: HTMLTextAreaElement | null) {
+    if (!el) return;
+    el.style.color = 'transparent';
+    el.style.webkitTextFillColor = 'transparent';
+}
+
+function syncBackdropScroll(from: HTMLTextAreaElement, to: HTMLDivElement | null) {
+    if (!to) return;
+    to.scrollTop = from.scrollTop;
+    to.scrollLeft = from.scrollLeft;
+}
 
 type MentionItem =
     | { kind: 'agent'; token: string; label: string; cardId: string; status: string }
@@ -52,7 +87,9 @@ function MentionBackdropSpans({
                         {s.text}
                     </span>
                 ) : (
-                    <span key={i}>{s.text}</span>
+                    <span key={i} className="text-foreground">
+                        {s.text}
+                    </span>
                 ),
             )}
         </>
@@ -81,6 +118,8 @@ export function PromptComposer({
     className,
     size = 'card',
     cardId,
+    attachments = [],
+    onAttachmentsChange,
 }: {
     value: string;
     onChange: (value: string) => void;
@@ -107,10 +146,72 @@ export function PromptComposer({
     size?: 'card' | 'hero';
     /** Card id for Cursor debug logging (omit on empty-canvas hero). */
     cardId?: string;
+    /** Image attachments (owned by the card store / hero local state). */
+    attachments?: readonly ComposerAttachment[];
+    onAttachmentsChange?: (
+        update:
+            | ComposerAttachment[]
+            | ((prev: ComposerAttachment[]) => ComposerAttachment[]),
+    ) => void;
 }) {
     const hero = size === 'hero';
     const maxHeight = hero ? 220 : 120;
     const [openPicker, setOpenPicker] = useState<'model' | 'skills' | 'thinking' | null>(null);
+    const [catalogModels, setCatalogModels] = useState<ModelInfo[]>([]);
+    const fileInputRef = useRef<HTMLInputElement | null>(null);
+    const [attachNotice, setAttachNotice] = useState<string | null>(null);
+    const openLightbox = useImageLightbox((s) => s.open);
+
+    useEffect(() => {
+        let alive = true;
+        fetch('/models')
+            .then((r) => (r.ok ? r.json() : null))
+            .then((d: { models?: Array<Record<string, unknown>> } | null) => {
+                if (!alive || !d?.models) return;
+                setCatalogModels(
+                    d.models.map(normalizeModel).filter((m): m is ModelInfo => m !== null),
+                );
+            })
+            .catch(() => {});
+        return () => {
+            alive = false;
+        };
+    }, []);
+
+    const imageSupported = useMemo(() => {
+        const hit = catalogModels.find((m) => m.label === model);
+        return modelSupportsImages(hit);
+    }, [catalogModels, model]);
+
+    const setAttachments = useCallback(
+        (
+            update:
+                | ComposerAttachment[]
+                | ((prev: ComposerAttachment[]) => ComposerAttachment[]),
+        ) => {
+            onAttachmentsChange?.(update);
+        },
+        [onAttachmentsChange],
+    );
+
+    const attachmentCtrl = useComposerAttachments({
+        attachments,
+        disabled: disabled || !onAttachmentsChange,
+        imageSupported,
+        onAttachmentsChange: setAttachments,
+        onNotice: (_title, detail) => {
+            setAttachNotice(detail);
+            window.setTimeout(() => setAttachNotice(null), 4000);
+        },
+    });
+
+    // Strip images when switching to a non-vision model.
+    useEffect(() => {
+        if (imageSupported || attachments.length === 0) return;
+        setAttachments((current) => current.filter((a) => a.kind !== 'image'));
+        setAttachNotice('Images removed — this model cannot see images.');
+        window.setTimeout(() => setAttachNotice(null), 4000);
+    }, [imageSupported]); // eslint-disable-line react-hooks/exhaustive-deps — only on capability flip
 
     // ── slash commands ──
     const COMMANDS = [
@@ -307,17 +408,92 @@ export function PromptComposer({
         },
         [hero, maxHeight],
     );
-    const canSubmit = !disabled && !submitDisabled && value.trim().length > 0;
+    const canSubmit =
+        !disabled &&
+        !submitDisabled &&
+        !attachmentCtrl.isProcessing &&
+        (value.trim().length > 0 || attachments.length > 0);
     const spans = splitMentionSpans(value);
+    const dropZoneActive = attachmentCtrl.isDraggingFiles;
 
     return (
         <div
             className={cn(
-                'rounded-xl border border-input bg-background shadow-sm focus-within:border-ring',
+                'relative rounded-xl border border-input bg-background shadow-sm focus-within:border-ring',
                 hero && 'relative border-transparent shadow-none focus-within:border-transparent',
+                dropZoneActive && 'border-ring ring-2 ring-ring/30',
                 className,
             )}
+            {...(onAttachmentsChange ? attachmentCtrl.dropZoneProps : {})}
         >
+            {dropZoneActive && (
+                <div className="pointer-events-none absolute inset-0 z-20 grid place-items-center rounded-xl bg-background/80">
+                    <p className="text-sm font-medium text-muted-foreground">Drop to attach</p>
+                </div>
+            )}
+            {attachments.length > 0 && (
+                <div
+                    className={cn(
+                        'flex flex-wrap gap-2',
+                        hero ? 'px-4 pt-3' : 'px-3 pt-2',
+                    )}
+                >
+                    {attachments.map((att) => {
+                        const src = attachmentDataUrl(att);
+                        return (
+                            <div
+                                key={att.id}
+                                className="relative size-16 overflow-hidden rounded-lg border border-border bg-secondary"
+                            >
+                                <button
+                                    type="button"
+                                    className="nodrag block size-full cursor-zoom-in"
+                                    title="View image"
+                                    aria-label={`View ${att.name}`}
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        openLightbox(src, att.name);
+                                    }}
+                                >
+                                    <img
+                                        alt={att.name}
+                                        className="block size-full object-cover"
+                                        src={src}
+                                        draggable={false}
+                                    />
+                                </button>
+                                <button
+                                    type="button"
+                                    aria-label={`Remove ${att.name}`}
+                                    className="nodrag absolute right-0.5 top-0.5 grid size-4 place-items-center rounded-full bg-foreground/80 text-background hover:bg-foreground"
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        attachmentCtrl.remove(att.id);
+                                    }}
+                                >
+                                    <X className="size-2.5" />
+                                </button>
+                            </div>
+                        );
+                    })}
+                    {attachmentCtrl.isProcessing && (
+                        <div className="flex size-16 items-center justify-center rounded-lg border border-dashed border-border text-[10px] text-muted-foreground">
+                            Preparing…
+                        </div>
+                    )}
+                </div>
+            )}
+            {attachNotice && (
+                <p
+                    className={cn(
+                        'text-[10px] text-amber-600 dark:text-amber-400',
+                        hero ? 'px-4 pt-1' : 'px-3 pt-1',
+                    )}
+                    role="status"
+                >
+                    {attachNotice}
+                </p>
+            )}
             <div className="relative">
                 {/* Highlight backdrop — same metrics as the textarea; the textarea
                     text is transparent and only the caret stays visible. */}
@@ -325,22 +501,31 @@ export function PromptComposer({
                     ref={backdropRef}
                     aria-hidden
                     className={cn(
-                        'pointer-events-none absolute inset-0 overflow-hidden break-words whitespace-pre-wrap',
+                        'composer-backdrop pointer-events-none absolute inset-0 overflow-hidden text-foreground',
+                        FIELD_METRICS,
                         hero ? `px-4 pt-4 pb-2 ${HERO_TEXT}` : `px-3 pt-2.5 pb-1 ${CARD_TEXT}`,
                     )}
                 >
                     <MentionBackdropSpans spans={spans} cwd={cwd} agentTokens={agentTokens} />
+                    {/* Textarea paints a blank line for a trailing \\n; a div does not
+                        unless we mirror it — otherwise arrows drift on the last line. */}
+                    {value.endsWith('\n') ? '\n' : null}
                 </div>
                 <textarea
                     autoFocus={autoFocus}
                     rows={hero ? 4 : 1}
                     value={value}
+                    spellCheck={false}
+                    autoCorrect="off"
+                    autoCapitalize="off"
                     ref={(el) => {
                         taRef.current = el;
+                        assertInvisibleTextarea(el);
                         growTextarea(el);
                     }}
                     disabled={disabled}
                     onChange={(e) => {
+                        assertInvisibleTextarea(e.currentTarget);
                         onChange(e.target.value);
                         growTextarea(e.target);
                         setCaret(e.target.selectionStart ?? 0);
@@ -348,26 +533,72 @@ export function PromptComposer({
                         setCmdDismissed(false);
                     }}
                     onPaste={(e) => {
+                        // Keyboard paste: image files (screenshots) win over text.
+                        const pastedFiles = filesFromClipboard(e.clipboardData);
+                        if (pastedFiles.length > 0 && onAttachmentsChange) {
+                            e.preventDefault();
+                            attachmentCtrl.addFiles(pastedFiles);
+                            return;
+                        }
                         e.preventDefault();
-                        const raw = e.clipboardData.getData('text/plain');
-                        const clean = raw
-                            .replace(/<[^>]*>/g, '')
-                            .replace(/style=["'][^"']*["']/gi, '')
-                            .replace(/\\n/g, '\n')
-                            .replace(/\\r/g, '');
+                        // Plain text only — never HTML — so the mention backdrop stays in sync.
+                        const clean = plainTextFromClipboard(e.clipboardData);
                         const start = e.currentTarget.selectionStart ?? 0;
                         const end = e.currentTarget.selectionEnd ?? 0;
-                        const next = value.slice(0, start) + clean + value.slice(end);
+                        const { next, caret: pos } = insertPlainAt(value, start, end, clean);
                         onChange(next);
                         requestAnimationFrame(() => {
                             const el = e.currentTarget;
                             el.focus();
-                            const pos = start + clean.length;
+                            assertInvisibleTextarea(el);
+                            el.setSelectionRange(pos, pos);
+                            setCaret(pos);
+                            growTextarea(el);
+                            syncBackdropScroll(el, backdropRef.current);
+                        });
+                    }}
+                    onDragOver={(e) => {
+                        if (dataTransferHasFiles(e.dataTransfer) && onAttachmentsChange) {
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = 'copy';
+                            return;
+                        }
+                        // Allow dropping plain text into the field (same path as paste).
+                        if (Array.from(e.dataTransfer.types).some((t) => t === 'text/plain' || t === 'text/html' || t === 'text')) {
+                            e.preventDefault();
+                            e.dataTransfer.dropEffect = 'copy';
+                        }
+                    }}
+                    onDrop={(e) => {
+                        const droppedFiles = filesFromDataTransfer(e.dataTransfer);
+                        if (droppedFiles.length > 0 && onAttachmentsChange) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            attachmentCtrl.addFiles(droppedFiles);
+                            return;
+                        }
+                        const types = Array.from(e.dataTransfer.types);
+                        if (!types.some((t) => t === 'text/plain' || t === 'text/html' || t === 'text' || t === 'text/uri-list')) {
+                            return;
+                        }
+                        e.preventDefault();
+                        e.stopPropagation();
+                        const clean = plainTextFromClipboard(e.dataTransfer);
+                        if (!clean) return;
+                        const start = e.currentTarget.selectionStart ?? value.length;
+                        const end = e.currentTarget.selectionEnd ?? start;
+                        const { next, caret: pos } = insertPlainAt(value, start, end, clean);
+                        onChange(next);
+                        requestAnimationFrame(() => {
+                            const el = e.currentTarget;
+                            el.focus();
+                            assertInvisibleTextarea(el);
                             el.setSelectionRange(pos, pos);
                             setCaret(pos);
                             growTextarea(el);
                         });
                     }}
+                    onFocus={(e) => assertInvisibleTextarea(e.currentTarget)}
                     onSelect={(e) => syncCaret(e.currentTarget)}
                     onClick={(e) => {
                         syncCaret(e.currentTarget);
@@ -375,7 +606,7 @@ export function PromptComposer({
                     }}
                     onKeyUp={(e) => syncCaret(e.currentTarget)}
                     onScroll={(e) => {
-                        if (backdropRef.current) backdropRef.current.scrollTop = e.currentTarget.scrollTop;
+                        syncBackdropScroll(e.currentTarget, backdropRef.current);
                     }}
                     onKeyDown={(e) => {
                         // Keep canvas layout undo/redo from seeing composer keys, but
@@ -395,7 +626,7 @@ export function PromptComposer({
                                 setCmdHighlight((h) => (h - 1 + cmdItems.length) % cmdItems.length);
                                 return;
                             }
-                            if (e.key === 'Tab') {
+                            if (e.key === 'Tab' || e.key === 'Enter') {
                                 e.preventDefault();
                                 const pick = cmdItems[cmdHighlight] ?? cmdItems[0];
                                 if (pick) {
@@ -409,7 +640,6 @@ export function PromptComposer({
                                 setCmdDismissed(true);
                                 return;
                             }
-                            // Enter falls through to normal submit — the command runs.
                         }
                         // Mention autocomplete (keyboard-first).
                         // While an @token is being typed: Enter/Tab MUST complete the
@@ -483,10 +713,13 @@ export function PromptComposer({
                     }}
                     placeholder={placeholder}
                     className={cn(
-                        'nodrag nowheel relative block w-full resize-none bg-transparent caret-foreground outline-none placeholder:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-60',
+                        'composer-input nodrag nowheel relative block w-full resize-none bg-transparent caret-foreground outline-none disabled:cursor-not-allowed disabled:opacity-60',
+                        // Placeholder must set fill-color too, or WebKit inherits transparent fill.
+                        'placeholder:text-muted-foreground placeholder:[-webkit-text-fill-color:hsl(var(--muted-foreground))]',
+                        FIELD_METRICS,
                         hero ? `min-h-[112px] max-h-[220px] px-4 pt-4 pb-2 ${HERO_TEXT}` : `max-h-[120px] px-3 pt-2.5 pb-1 ${CARD_TEXT}`,
                     )}
-                    style={{ color: 'transparent' }}
+                    style={TA_INVISIBLE}
                 />
                 {cmdOpen && (
                     <div
@@ -594,6 +827,35 @@ export function PromptComposer({
                     hero ? 'px-3 pb-3 pt-1' : 'px-2 pb-1.5 pt-1',
                 )}
             >
+                {onAttachmentsChange && (
+                    <>
+                        <input
+                            ref={fileInputRef}
+                            type="file"
+                            accept={COMPOSER_IMAGE_ACCEPT}
+                            multiple
+                            className="hidden"
+                            onChange={(e) => {
+                                const files = e.target.files ? Array.from(e.target.files) : [];
+                                if (files.length) attachmentCtrl.addFiles(files);
+                                e.target.value = '';
+                            }}
+                        />
+                        <button
+                            type="button"
+                            disabled={disabled || attachmentCtrl.isProcessing}
+                            className="nodrag flex size-7 items-center justify-center rounded-md text-muted-foreground outline-none hover:bg-secondary hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50"
+                            title="Attach image"
+                            aria-label="Attach image"
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                fileInputRef.current?.click();
+                            }}
+                        >
+                            <Paperclip className="size-3.5" />
+                        </button>
+                    </>
+                )}
                 <SkillsPicker
                     value={skills}
                     onChange={onSkillsChange}

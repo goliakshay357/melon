@@ -132,6 +132,7 @@ import {
 	loadCursorProviderInto,
 	rewriteCursorError,
 } from "./cursor-extension.ts";
+import { cursorAutoDisplayName } from "./cursor-model-labels.ts";
 import { runInBoundCursorSession, stripCursorResumeEntriesFromSessionFile } from "./cursor-session-binding.ts";
 import { CardExtensionUiBridge } from "./extension-ui.ts";
 import { fileExists, noteFiles, readTextFile, resolveInside, searchFiles } from "./files.ts";
@@ -174,9 +175,32 @@ import {
 	isIsolationSensitiveSession,
 	isIsolationTurnAborted,
 	type QueuedPrompt,
+	type QueuedPromptImage,
 	queueDisplays,
 	SessionRegistry,
 } from "./session-registry.ts";
+
+const IMAGE_MIME_OK = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+/** Parse and validate image attachments from a prompt body. */
+function parsePromptImages(raw: unknown): QueuedPromptImage[] | undefined {
+	if (!Array.isArray(raw) || raw.length === 0) return undefined;
+	const out: QueuedPromptImage[] = [];
+	for (const item of raw) {
+		if (!item || typeof item !== "object") continue;
+		const rec = item as Record<string, unknown>;
+		const data = typeof rec.data === "string" ? rec.data : "";
+		const mimeType =
+			typeof rec.mimeType === "string"
+				? rec.mimeType
+				: typeof rec.mime === "string"
+					? rec.mime
+					: "";
+		if (!data || !IMAGE_MIME_OK.has(mimeType)) continue;
+		out.push({ type: "image", data, mimeType });
+	}
+	return out.length > 0 ? out : undefined;
+}
 import {
 	clearProviderDenylist,
 	denylistModel,
@@ -548,7 +572,18 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				// The client never optimistically renders queued messages — this
 				// event is the moment the text actually reaches the model. The
 				// user bubble shows the DISPLAY text (model directives stay hidden).
-				registry.broadcast(cardId, { type: "user_message", text: next.display ?? next.text });
+				registry.broadcast(cardId, {
+					type: "user_message",
+					text: next.display ?? next.text,
+					...(next.images?.length
+						? {
+								images: next.images.map((img) => ({
+									mimeType: img.mimeType,
+									data: img.data,
+								})),
+							}
+						: {}),
+				});
 				const isolationTurnId = beginIsolationTurn(s);
 				lastIsolationTurnId = isolationTurnId ?? lastIsolationTurnId;
 				if (isolationTurnId === undefined) s.busy = true;
@@ -564,10 +599,14 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 							{ deliverAs: "nextTurn" },
 						);
 					}
+					const promptOpts = {
+						...(next.images?.length ? { images: next.images } : {}),
+						...(s.runtime.session.isStreaming ? { streamingBehavior: "followUp" as const } : {}),
+					};
 					await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () =>
 						// followUp only when already mid-run; idle drains must start a real turn.
-						s.runtime.session.isStreaming
-							? s.runtime.session.prompt(next.text, { streamingBehavior: "followUp" })
+						Object.keys(promptOpts).length > 0
+							? s.runtime.session.prompt(next.text, promptOpts)
 							: s.runtime.session.prompt(next.text),
 					);
 					if (isolationTurnId !== undefined && isIsolationTurnAborted(s, isolationTurnId)) return;
@@ -606,15 +645,18 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		"Asking the user a question (always apply — ask_question, select, confirm, options, Cursor questions):",
 		"- On Claude Code / Antigravity / other non-Cursor cards: call the ask_question tool so Melon shows the card question panel. Do not invent a silent default when a material choice is needed.",
 		"- On Cursor cards: use pi__cursor_ask_question / cursor_ask_question when exposed.",
-		"- Write like you're talking to a smart friend who is new here. Short. Everyday words. No AI-slop.",
-		"- Question: one clear sentence. Ask what you need them to pick — not a design review.",
-		"- Option labels: what happens if they pick it, in plain words (about a dozen words max).",
-		"- Option descriptions (if any): one friendly line a beginner gets. Do not restack jargon from the label.",
-		"- Prefer concrete outcomes over abstract engineering talk.",
+		"- Audience: assume the user never opened the repo. No file paths, symbol names, component names, PR jargon, or \"you already know\" references. If a code word is unavoidable, say what it does in plain English in the same sentence.",
+		"- Voice: talk like a smart friend who is new here. Short. Everyday words. No AI-slop, no stacked adjectives, no fake formality.",
+		"- Question: one clear sentence about what they will notice or get. Ask them to pick an outcome — not to review a design or confirm an internal plan.",
+		"- Option labels: what happens for them if they pick it, in plain words (~12 words max). Outcome first. Never \"Approve X wiring\" / \"Keep current abstraction\".",
+		"- Option descriptions (if any): one friendly beginner line. Do not restack jargon from the label. Do not explain the codebase — explain the choice.",
+		"- Prefer concrete user-visible outcomes over abstract engineering talk.",
 		'- Bad: "Confirm the fix for the Deep diving / Reasoning activity line wiring."',
-		'- Good: "What should Deep diving / Reasoning do while the AI is thinking?"',
+		'- Good: "What should the thinking line do while the AI is working?"',
 		'- Bad option: "Keep shimmer the whole time status is streaming (like the header status dot)"',
 		'- Good option: "Keep showing it the whole time the green light is on"',
+		'- Bad option: "Harden MELON_GUARDRAIL ask_question system-prompt bullets"',
+		'- Good option: "Make every question sound like I never saw the code"',
 		"",
 		"Inline rendering in Melon chat (always apply):",
 		"- Melon renders assistant messages as rich content, NOT plain text. Fenced blocks turn into LIVE interactive viewers inside the chat card:",
@@ -3535,13 +3577,24 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 	app.get("/models", async (req) => {
 		const provider = String((req.query as any)?.provider ?? "");
 		const mr = await getModelRuntime();
-		const all = mr.getModels().map((m: any) => ({
-			label: `${m.provider}/${m.id}`,
-			provider: m.provider,
-			providerName: mr.getProvider(m.provider)?.name ?? providerLabel(m.provider),
-			id: m.id,
-			name: typeof m.name === "string" && m.name.trim() ? m.name : m.id,
-		}));
+		const all = mr.getModels().map((m: any) => {
+			const id = m.id as string;
+			const provider = m.provider as string;
+			const rawName = typeof m.name === "string" && m.name.trim() ? m.name : id;
+			const name =
+				provider.toLowerCase() === CURSOR_PROVIDER_ID ? cursorAutoDisplayName(id, rawName) : rawName;
+			const input = Array.isArray(m.input)
+				? (m.input as unknown[]).filter((x): x is "text" | "image" => x === "text" || x === "image")
+				: undefined;
+			return {
+				label: `${provider}/${id}`,
+				provider,
+				providerName: mr.getProvider(provider)?.name ?? providerLabel(provider),
+				id,
+				name,
+				...(input?.length ? { input } : {}),
+			};
+		});
 		const denied = new Set((loadSettings().denylistedModels ?? []).map((x) => x));
 		const filtered = all.filter((m) => !denied.has(m.label));
 		const models = provider ? filtered.filter((m) => m.provider === provider) : filtered;
@@ -4191,6 +4244,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			}
 			next.boxMailAutoSend = body.boxMailAutoSend;
 		}
+		if ("developerDebugger" in body) {
+			if (typeof body.developerDebugger !== "boolean") {
+				return reply.code(400).send({ error: "developerDebugger must be a boolean" });
+			}
+			next.developerDebugger = body.developerDebugger;
+		}
 		if ("favoriteModels" in body) {
 			const raw = body.favoriteModels;
 			if (!Array.isArray(raw) || raw.some((m: unknown) => typeof m !== "string" || !m.trim())) {
@@ -4528,7 +4587,18 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				const m: any = e.message;
 				if (m.role === "user") {
 					const text = clean(textOf(m.content));
-					if (text) messages.push({ role: "user", text, entryId: e.id });
+					const images = (Array.isArray(m.content) ? m.content : [])
+						.filter((b: any) => b?.type === "image" && typeof b.data === "string" && typeof b.mimeType === "string")
+						.map((b: any) => ({ mimeType: b.mimeType as string, data: b.data as string }));
+					// Image-only turns still belong in the transcript.
+					if (text || images.length > 0) {
+						messages.push({
+							role: "user",
+							text,
+							...(images.length > 0 ? { images } : {}),
+							entryId: e.id,
+						});
+					}
 				} else if (m.role === "assistant") {
 					let text = "";
 					let thinking = "";
@@ -4682,9 +4752,10 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			const text = String((req.body as any)?.text ?? "");
 			const display = String((req.body as any)?.display ?? "") || undefined;
 			const context = (req.body as any)?.context ?? "";
-			s.promptQueue.push({ text, display, context: context || undefined });
+			const images = parsePromptImages((req.body as any)?.images);
+			s.promptQueue.push({ text, display, context: context || undefined, images });
 			console.log(
-				`[${cardId}] queue:push "${(display ?? text).slice(0, 40)}" (queue=${JSON.stringify(queueDisplays(s.promptQueue))})`,
+				`[${cardId}] queue:push "${(display ?? text).slice(0, 40)}" images=${images?.length ?? 0} (queue=${JSON.stringify(queueDisplays(s.promptQueue))})`,
 			);
 			registry.broadcast(cardId, { type: "queue", followUp: queueDisplays(s.promptQueue) });
 			reply.send({ ok: true, queued: true });
@@ -4698,6 +4769,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		try {
 			const text = (req.body as any)?.text ?? "";
 			const context = (req.body as any)?.context ?? "";
+			const images = parsePromptImages((req.body as any)?.images);
 			// Inject diagram directives and file contents as custom context
 			// messages (not user text) so the model doesn't echo them back.
 			if (context) {
@@ -4711,7 +4783,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				);
 			}
 			await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () =>
-				s.runtime.session.prompt(text),
+				images?.length ? s.runtime.session.prompt(text, { images }) : s.runtime.session.prompt(text),
 			);
 			console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
 		} catch (e) {

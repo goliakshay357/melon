@@ -3,6 +3,7 @@ import { FolderOpen, LoaderCircle } from 'lucide-react';
 import { PromptComposer, type ComposerPermission } from '@/components/prompt-composer';
 import { pickFolder } from '@/lib/pick-folder';
 import { useCanvasStore } from '@/store/canvas-store';
+import type { ComposerAttachment } from '@/types/session-card';
 
 export function EmptyCanvasHero({
     position,
@@ -18,6 +19,7 @@ export function EmptyCanvasHero({
     const openFolder = useCanvasStore((state) => state.openFolder);
     const startConversation = useCanvasStore((state) => state.startConversation);
     const [draft, setDraft] = useState('');
+    const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
     const [model, setModel] = useState('');
     const [skills, setSkills] = useState<string[]>([]);
     const [permission, setPermission] = useState<ComposerPermission>('full');
@@ -49,15 +51,24 @@ export function EmptyCanvasHero({
     };
 
     const submit = async () => {
-        if (starting || !folder || !model || !draft.trim()) return;
+        if (starting || !folder || !model || (!draft.trim() && attachments.length === 0)) return;
         setStarting(true);
-        const sent = await startConversation(draft, position, {
+        const pendingAttachments = [...attachments];
+        const pendingDraft = draft;
+        setDraft('');
+        setAttachments([]);
+        const sent = await startConversation(pendingDraft, position, {
             model,
             skills,
             permission,
             thinkingLevel,
+            attachments: pendingAttachments,
         });
-        if (!sent && useCanvasStore.getState().cards.length === 0) setStarting(false);
+        if (!sent && useCanvasStore.getState().cards.length === 0) {
+            setDraft(pendingDraft);
+            setAttachments(pendingAttachments);
+            setStarting(false);
+        }
     };
 
     const waiting = !hydrated || serverOffline;
@@ -69,7 +80,7 @@ export function EmptyCanvasHero({
             ? 'Choose a folder so Melon knows where to work.'
             : !model
               ? 'Choose a provider and model before sending.'
-              : 'Enter to send · Shift+Enter for a new line';
+              : 'Enter to send · Shift+Enter for a new line · paste or drop images';
 
     return (
         <div
@@ -119,6 +130,8 @@ export function EmptyCanvasHero({
                         value={draft}
                         onChange={setDraft}
                         onSubmit={submit}
+                        attachments={attachments}
+                        onAttachmentsChange={setAttachments}
                         model={model}
                         onModelChange={setModel}
                         skills={skills}

@@ -16,8 +16,10 @@ import {
 } from "@/lib/spawn";
 import {
 	type BoxInboxItem,
+	type ChatImage,
 	type ChatMessage,
 	type CompactHistoryEntry,
+	type ComposerAttachment,
 	DEFAULT_CARD_SIZE,
 	type NoteState,
 	newCardId,
@@ -28,6 +30,31 @@ import {
 
 /** Agent isolation for a canvas (1code-style worktree). */
 export type CanvasWorktreeMode = "isolated" | "local";
+
+/**
+ * Attachments for queued prompts that haven't hit the transcript yet.
+ * Keyed by `${cardId}\0${display}` so cancel can restore images into the composer.
+ */
+const queuedAttachmentDrafts = new Map<string, ComposerAttachment[]>();
+
+function queueAttachmentKey(cardId: string, display: string): string {
+	return `${cardId}\0${display}`;
+}
+
+/** Strip multi-MB base64 before canvas JSON / localStorage persistence. */
+function stripHeavyAttachmentBytes(cards: SessionCard[]): SessionCard[] {
+	return cards.map((c) => {
+		const { draftAttachments: _drop, ...rest } = c;
+		return {
+			...rest,
+			messages: c.messages.map((m) => {
+				if (!m.images?.length) return m;
+				const { images: _imgs, ...msg } = m;
+				return msg;
+			}),
+		};
+	});
+}
 
 function cardWidth(c: SessionCard): number {
 	return c.size?.width ?? DEFAULT_CARD_SIZE.width;
@@ -321,8 +348,13 @@ function applyCardSnapshot(snapshot: SessionCard[]) {
 	const live = new Map(useCanvasStore.getState().cards.map((c) => [c.id, c]));
 	const cards = snapshot.map((c) => {
 		const current = live.get(c.id);
-		if (!current || current.draft === c.draft) return c;
-		return { ...c, draft: current.draft };
+		if (!current) return c;
+		const next = { ...c };
+		if (current.draft !== c.draft) next.draft = current.draft;
+		if (current.draftAttachments !== c.draftAttachments) {
+			next.draftAttachments = current.draftAttachments;
+		}
+		return next;
 	});
 	useCanvasStore.setState({
 		cards,
@@ -460,7 +492,7 @@ export interface CanvasMeta {
 	worktreeName?: string;
 }
 
-export type AppView = "canvas" | "agents" | "skills" | "themes" | "providers";
+export type AppView = "canvas" | "agents" | "skills" | "themes" | "providers" | "developer";
 
 interface CanvasState {
 	cards: SessionCard[];
@@ -550,6 +582,8 @@ interface CanvasState {
 			size?: { width: number; height: number };
 			/** Optional viewport to apply with the first card (typically zoom 1, centered). */
 			viewport?: { x: number; y: number; zoom: number };
+			/** Optional image attachments from the empty-canvas hero. */
+			attachments?: ComposerAttachment[];
 		},
 	) => Promise<boolean>;
 	saveCanvas: (opts?: { allowEmpty?: boolean }) => Promise<void>;
@@ -620,6 +654,14 @@ interface CanvasState {
 	 * landed while an await was in flight.
 	 */
 	setCardDraft: (id: string, draft: string | ((prev: string) => string)) => void;
+	setCardDraftAttachments: (
+		id: string,
+		attachments:
+			| ComposerAttachment[]
+			| ((prev: ComposerAttachment[]) => ComposerAttachment[]),
+	) => void;
+	/** Pop image drafts stashed when a prompt was queued (cancel → composer). */
+	takeQueuedAttachments: (id: string, display: string) => ComposerAttachment[];
 	/** Move queued text into the composer draft without dropping what's there. */
 	queueToDraft: (id: string, texts: string[]) => void;
 	/**
@@ -649,7 +691,16 @@ interface CanvasState {
 	/** Drop cards from the layout undo/redo stacks (hard-deleted files must stay gone). */
 	purgeCardFromHistory: (ids: string[]) => void;
 	deleteCards: (ids: string[]) => void;
-	sendMessage: (cardId: string, text: string, opts?: { cwd?: string; sessionFile?: string }) => Promise<boolean>;
+	sendMessage: (
+		cardId: string,
+		text: string,
+		opts?: {
+			cwd?: string;
+			sessionFile?: string;
+			images?: ChatImage[];
+			attachments?: ComposerAttachment[];
+		},
+	) => Promise<boolean>;
 	resumeSession: (sessionFile: string) => Promise<string | null>;
 	/** Distill a card's session into a handoff note artifact spawned beside it. */
 	createHandoff: (sourceCardId: string) => Promise<void>;
@@ -1994,7 +2045,10 @@ function ensureCardEventStream(cardId: string): void {
 			} else if ((data as { type: string }).type === "user_message") {
 				// A queued message just reached the model (drain started it).
 				// Direct sends are appended optimistically — skip the echo.
-				const um = data as { text: string };
+				const um = data as {
+					text: string;
+					images?: Array<{ mimeType: string; data: string }>;
+				};
 				const cur = findCard(cardId);
 				if (!cur) return;
 				const last = cur.messages[cur.messages.length - 1];
@@ -2002,9 +2056,27 @@ function ensureCardEventStream(cardId: string): void {
 					cardId,
 					`[state] user_message "${um.text.slice(0, 20)}" lastRole=${last?.role} pending=${st!.pendingPatch ? "yes" : "no"} segSealed=${st!.segSealed}`,
 				);
-				if (last?.role === "user" && last.text === um.text) return;
+				queuedAttachmentDrafts.delete(queueAttachmentKey(cardId, um.text));
+				const images =
+					um.images?.filter((img) => img.mimeType && img.data).map((img) => ({
+						mimeType: img.mimeType,
+						data: img.data,
+					})) ?? undefined;
+				if (last?.role === "user" && last.text === um.text) {
+					if (images?.length && !last.images?.length) {
+						useCanvasStore.getState().updateCard(cardId, {
+							messages: cur.messages.map((m, i) =>
+								i === cur.messages.length - 1 ? { ...m, images } : m,
+							),
+						});
+					}
+					return;
+				}
 				useCanvasStore.getState().updateCard(cardId, {
-					messages: [...cur.messages, { role: "user", text: um.text }],
+					messages: [
+						...cur.messages,
+						{ role: "user", text: um.text, ...(images?.length ? { images } : {}) },
+					],
 				});
 			} else if ((data as { type: string }).type === "note_injected") {
 				// A handoff note was delivered into this card (wire from a note
@@ -2712,7 +2784,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		if (!folder || !canvasId || !hydrated) return;
 		if (cards.length > 0) intentionalEmptyCanvases.delete(canvasId);
 		const allowEmpty = opts?.allowEmpty === true || (cards.length === 0 && intentionalEmptyCanvases.has(canvasId));
-		const cold = settleTransientStatuses(cards);
+		const cold = stripHeavyAttachmentBytes(settleTransientStatuses(cards));
 		const savingId = canvasId;
 		try {
 			localStorage.setItem(`melon:backup:${canvasId}`, JSON.stringify({ name: canvasName, viewport, cards: cold }));
@@ -3136,9 +3208,10 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	async startConversation(text, position, options) {
 		const prompt = text.trim();
 		const folder = get().folder;
+		const startImages = options.attachments ?? [];
 		if (
 			startingConversation ||
-			!prompt ||
+			(!prompt && startImages.length === 0) ||
 			!folder ||
 			!options.model ||
 			get().cards.length > 0 ||
@@ -3167,8 +3240,16 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				...(options.thinkingLevel ? { thinkingLevel: options.thinkingLevel } : {}),
 			});
 			get().setModel(cardId, options.model);
-			const sent = await get().sendMessage(cardId, prompt, { cwd: get().agentCwd() ?? folder });
-			if (!sent) get().updateCard(cardId, { pendingDraft: prompt });
+			const sent = await get().sendMessage(cardId, prompt, {
+				cwd: get().agentCwd() ?? folder,
+				attachments: startImages,
+			});
+			if (!sent) {
+				get().updateCard(cardId, {
+					pendingDraft: prompt,
+					draftAttachments: startImages.length > 0 ? [...startImages] : undefined,
+				});
+			}
 			return sent;
 		} finally {
 			startingConversation = false;
@@ -3780,6 +3861,23 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			...c,
 			draft: typeof draft === "function" ? draft(c.draft ?? "") : draft,
 		}));
+	},
+
+	setCardDraftAttachments(id, attachments) {
+		patchCardInStore(id, (c) => ({
+			...c,
+			draftAttachments:
+				typeof attachments === "function"
+					? attachments(c.draftAttachments ?? [])
+					: attachments,
+		}));
+	},
+
+	takeQueuedAttachments(id, display) {
+		const key = queueAttachmentKey(id, display);
+		const found = queuedAttachmentDrafts.get(key);
+		queuedAttachmentDrafts.delete(key);
+		return found ? [...found] : [];
 	},
 
 	// Server (pi's own queue) is ground truth — every path adopts the list it
@@ -4467,6 +4565,19 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					thinking: m.thinking,
 					tools: m.tools,
 					entryId: m.entryId,
+					...(Array.isArray(m.images) && m.images.length > 0
+						? {
+								images: m.images
+									.filter(
+										(img: any) =>
+											typeof img?.mimeType === "string" && typeof img?.data === "string",
+									)
+									.map((img: any) => ({
+										mimeType: img.mimeType as string,
+										data: img.data as string,
+									})),
+							}
+						: {}),
 				})),
 			});
 			pushLog(cardId, `✓ transcript hydrated (${msgs.length} messages from .jsonl)`);
@@ -4477,13 +4588,24 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 
 	async sendMessage(cardId, text, opts) {
 		const card = findCard(cardId);
+		const attachments = opts?.attachments ?? [];
+		const images =
+			opts?.images ??
+			attachments.map((a) => ({
+				mimeType: a.mime,
+				data: a.contentBase64,
+				name: a.name,
+			}));
+		const trimmed = text.trim();
+		const displayText = trimmed || (images.length > 0 ? "(image)" : "");
 		boxMailLog("sendMessage", {
 			cardId,
-			textPreview: text.slice(0, 100),
+			textPreview: displayText.slice(0, 100),
+			images: images.length,
 			offline: get().serverOffline,
 			hasCard: Boolean(card),
 		});
-		if (!card || !text.trim()) {
+		if (!card || (!trimmed && images.length === 0)) {
 			boxMailLog("sendMessage abort: empty/missing card");
 			return false;
 		}
@@ -4656,17 +4778,24 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}
 		pushEvent(cardId, {
 			kind: "prompt",
-			name: text.slice(0, 60),
+			name: displayText.slice(0, 60),
 		});
-		pushLog(cardId, `→ PROMPT "${text.slice(0, 40)}"`);
+		pushLog(cardId, `→ PROMPT "${displayText.slice(0, 40)}" images=${images.length}`);
+		const promptImages = images.map((img) => ({
+			type: "image" as const,
+			data: img.data,
+			mimeType: img.mimeType,
+		}));
 		let pres: Response;
 		try {
 			pres = await fetch(`/sessions/${cardId}/prompt`, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
-					text, // original user input — shown in transcript
+					text: trimmed || displayText, // original user input — shown in transcript
+					...(trimmed !== displayText ? { display: displayText } : {}),
 					...(context ? { context } : {}),
+					...(promptImages.length > 0 ? { images: promptImages } : {}),
 					viz: card.vizMode === true,
 					readonly: card.permission === "readonly",
 				}),
@@ -4682,6 +4811,9 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const pj = (await pres.json().catch(() => ({}))) as { queued?: boolean };
 		if (pj.queued) {
 			pushLog(cardId, "⏳ agent busy — message queued (renders when its run starts)");
+			if (attachments.length > 0) {
+				queuedAttachmentDrafts.set(queueAttachmentKey(cardId, displayText), [...attachments]);
+			}
 			// NO local append here: the server broadcasts the authoritative
 			// `queue` frame BEFORE this response arrives, and both landing set
 			// the state — an append on top of the frame DUPLICATES the item
@@ -4692,8 +4824,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const cur = findCard(cardId);
 		get().updateCard(cardId, {
 			status: "streaming",
-			title: isFirstMessage ? text.slice(0, 40) : card.title,
-			messages: [...(cur?.messages ?? []), { role: "user", text }],
+			title: isFirstMessage ? displayText.slice(0, 40) : card.title,
+			messages: [
+				...(cur?.messages ?? []),
+				{
+					role: "user",
+					text: displayText,
+					...(images.length > 0 ? { images } : {}),
+				},
+			],
 		});
 		return true;
 	},

@@ -2507,6 +2507,34 @@ describe("Editor component", () => {
 			assert.strictEqual(editor.isShowingAutocomplete(), false);
 		});
 
+		it("fills slash command on Enter without submitting", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted: string | undefined;
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "model", description: "Change model" },
+					{ name: "help", description: "Show help" },
+				],
+				process.cwd(),
+			);
+			editor.setAutocompleteProvider(provider);
+
+			editor.handleInput("/");
+			await flushAutocomplete();
+			assert.strictEqual(editor.isShowingAutocomplete(), true);
+
+			editor.handleInput("\x1b[B"); // Down to second item
+			editor.handleInput("\r"); // Enter confirms selection
+
+			assert.strictEqual(editor.getText(), "/help ");
+			assert.strictEqual(editor.isShowingAutocomplete(), false);
+			assert.strictEqual(submitted, undefined);
+		});
+
 		it("applies exact typed slash-argument value on Enter even when first item is highlighted", async () => {
 			const editor = new Editor(createTestTUI(), defaultEditorTheme);
 
