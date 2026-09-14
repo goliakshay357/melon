@@ -458,7 +458,7 @@ export function PromptComposer({
                                 setCmdHighlight((h) => (h - 1 + cmdItems.length) % cmdItems.length);
                                 return;
                             }
-                            if (e.key === 'Tab') {
+                            if (e.key === 'Tab' || e.key === 'Enter') {
                                 e.preventDefault();
                                 const pick = cmdItems[cmdHighlight] ?? cmdItems[0];
                                 if (pick) {
@@ -472,7 +472,6 @@ export function PromptComposer({
                                 setCmdDismissed(true);
                                 return;
                             }
-                            // Enter falls through to normal submit — the command runs.
                         }
                         // Mention autocomplete (keyboard-first).
                         // While an @token is being typed: Enter/Tab MUST complete the
