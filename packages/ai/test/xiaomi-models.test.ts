@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getModel, getModels } from "../src/compat.ts";
 
 describe("Xiaomi MiMo models", () => {
-	it.each(["mimo-v2-flash", "mimo-v2-omni"] as const)("keeps %s on the API billing provider", (modelId) => {
+	it.each(["mimo-v2.5"] as const)("keeps %s on the API billing provider", (modelId) => {
 		expect(getModel("xiaomi", modelId)).toBeDefined();
 	});
 

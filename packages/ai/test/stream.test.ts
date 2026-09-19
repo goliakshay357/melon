@@ -448,7 +448,7 @@ describe("Generate E2E Tests", () => {
 	describe.skipIf(!process.env.DEEPSEEK_API_KEY)(
 		"DeepSeek Provider (deepseek-v4-flash via OpenAI Completions)",
 		() => {
-			const llm = getModel("deepseek", "deepseek-v4-flash");
+			const llm = getModel("deepseek", "deepseek-flash");
 
 			it("should complete basic text generation", { retry: 3 }, async () => {
 				await basicTextGeneration(llm);
@@ -1432,7 +1432,7 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe("OpenAI Codex Provider (gpt-5.4)", () => {
-		const llm = getModel("openai-codex", "gpt-5.4");
+		const llm = getModel("openai-codex", "gpt-5.5");
 
 		it.skipIf(!openaiCodexToken)("should complete basic text generation", { retry: 3 }, async () => {
 			await basicTextGeneration(llm, { apiKey: openaiCodexToken });
