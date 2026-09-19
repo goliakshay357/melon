@@ -135,3 +135,56 @@ export function upsertCustomModel(providerId: string, model: CustomModelInput): 
 	providers[providerId] = { ...existing, models };
 	writeModelsJson({ ...config, providers });
 }
+
+export interface CustomModelEntry {
+	provider: string;
+	id: string;
+	name?: string;
+	reasoning?: boolean;
+	contextWindow?: number;
+	maxTokens?: number;
+}
+
+/** All custom models added via the GUI, across providers. */
+export function listCustomModels(): CustomModelEntry[] {
+	let config: ModelsJson;
+	try {
+		config = readModelsJson();
+	} catch {
+		return [];
+	}
+	const out: CustomModelEntry[] = [];
+	for (const [provider, providerConfig] of Object.entries(config.providers ?? {})) {
+		if (!Array.isArray(providerConfig.models)) continue;
+		for (const raw of providerConfig.models) {
+			if (!raw || typeof raw !== "object") continue;
+			const m = raw as Record<string, unknown>;
+			const id = typeof m.id === "string" ? m.id : "";
+			if (!id) continue;
+			out.push({
+				provider,
+				id,
+				...(typeof m.name === "string" && m.name.trim() ? { name: m.name.trim() } : {}),
+				...(typeof m.reasoning === "boolean" ? { reasoning: m.reasoning } : {}),
+				...(typeof m.contextWindow === "number" ? { contextWindow: m.contextWindow } : {}),
+				...(typeof m.maxTokens === "number" ? { maxTokens: m.maxTokens } : {}),
+			});
+		}
+	}
+	return out;
+}
+
+/** Remove one custom model; returns true when an entry was removed. */
+export function removeCustomModel(providerId: string, modelId: string): boolean {
+	const config = readModelsJson();
+	const providerConfig = config.providers?.[providerId];
+	if (!providerConfig || !Array.isArray(providerConfig.models)) return false;
+	const before = providerConfig.models.length;
+	const models = providerConfig.models.filter(
+		(m) => !(m && typeof m === "object" && (m as { id?: unknown }).id === modelId),
+	);
+	if (models.length === before) return false;
+	const providers = { ...config.providers, [providerId]: { ...providerConfig, models } };
+	writeModelsJson({ ...config, providers });
+	return true;
+}

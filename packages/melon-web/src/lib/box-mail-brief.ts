@@ -141,3 +141,8 @@ export async function buildBoxMailBrief(opts: {
 	boxMailLog("buildBrief done", { briefChars: brief.length });
 	return brief;
 }
+
+/** Strip several @tokens at once (used when the routed target spans multiple tokens). */
+export function stripMentionTokens(tokens: string[], text: string): string {
+	return tokens.reduce((acc, token) => stripMentionToken(acc, token), text);
+}

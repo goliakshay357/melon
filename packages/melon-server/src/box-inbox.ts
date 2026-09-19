@@ -249,6 +249,16 @@ export function approveBoxInboxItem(
 	return item;
 }
 
+/** Edit a pending inbound mail's body before Approve. Undefined = not editable. */
+export function editBoxInboxItem(cardId: string, mailId: string, body: string): BoxInboxItem | undefined {
+	const trimmed = body.trim();
+	if (!trimmed) throw Object.assign(new Error("body required"), { statusCode: 400 });
+	const item = getBoxInboxItem(cardId, mailId);
+	if (!item || item.direction !== "in" || item.status !== "pending") return undefined;
+	item.body = trimmed;
+	return item;
+}
+
 export function dismissBoxInboxItem(cardId: string, mailId: string): BoxInboxItem | undefined {
 	const list = inboxByCard.get(cardId);
 	if (!list) return undefined;

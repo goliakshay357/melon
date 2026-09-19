@@ -1,6 +1,7 @@
 import { create } from "zustand";
 
 const STORAGE_KEY = "melon:developerDebugger";
+const SESSION_JSON_KEY = "melon:developerSessionJson";
 
 function readLocal(): boolean {
 	try {
@@ -39,10 +40,41 @@ async function persistToServer(enabled: boolean): Promise<void> {
 	}
 }
 
+async function persistSessionJsonToServer(enabled: boolean): Promise<void> {
+	try {
+		await fetch("/settings", {
+			method: "PUT",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ developerSessionJson: enabled }),
+		});
+	} catch {
+		/* offline — localStorage still has it */
+	}
+}
+
 interface DeveloperState {
 	/** When true, card debugger chrome and Electron DevTools shortcuts are allowed. */
 	debuggerEnabled: boolean;
 	setDebuggerEnabled: (enabled: boolean) => void;
+	/** When true, chat cards show the raw session-JSON toggle. */
+	sessionJsonEnabled: boolean;
+	setSessionJsonEnabled: (enabled: boolean) => void;
+}
+
+function readSessionJson(): boolean {
+	try {
+		return localStorage.getItem(SESSION_JSON_KEY) === "1";
+	} catch {
+		return false;
+	}
+}
+
+function writeSessionJson(enabled: boolean): void {
+	try {
+		localStorage.setItem(SESSION_JSON_KEY, enabled ? "1" : "0");
+	} catch {
+		/* private mode / locked storage */
+	}
 }
 
 export const useDeveloperStore = create<DeveloperState>((set) => ({
@@ -53,13 +85,19 @@ export const useDeveloperStore = create<DeveloperState>((set) => ({
 		notifyDesktop(enabled);
 		void persistToServer(enabled);
 	},
+	sessionJsonEnabled: readSessionJson(),
+	setSessionJsonEnabled: (enabled) => {
+		writeSessionJson(enabled);
+		set({ sessionJsonEnabled: enabled });
+		void persistSessionJsonToServer(enabled);
+	},
 }));
 
 export async function hydrateDeveloperFromServer(): Promise<void> {
 	try {
 		const res = await fetch("/settings", { cache: "no-store" });
 		if (!res.ok) return;
-		const data = (await res.json()) as { settings?: { developerDebugger?: unknown } };
+		const data = (await res.json()) as { settings?: { developerDebugger?: unknown; developerSessionJson?: unknown } };
 		const disk = data.settings?.developerDebugger === true;
 
 		let localRaw: string | null = null;
@@ -76,12 +114,31 @@ export async function hydrateDeveloperFromServer(): Promise<void> {
 			}
 			notifyDesktop(local);
 			if (disk !== local) await persistToServer(local);
-			return;
+		} else {
+			writeLocal(disk);
+			useDeveloperStore.setState({ debuggerEnabled: disk });
+			notifyDesktop(disk);
 		}
-
-		writeLocal(disk);
-		useDeveloperStore.setState({ debuggerEnabled: disk });
-		notifyDesktop(disk);
+		// Session-JSON viewer: localStorage wins, mirroring the debugger gate.
+		let jsonRaw: string | null = null;
+		try {
+			jsonRaw = localStorage.getItem(SESSION_JSON_KEY);
+		} catch {
+			jsonRaw = null;
+		}
+		if (jsonRaw === "1" || jsonRaw === "0") {
+			const jsonLocal = jsonRaw === "1";
+			if (useDeveloperStore.getState().sessionJsonEnabled !== jsonLocal) {
+				useDeveloperStore.setState({ sessionJsonEnabled: jsonLocal });
+			}
+			if (data.settings?.developerSessionJson !== jsonLocal) {
+				void persistSessionJsonToServer(jsonLocal);
+			}
+		} else {
+			const jsonDisk = data.settings?.developerSessionJson === true;
+			writeSessionJson(jsonDisk);
+			useDeveloperStore.setState({ sessionJsonEnabled: jsonDisk });
+		}
 	} catch {
 		notifyDesktop(useDeveloperStore.getState().debuggerEnabled);
 	}

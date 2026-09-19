@@ -8,11 +8,13 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, X } from 'lucide-react';
+import { Braces, Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, X } from 'lucide-react';
 import { askChoice } from '@/components/dialogs';
 import { useImageLightbox } from '@/components/image-lightbox';
+import { extractSessionPaths, sessionChipLabel } from '@/lib/session-links';
 import { useCanvasStore } from '@/store/canvas-store';
 import { useDeveloperStore } from '@/settings/developer-store';
+import { SessionJsonViewer } from '@/components/session-json-viewer';
 import { boxMailLog } from '@/lib/box-mail-brief';
 import { MarkdownBlock } from '@/components/markdown-block';
 import { PromptComposer } from '@/components/prompt-composer';
@@ -428,6 +430,36 @@ const MessageBlocks = ReactMemo(function MessageBlocks({
                 </div>
             ),
         });
+    }
+    // Cited past sessions render as chips: click opens that session in a new
+    // box beside this one (delegation edge), not in the browser.
+    if (m.role === 'assistant' && !streaming) {
+        const sessionPaths = extractSessionPaths(m.text);
+        if (sessionPaths.length > 0) {
+            sections.push({
+                key: 'sessionLinks',
+                node: (
+                    <div className="flex flex-wrap gap-1.5">
+                        {sessionPaths.map((p) => (
+                            <button
+                                key={p}
+                                type="button"
+                                title={`Open in a new box — ${p}`}
+                                onClick={() => {
+                                    void useCanvasStore
+                                        .getState()
+                                        .resumeSession(p, { parentId: cardId });
+                                }}
+                                className="flex max-w-full items-center gap-1.5 rounded-md border border-border bg-secondary/50 px-2 py-1 text-[10px] text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                            >
+                                <History className="size-3 shrink-0" />
+                                <span className="truncate">{sessionChipLabel(p)}</span>
+                            </button>
+                        ))}
+                    </div>
+                ),
+            });
+        }
     }
 
     return (
@@ -1397,6 +1429,7 @@ function ChatCardNodeInner({
     const sendMessage = useCanvasStore((s) => s.sendMessage);
     const serverOffline = useCanvasStore((s) => s.serverOffline);
     const debuggerEnabled = useDeveloperStore((s) => s.debuggerEnabled);
+    const sessionJsonEnabled = useDeveloperStore((s) => s.sessionJsonEnabled);
     const showDebugConsole = debuggerEnabled && card?.debug === true;
     const { setCenter, getZoom } = useReactFlow();
     // The composer draft lives on the card in the store, not in component state:
@@ -1422,7 +1455,7 @@ function ChatCardNodeInner({
         },
         [id],
     );
-    const [view, setView] = useState<'chat' | 'trajectory'>('chat');
+    const [view, setView] = useState<'chat' | 'trajectory' | 'json'>('chat');
     const [editingTitle, setEditingTitle] = useState(false);
     const [highlightedIndex, setHighlightedIndex] = useState(-1);
     const [viewportPromptIndex, setViewportPromptIndex] = useState(-1);
@@ -1892,6 +1925,25 @@ function ChatCardNodeInner({
                 </span>
             )}
 
+            {sessionJsonEnabled && card.sessionFile ? (
+                <button
+                    type="button"
+                    className={cn(
+                        'nodrag shrink-0 rounded-md p-1 transition-colors',
+                        view === 'json'
+                            ? 'bg-primary/15 text-primary'
+                            : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
+                    )}
+                    onClick={(e) => {
+                        e.stopPropagation();
+                        setView(view === 'json' ? 'chat' : 'json');
+                    }}
+                    title="Session JSON — raw transcript, system prompt, last request"
+                >
+                    <Braces className="size-4" />
+                </button>
+            ) : null}
+
             {isMax ? (
                 <>
                     {/* Context only when it starts to matter — avoid chrome noise. */}
@@ -1962,24 +2014,6 @@ function ChatCardNodeInner({
                                 {Math.round(card.contextUsage.percent)}%
                             </span>
                         </div>
-                    )}
-                    {/* TRAJECTORY DISABLED — re-enable later by changing {false && ...} to {true && ...} */}
-                    {false && (
-                        <button
-                            className={cn(
-                                'nodrag rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
-                                view === 'trajectory'
-                                    ? 'bg-accent/15 text-accent ring-1 ring-inset ring-accent/40'
-                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-                            )}
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                setView(view === 'trajectory' ? 'chat' : 'trajectory');
-                            }}
-                            title="Trajectory debugger"
-                        >
-                            🧭
-                        </button>
                     )}
                     <button
                         className="nodrag relative flex items-center gap-0.5 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
@@ -2356,7 +2390,11 @@ function ChatCardNodeInner({
                         </button>
                     </div>
                 ) : null}
-                {view === 'trajectory' ? trajectoryBody : messagesBody(scrollRef)}
+                {view === 'trajectory'
+                    ? trajectoryBody
+                    : view === 'json'
+                        ? <SessionJsonViewer cardId={id} sessionFile={card.sessionFile} />
+                        : messagesBody(scrollRef)}
                 {showDebugConsole && <DebugConsole logs={card.logs ?? []} />}
                 {footerInput}
             </div>
@@ -2437,7 +2475,9 @@ function ChatCardNodeInner({
                                 </div>
                             </div>
                         )}
-                        {view === 'trajectory' ? (
+                        {view === 'json' ? (
+                            <SessionJsonViewer cardId={id} sessionFile={card.sessionFile} className="mx-5 mb-4 md:mx-8" />
+                        ) : view === 'trajectory' ? (
                             <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col px-5 md:px-8">
                                 <TrajectoryView card={card} />
                             </div>

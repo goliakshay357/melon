@@ -115,6 +115,8 @@ export function SettingsPage() {
     const setTheme = useThemeStore((s) => s.setTheme);
     const debuggerEnabled = useDeveloperStore((s) => s.debuggerEnabled);
     const setDebuggerEnabled = useDeveloperStore((s) => s.setDebuggerEnabled);
+    const sessionJsonEnabled = useDeveloperStore((s) => s.sessionJsonEnabled);
+    const setSessionJsonEnabled = useDeveloperStore((s) => s.setSessionJsonEnabled);
 
     const inEditor = creating || editingId !== null;
 
@@ -183,6 +185,35 @@ export function SettingsPage() {
                                 <p className="mt-0.5 text-[11px] text-muted-foreground">
                                     Tools for inspecting Melon itself. Off by default.
                                 </p>
+                            </div>
+                            <div className="rounded-lg border border-border px-3 py-2">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div className="min-w-0">
+                                        <p className="text-xs font-medium text-card-foreground">Session JSON viewer</p>
+                                        <p className="text-[10px] text-muted-foreground">
+                                            Show a {'}'} toggle on every chat box: raw session transcript, entry
+                                            by entry, plus the system prompt the model receives. Read-only.
+                                        </p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        role="switch"
+                                        aria-checked={sessionJsonEnabled}
+                                        aria-label="Session JSON viewer"
+                                        onClick={() => setSessionJsonEnabled(!sessionJsonEnabled)}
+                                        className={cn(
+                                            'relative h-5 w-9 shrink-0 overflow-hidden rounded-full transition-colors',
+                                            sessionJsonEnabled ? 'bg-primary' : 'bg-muted',
+                                        )}
+                                    >
+                                        <span
+                                            className={cn(
+                                                'absolute top-0.5 left-0.5 size-4 rounded-full bg-background shadow-sm transition-transform duration-200 ease-out',
+                                                sessionJsonEnabled && 'translate-x-4',
+                                            )}
+                                        />
+                                    </button>
+                                </div>
                             </div>
                             <div className="rounded-lg border border-border px-3 py-2">
                                 <div className="flex items-center justify-between gap-3">

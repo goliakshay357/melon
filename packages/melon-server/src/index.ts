@@ -26,7 +26,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Message, uuidv7 } from "@earendil-works/pi-ai";
 import {
@@ -34,6 +34,7 @@ import {
 	createAgentSessionRuntime,
 	createAgentSessionServices,
 	getAgentDir,
+	getCapturedProviderRequest,
 	HANDOFF_ARTIFACT_SYSTEM_PROMPT,
 	MERGE_ARTIFACT_SYSTEM_PROMPT,
 	ModelRuntime,
@@ -77,6 +78,7 @@ import {
 import {
 	approveBoxInboxItem,
 	dismissBoxInboxItem,
+	editBoxInboxItem,
 	enqueueBoxMail,
 	getBoxInboxItem,
 	inboxSnapshot,
@@ -97,6 +99,7 @@ import {
 	setBoxPeers,
 	unbindBoxMailHost,
 } from "./box-mail-host.ts";
+import { boxMailFileLog, mailBodyPreview } from "./box-mail-log.ts";
 import { inspectCanvasShare, shareCanvasWork } from "./canvas-share.ts";
 import {
 	CLAUDE_BRIDGE_PROVIDER_ID,
@@ -147,7 +150,13 @@ import { fileExists, noteFiles, readTextFile, resolveInside, searchFiles } from 
 import { fuzzyScore } from "./fuzzy.ts";
 import { melonAskQuestionExtensionPath } from "./melon-ask-question.ts";
 import { melonSendToBoxExtensionPath } from "./melon-send-to-box.ts";
-import { type CustomModelInput, parseCustomModelInput, upsertCustomModel } from "./model-catalog.ts";
+import {
+	type CustomModelInput,
+	listCustomModels,
+	parseCustomModelInput,
+	removeCustomModel,
+	upsertCustomModel,
+} from "./model-catalog.ts";
 import { createDeltaPump, createNoteJob, emitNoteJob, getNoteJob } from "./note-jobs.ts";
 import {
 	createManual,
@@ -169,6 +178,7 @@ import {
 	uniqueHandoffFileName,
 	wireIsStale,
 } from "./notes.ts";
+import { sessionBoundaryExtensionPath } from "./session-boundary.ts";
 import {
 	abortCurrentIsolationTurn,
 	beginIsolationTurn,
@@ -180,6 +190,7 @@ import {
 	queueDisplays,
 	SessionRegistry,
 } from "./session-registry.ts";
+import { sessionSearchExtensionPath } from "./session-search.ts";
 
 const IMAGE_MIME_OK = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
@@ -296,6 +307,10 @@ async function getModelRuntime(): Promise<ModelRuntime> {
 /** Bundled provider extensions for session runtimes (picker + session catalogs match). */
 function bundledSessionExtensionPaths(): string[] {
 	const paths: string[] = [];
+	const boundary = sessionBoundaryExtensionPath();
+	if (boundary) paths.push(boundary);
+	const search = sessionSearchExtensionPath();
+	if (search) paths.push(search);
 	const askQuestion = melonAskQuestionExtensionPath();
 	if (askQuestion) paths.push(askQuestion);
 	const sendToBox = melonSendToBoxExtensionPath();
@@ -508,6 +523,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			markBoxInboxDelivered(cardId, item.id);
 			broadcastInbox(cardId);
 			console.log("[box-mail] flush done", { cardId, mailId: item.id, delivery: result.delivery });
+			boxMailFileLog("deliver", {
+				cardId,
+				mailId: item.id,
+				delivery: result.delivery,
+				bodyPreview: mailBodyPreview(item.body),
+			});
 			if (result.delivery === "queued") {
 				console.log("[box-mail] wake queued for afterAgentIdle", { cardId });
 				return;
@@ -719,6 +740,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					...(bundledExtensions.length > 0 ? { additionalExtensionPaths: bundledExtensions } : {}),
 				},
 			});
+			// Debug viewer: new sessions capture provider requests when the
+			// toggle is already on.
+			if (loadSettings().developerSessionJson === true) {
+				try {
+					services.settingsManager.setDebugRequestDump(true);
+				} catch {
+					/* non-fatal */
+				}
+			}
 			return {
 				...(await createAgentSessionFromServices({
 					services,
@@ -3676,6 +3706,92 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { ok: true, label: `${providerId}/${model.id}` };
 	});
 
+	// Custom models added via the GUI — what models.json holds, per provider.
+	app.get("/models/custom", async () => ({
+		models: listCustomModels(),
+	}));
+
+	// Remove a custom model from the shared models.json and recompose the runtime.
+	app.delete("/models/custom", async (req, reply) => {
+		const body = (req.body ?? {}) as Record<string, unknown>;
+		const providerId = typeof body.provider === "string" ? body.provider.trim() : "";
+		const modelId = typeof body.id === "string" ? body.id.trim() : "";
+		if (!providerId || !modelId) {
+			return reply.code(400).send({ error: "provider and id are required." });
+		}
+		const mr = await getModelRuntime();
+		try {
+			if (!removeCustomModel(providerId, modelId)) {
+				return reply.code(404).send({ error: `No custom model "${modelId}" on "${providerId}".` });
+			}
+			await mr.refresh({ allowNetwork: false });
+		} catch (e) {
+			return reply.code(500).send({ error: (e as Error).message });
+		}
+		return { ok: true };
+	});
+
+	// Raw session JSONL for the developer JSON viewer. Path must sit inside the
+	// agent dir's sessions/ tree — no other file is readable through this.
+	app.get("/sessions/raw", async (req, reply) => {
+		const requested = String((req.query as { sessionFile?: unknown }).sessionFile ?? "").trim();
+		if (!requested) return reply.code(400).send({ error: "sessionFile required" });
+		const sessionsRoot = join(getAgentDir(), "sessions");
+		const resolved = resolve(requested);
+		if (!resolved.startsWith(sessionsRoot + sep) || !resolved.endsWith(".jsonl")) {
+			return reply.code(400).send({ error: "sessionFile must be under the agent sessions directory" });
+		}
+		if (!existsSync(resolved)) return reply.code(404).send({ error: "no such session file" });
+		const text = readFileSync(resolved, "utf8");
+		return { path: resolved, lines: text.split("\n") };
+	});
+
+	// The assembled system prompt for an attached card's session (debug viewer).
+	app.get("/sessions/:cardId/system-prompt", async (req) => {
+		const { cardId } = req.params as { cardId: string };
+		const entry = registry.get(cardId);
+		// Fallback chain: live session prompt → base resource-loader prompt (the
+		// session only carries the per-turn override) → null when not attached.
+		let systemPrompt: string | null = null;
+		let source: "session" | "base" | null = null;
+		try {
+			const sp = entry?.runtime?.session?.systemPrompt;
+			if (typeof sp === "string" && sp.trim()) {
+				systemPrompt = sp;
+				source = "session";
+			}
+		} catch {
+			/* fall through to base */
+		}
+		if (systemPrompt === null) {
+			try {
+				const base = entry?.runtime?.services?.resourceLoader?.getSystemPrompt?.();
+				if (typeof base === "string" && base.trim()) {
+					systemPrompt = base;
+					source = "base";
+				}
+			} catch {
+				/* not available */
+			}
+		}
+		return { systemPrompt, source };
+	});
+
+	// The last provider request captured for this card's session (debug viewer,
+	// debugRequestDump setting). Null when capture is off or no turn has run.
+	app.get("/sessions/:cardId/last-request", async (req) => {
+		const { cardId } = req.params as { cardId: string };
+		const runtime = registry.get(cardId)?.runtime;
+		let sessionId: string | undefined;
+		try {
+			sessionId = runtime?.session.sessionManager.getSessionId();
+		} catch {
+			sessionId = undefined;
+		}
+		if (!sessionId) return { request: null };
+		return { request: getCapturedProviderRequest(sessionId) ?? null };
+	});
+
 	// Liveness probe — the frontend polls this to clear the "reconnecting" banner.
 	// `version` is the same identity stamped into DMG/AppImage/exe filenames.
 	app.get("/healthz", async () => ({
@@ -3859,6 +3975,14 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			replyReason: body?.replyReason ?? (body?.envelope as { replyReason?: unknown } | undefined)?.replyReason,
 			inReplyToMailId: body?.inReplyToMailId,
 		});
+		boxMailFileLog("send", {
+			fromCardId,
+			toCardId,
+			bodyPreview: mailBodyPreview(mailBody),
+			bodyChars: mailBody.length,
+			createdBy: body?.createdBy === "agent" ? "agent" : "user",
+			replyPolicy: body?.replyPolicy ?? (body?.envelope as { replyPolicy?: unknown } | undefined)?.replyPolicy,
+		});
 		if (!fromCardId || !toCardId) return reply.code(400).send({ error: "fromCardId and toCardId required" });
 		if (!mailBody) return reply.code(400).send({ error: "body required" });
 		if (fromCardId === toCardId) return reply.code(400).send({ error: "cannot mail a node to itself" });
@@ -4031,6 +4155,25 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return inboxSnapshot(cardId);
 	});
 
+	// Edit a pending inbound mail before Approve. Pending only — approved and
+	// delivered mail is history.
+	app.patch("/sessions/:cardId/inbox/:mailId", async (req, reply) => {
+		const { cardId, mailId } = req.params as { cardId: string; mailId: string };
+		const body = (req.body ?? {}) as { body?: unknown };
+		const newBody = typeof body.body === "string" ? body.body : "";
+		try {
+			const item = editBoxInboxItem(cardId, mailId, newBody);
+			if (!item) return reply.code(404).send({ error: "no pending inbox item" });
+			console.log("[box-mail] edit", { cardId, mailId, bodyChars: item.body.length });
+			boxMailFileLog("edit", { cardId, mailId, bodyPreview: mailBodyPreview(item.body) });
+			broadcastInbox(cardId);
+			return { ok: true, item };
+		} catch (e) {
+			const status = (e as { statusCode?: number }).statusCode ?? 500;
+			return reply.code(status).send({ error: (e as Error).message });
+		}
+	});
+
 	app.post("/sessions/:cardId/inbox/:mailId/approve", async (req, reply) => {
 		const { cardId, mailId } = req.params as { cardId: string; mailId: string };
 		const body = (req.body ?? {}) as {
@@ -4049,6 +4192,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		});
 		const item = approveBoxInboxItem(cardId, mailId);
 		if (!item) return reply.code(404).send({ error: "no pending inbox item" });
+		boxMailFileLog("approve", { cardId, mailId, bodyPreview: mailBodyPreview(item.body) });
 		broadcastInbox(cardId);
 
 		// Approve must be able to wake even if the card was never attached this process.
@@ -4111,6 +4255,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const { cardId, mailId } = req.params as { cardId: string; mailId: string };
 		const item = dismissBoxInboxItem(cardId, mailId);
 		if (!item) return reply.code(404).send({ error: "no pending inbox item" });
+		boxMailFileLog("dismiss", { cardId, mailId, bodyPreview: mailBodyPreview(item.body) });
 		broadcastInbox(cardId);
 		return { ok: true, item, ...inboxSnapshot(cardId) };
 	});
@@ -4289,6 +4434,21 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				return reply.code(400).send({ error: "developerDebugger must be a boolean" });
 			}
 			next.developerDebugger = body.developerDebugger;
+		}
+		if ("developerSessionJson" in body) {
+			if (typeof body.developerSessionJson !== "boolean") {
+				return reply.code(400).send({ error: "developerSessionJson must be a boolean" });
+			}
+			next.developerSessionJson = body.developerSessionJson;
+			// Mirror into every attached session's settings so request capture
+			// follows the viewer toggle without a restart.
+			for (const [, entry] of registry.entries()) {
+				try {
+					entry.runtime.session.settingsManager.setDebugRequestDump(body.developerSessionJson);
+				} catch {
+					/* session not attached yet */
+				}
+			}
 		}
 		if ("favoriteModels" in body) {
 			const raw = body.favoriteModels;
@@ -5021,12 +5181,44 @@ function ensureRetryDisabled(): void {
 	}
 }
 
+// Seed the Session Detective agent profile once — the box users @mention to
+// find which past session discussed a topic. Its description.md is the
+// standing-instruction script; session_search/session_read do the searching.
+function ensureSessionDetectiveProfile(): void {
+	const id = "session-detective";
+	if (readAgentProfile(id)) return;
+	try {
+		createAgentProfile({
+			id,
+			name: "Session Detective",
+			role: "Find past sessions and distill what was discussed",
+			descriptionMd: [
+				"You find which past Melon session discussed a topic, verify it, and send a distilled answer back to the card that asked you.",
+				"",
+				"## Every request",
+				"1. Call session_search with distinctive keywords from the request (avoid generic words).",
+				"2. If several sessions plausibly match, reply with a NUMBERED list — title, project, date, one-line excerpt each — and STOP. Wait for the user to pick. Never guess between candidates.",
+				"3. When one session is clearly the match (or the user picked), call session_read with focused keywords to verify the context before answering.",
+				"4. Distill the answer in plain language: what was discussed/decided, when, and any exact wording that matters (short quotes). Cite the session title and date.",
+				"5. End the answer with the session file path(s) you relied on (the file: line from session_search) — the chat UI renders them as clickable cards that open the session.",
+				"6. Send the final answer via send_to_box back to the card id in the request, then confirm here in one short line.",
+				"",
+				"Zero or contradictory matches: say so in this box instead of guessing. Read-only: never modify other sessions or files.",
+			].join("\n"),
+		});
+		console.error("[melon] seeded Session Detective agent profile");
+	} catch (e) {
+		console.error("[melon] detective profile seed failed:", (e as Error)?.message ?? e);
+	}
+}
+
 // Run directly? (vs imported by tests)
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop() ?? "")) {
 	const config = loadConfig();
 	seedFromPiIfEmpty();
 	materializeSkills();
 	ensureRetryDisabled();
+	ensureSessionDetectiveProfile();
 	const app = await buildApp();
 	const addr = await app.listen({ port: config.port, host: "127.0.0.1" });
 	const boundPort = Number(String(addr).split(":").pop());
