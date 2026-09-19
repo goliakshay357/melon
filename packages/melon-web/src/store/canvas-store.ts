@@ -656,9 +656,7 @@ interface CanvasState {
 	setCardDraft: (id: string, draft: string | ((prev: string) => string)) => void;
 	setCardDraftAttachments: (
 		id: string,
-		attachments:
-			| ComposerAttachment[]
-			| ((prev: ComposerAttachment[]) => ComposerAttachment[]),
+		attachments: ComposerAttachment[] | ((prev: ComposerAttachment[]) => ComposerAttachment[]),
 	) => void;
 	/** Pop image drafts stashed when a prompt was queued (cancel → composer). */
 	takeQueuedAttachments: (id: string, display: string) => ComposerAttachment[];
@@ -2058,25 +2056,22 @@ function ensureCardEventStream(cardId: string): void {
 				);
 				queuedAttachmentDrafts.delete(queueAttachmentKey(cardId, um.text));
 				const images =
-					um.images?.filter((img) => img.mimeType && img.data).map((img) => ({
-						mimeType: img.mimeType,
-						data: img.data,
-					})) ?? undefined;
+					um.images
+						?.filter((img) => img.mimeType && img.data)
+						.map((img) => ({
+							mimeType: img.mimeType,
+							data: img.data,
+						})) ?? undefined;
 				if (last?.role === "user" && last.text === um.text) {
 					if (images?.length && !last.images?.length) {
 						useCanvasStore.getState().updateCard(cardId, {
-							messages: cur.messages.map((m, i) =>
-								i === cur.messages.length - 1 ? { ...m, images } : m,
-							),
+							messages: cur.messages.map((m, i) => (i === cur.messages.length - 1 ? { ...m, images } : m)),
 						});
 					}
 					return;
 				}
 				useCanvasStore.getState().updateCard(cardId, {
-					messages: [
-						...cur.messages,
-						{ role: "user", text: um.text, ...(images?.length ? { images } : {}) },
-					],
+					messages: [...cur.messages, { role: "user", text: um.text, ...(images?.length ? { images } : {}) }],
 				});
 			} else if ((data as { type: string }).type === "note_injected") {
 				// A handoff note was delivered into this card (wire from a note
@@ -3410,12 +3405,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const cardSize = size ?? currentSpawnSize();
 		// Never drop a new card on top of an existing one. `findFreeSpot` keeps the
 		// requested position when it is free and nudges only when occupied.
-		const placed = findFreeSpot(
-			get().cards,
-			spawnPosition(position, cardSize),
-			cardSize.width,
-			cardSize.height,
-		);
+		const placed = findFreeSpot(get().cards, spawnPosition(position, cardSize), cardSize.width, cardSize.height);
 		const card: SessionCard = {
 			id: forcedId ?? newCardId(),
 			title: parent ? `↳ ${parent.title}`.slice(0, 44) : "New card",
@@ -3866,10 +3856,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	setCardDraftAttachments(id, attachments) {
 		patchCardInStore(id, (c) => ({
 			...c,
-			draftAttachments:
-				typeof attachments === "function"
-					? attachments(c.draftAttachments ?? [])
-					: attachments,
+			draftAttachments: typeof attachments === "function" ? attachments(c.draftAttachments ?? []) : attachments,
 		}));
 	},
 
@@ -4568,10 +4555,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					...(Array.isArray(m.images) && m.images.length > 0
 						? {
 								images: m.images
-									.filter(
-										(img: any) =>
-											typeof img?.mimeType === "string" && typeof img?.data === "string",
-									)
+									.filter((img: any) => typeof img?.mimeType === "string" && typeof img?.data === "string")
 									.map((img: any) => ({
 										mimeType: img.mimeType as string,
 										data: img.data as string,

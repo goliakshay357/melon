@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as RadixDialog from '@radix-ui/react-dialog';
-import { ChevronRight, KeyRound, Loader2, LogIn, Search } from 'lucide-react';
+import { ChevronRight, KeyRound, Loader2, LogIn, Plus, RefreshCw, Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { notifyModelsUpdated, refreshModels } from '@/lib/models';
 import { normalizeProvider, type ProviderInfo } from '@/lib/providers';
 
 type BrowserLoginStatus = {
@@ -42,11 +43,13 @@ function ProviderRow({
 	busy,
 	onConnect,
 	onDisconnect,
+	onAddModel,
 }: {
 	provider: ProviderInfo;
 	busy: boolean;
 	onConnect: (p: ProviderInfo) => void;
 	onDisconnect: (p: ProviderInfo) => void;
+	onAddModel: (p: ProviderInfo) => void;
 }) {
 	const canConnect = provider.authTypes.length > 0;
 	return (
@@ -68,15 +71,25 @@ function ProviderRow({
 				) : null}
 			</div>
 			{provider.connected ? (
-				<button
-					type="button"
-					disabled={!provider.disconnectable || busy}
-					title={provider.disconnectable ? 'Disconnect' : 'Managed outside Melon'}
-					onClick={() => onDisconnect(provider)}
-					className="shrink-0 rounded-lg bg-secondary px-3 py-1.5 text-xs text-card-foreground transition-colors hover:bg-secondary/80 disabled:cursor-not-allowed disabled:opacity-50"
-				>
-					{busy ? 'Disconnecting…' : provider.disconnectable ? 'Disconnect' : 'Managed'}
-				</button>
+				<>
+					<button
+						type="button"
+						title="Add a custom model to this provider"
+						onClick={() => onAddModel(provider)}
+						className="grid size-7 shrink-0 place-items-center rounded-lg bg-secondary text-muted-foreground transition-colors hover:bg-secondary/80 hover:text-foreground"
+					>
+						<Plus className="size-3.5" />
+					</button>
+					<button
+						type="button"
+						disabled={!provider.disconnectable || busy}
+						title={provider.disconnectable ? 'Disconnect' : 'Managed outside Melon'}
+						onClick={() => onDisconnect(provider)}
+						className="shrink-0 rounded-lg bg-secondary px-3 py-1.5 text-xs text-card-foreground transition-colors hover:bg-secondary/80 disabled:cursor-not-allowed disabled:opacity-50"
+					>
+						{busy ? 'Disconnecting…' : provider.disconnectable ? 'Disconnect' : 'Managed'}
+					</button>
+				</>
 			) : (
 				<button
 					type="button"
@@ -97,12 +110,14 @@ function ProviderGroup({
 	busyId,
 	onConnect,
 	onDisconnect,
+	onAddModel,
 }: {
 	title: string;
 	providers: ProviderInfo[];
 	busyId: string | null;
 	onConnect: (p: ProviderInfo) => void;
 	onDisconnect: (p: ProviderInfo) => void;
+	onAddModel: (p: ProviderInfo) => void;
 }) {
 	return (
 		<section className="mb-4">
@@ -117,6 +132,7 @@ function ProviderGroup({
 						busy={busyId === p.id}
 						onConnect={onConnect}
 						onDisconnect={onDisconnect}
+						onAddModel={onAddModel}
 					/>
 				))}
 			</div>
@@ -145,6 +161,15 @@ export function ProvidersSection() {
 	const [browserLoginBusy, setBrowserLoginBusy] = useState(false);
 	const [browserLoginMessage, setBrowserLoginMessage] = useState('');
 	const browserPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+	const [catalogRefreshing, setCatalogRefreshing] = useState(false);
+	const [catalogRefreshNote, setCatalogRefreshNote] = useState('');
+
+	// "Add model" dialog: upsert a custom model into a connected provider.
+	const [addModelProvider, setAddModelProvider] = useState<ProviderInfo | null>(null);
+	const [addModel, setAddModel] = useState({ id: '', name: '', contextWindow: '', maxTokens: '', reasoning: false });
+	const [savingModel, setSavingModel] = useState(false);
+	const [modelError, setModelError] = useState('');
 
 	const load = () =>
 		fetch('/auth/providers')
@@ -292,6 +317,53 @@ export function ProvidersSection() {
 		void load();
 	};
 
+	const refreshCatalog = async () => {
+		setCatalogRefreshing(true);
+		setCatalogRefreshNote('');
+		const r = await refreshModels(true);
+		setCatalogRefreshing(false);
+		setCatalogRefreshNote(r.ok ? `Catalog refreshed — ${r.total} models.` : (r.error ?? 'Refresh failed.'));
+	};
+
+	const openAddModel = (p: ProviderInfo) => {
+		setAddModel({ id: '', name: '', contextWindow: '', maxTokens: '', reasoning: false });
+		setModelError('');
+		setAddModelProvider(p);
+	};
+
+	const saveCustomModel = async () => {
+		if (!addModelProvider || !addModel.id.trim()) return;
+		setSavingModel(true);
+		setModelError('');
+		try {
+			const body: Record<string, unknown> = {
+				provider: addModelProvider.id,
+				id: addModel.id.trim(),
+			};
+			if (addModel.name.trim()) body.name = addModel.name.trim();
+			if (addModel.contextWindow.trim()) body.contextWindow = Number(addModel.contextWindow.trim());
+			if (addModel.maxTokens.trim()) body.maxTokens = Number(addModel.maxTokens.trim());
+			if (addModel.reasoning) body.reasoning = true;
+			const res = await fetch('/models/custom', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify(body),
+			});
+			const d = (await res.json().catch(() => ({}))) as { error?: string };
+			if (!res.ok) {
+				setModelError(d.error ?? 'Failed to add model');
+				return;
+			}
+			setAddModelProvider(null);
+			// The server recomposed its runtime — every open picker refetches.
+			notifyModelsUpdated();
+		} catch {
+			setModelError('Network error adding model');
+		} finally {
+			setSavingModel(false);
+		}
+	};
+
 	return (
 		<div className="flex min-h-0 flex-1 flex-col">
 			<div className="shrink-0">
@@ -307,6 +379,20 @@ export function ProvidersSection() {
 						placeholder="Search providers"
 						className="w-full rounded-md border border-input bg-background py-1.5 pl-8 pr-2 text-xs outline-none focus:border-ring"
 					/>
+				</div>
+				<div className="mt-2 flex items-center justify-between gap-2">
+					<p className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground" title={catalogRefreshNote}>
+						{catalogRefreshNote}
+					</p>
+					<button
+						type="button"
+						disabled={catalogRefreshing}
+						onClick={() => void refreshCatalog()}
+						className="flex shrink-0 items-center gap-1.5 rounded-md bg-secondary px-2.5 py-1 text-[11px] text-card-foreground transition-colors hover:bg-secondary/80 disabled:opacity-50"
+					>
+						<RefreshCw className={cn('size-3', catalogRefreshing && 'animate-spin')} />
+						{catalogRefreshing ? 'Refreshing…' : 'Refresh models'}
+					</button>
 				</div>
 			</div>
 
@@ -324,6 +410,7 @@ export function ProvidersSection() {
 								busyId={busyId}
 								onConnect={connect}
 								onDisconnect={disconnect}
+								onAddModel={openAddModel}
 							/>
 						)}
 						{available.length > 0 && (
@@ -333,6 +420,7 @@ export function ProvidersSection() {
 								busyId={busyId}
 								onConnect={connect}
 								onDisconnect={disconnect}
+								onAddModel={openAddModel}
 							/>
 						)}
 					</>
@@ -443,6 +531,85 @@ export function ProvidersSection() {
 								onClick={() => void saveKey()}
 							>
 								{saving ? 'Saving…' : 'Save key'}
+							</button>
+						</div>
+					</RadixDialog.Content>
+				</RadixDialog.Portal>
+			</RadixDialog.Root>
+
+			{/* Add custom model. */}
+			<RadixDialog.Root
+				open={addModelProvider !== null}
+				onOpenChange={(o) => {
+					if (!o) setAddModelProvider(null);
+				}}
+			>
+				<RadixDialog.Portal>
+					<RadixDialog.Overlay className="fixed inset-0 z-[1000] bg-black/60" />
+					<RadixDialog.Content className={dialogContentClass} onKeyDown={(e) => e.stopPropagation()}>
+						<RadixDialog.Title className="text-sm font-semibold text-card-foreground">
+							Add model to {addModelProvider?.name}
+						</RadixDialog.Title>
+						<RadixDialog.Description className="mt-2 text-xs text-muted-foreground">
+							For models not in the catalog (previews, stealth releases). Saved to the shared
+							models.json, so the terminal TUI sees them too.
+						</RadixDialog.Description>
+						<div className="mt-3 space-y-2">
+							<input
+								autoFocus
+								value={addModel.id}
+								onChange={(e) => setAddModel((s) => ({ ...s, id: e.target.value }))}
+								placeholder="Model ID (e.g. stealth/union-alpha)"
+								className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
+							/>
+							<input
+								value={addModel.name}
+								onChange={(e) => setAddModel((s) => ({ ...s, name: e.target.value }))}
+								placeholder="Display name (optional)"
+								className="w-full rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
+							/>
+							<div className="flex gap-2">
+								<input
+									value={addModel.contextWindow}
+									onChange={(e) => setAddModel((s) => ({ ...s, contextWindow: e.target.value }))}
+									placeholder="Context window"
+									inputMode="numeric"
+									className="w-1/2 rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
+								/>
+								<input
+									value={addModel.maxTokens}
+									onChange={(e) => setAddModel((s) => ({ ...s, maxTokens: e.target.value }))}
+									placeholder="Max output tokens"
+									inputMode="numeric"
+									className="w-1/2 rounded-lg border border-input bg-background px-3 py-2 text-sm outline-none focus:border-ring"
+								/>
+							</div>
+							<label className="flex cursor-pointer items-center gap-2 text-xs text-card-foreground">
+								<input
+									type="checkbox"
+									checked={addModel.reasoning}
+									onChange={(e) => setAddModel((s) => ({ ...s, reasoning: e.target.checked }))}
+									className="size-3.5"
+								/>
+								Reasoning model
+							</label>
+						</div>
+						{modelError && <p className="mt-2 text-[11px] text-red-400">{modelError}</p>}
+						<div className="mt-4 flex justify-end gap-2">
+							<button
+								type="button"
+								className="rounded-lg px-3 py-1.5 text-xs text-muted-foreground hover:bg-secondary"
+								onClick={() => setAddModelProvider(null)}
+							>
+								Cancel
+							</button>
+							<button
+								type="button"
+								disabled={savingModel || !addModel.id.trim()}
+								className="rounded-lg bg-secondary px-3 py-1.5 text-xs text-card-foreground hover:bg-secondary/80 disabled:opacity-50"
+								onClick={() => void saveCustomModel()}
+							>
+								{savingModel ? 'Adding…' : 'Add model'}
 							</button>
 						</div>
 					</RadixDialog.Content>

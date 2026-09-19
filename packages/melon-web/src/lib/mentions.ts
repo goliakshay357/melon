@@ -158,7 +158,7 @@ export async function fetchFileCandidates(
 		}
 		const d = (await res.json()) as { files: FileCandidate[] };
 		return d.files;
-	} catch (e) {
+	} catch {
 		return [];
 	}
 }

@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-	boxMentionLabel,
-	randomWordPair,
-	specializedCardTitle,
-	uniqueWordPair,
-} from "../src/lib/agent-names";
+import { boxMentionLabel, randomWordPair, specializedCardTitle, uniqueWordPair } from "../src/lib/agent-names";
 
 describe("agent-names", () => {
 	it("builds word pairs like adjective-animal", () => {
@@ -32,8 +27,6 @@ describe("agent-names", () => {
 				profileName: "Rude agent",
 			}),
 		).toBe("swift-otter ( Rude agent )");
-		expect(boxMentionLabel({ title: "Chat", agentInstanceName: "calm-fox" })).toBe(
-			"calm-fox ( general )",
-		);
+		expect(boxMentionLabel({ title: "Chat", agentInstanceName: "calm-fox" })).toBe("calm-fox ( general )");
 	});
 });

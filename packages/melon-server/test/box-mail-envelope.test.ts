@@ -6,12 +6,12 @@ import {
 	inboxSnapshot,
 	markBoxInboxDelivered,
 } from "../src/box-inbox.ts";
+import { boxMailWakeText } from "../src/box-mail.ts";
 import {
 	BOX_MAIL_SCHEMA_VERSION,
 	coerceReplyPolicy,
 	resolveAndAssertOutboundEnvelope,
 } from "../src/box-mail-envelope.ts";
-import { boxMailWakeText } from "../src/box-mail.ts";
 
 describe("box-mail-envelope", () => {
 	beforeEach(() => clearBoxInboxes());

@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-	boxMailInboundText,
-	boxMailOutboundText,
-	boxMailWakeDisplay,
-	boxMailWakeText,
-} from "../src/box-mail.ts";
+import { boxMailInboundText, boxMailOutboundText, boxMailWakeDisplay, boxMailWakeText } from "../src/box-mail.ts";
 
 describe("box-mail helpers", () => {
 	it("formats outbound with target title and id", () => {

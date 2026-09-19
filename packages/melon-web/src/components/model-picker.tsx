@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ChevronDown, Search, Star } from 'lucide-react';
+import { ChevronDown, RefreshCw, Search, Star } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { useCanvasStore } from '@/store/canvas-store';
 import { normalizeProvider, type ProviderInfo } from '@/lib/providers';
 import {
 	buildModelSections,
 	normalizeModel,
+	onModelsUpdated,
+	refreshModels,
 	type ModelInfo,
 	type ModelSection,
 } from '@/lib/models';
@@ -36,6 +38,7 @@ export function ModelPicker({
 	const [catalogError, setCatalogError] = useState('');
 	const [recents, setRecents] = useState<string[]>([]);
 	const [favorites, setFavorites] = useState<string[]>([]);
+	const [refreshing, setRefreshing] = useState(false);
 	// `null` = provider list unavailable; fall back to showing every model rather
 	// than hiding the picker. A Set = only these providers may appear.
 	const [connectedProviders, setConnectedProviders] = useState<Set<string> | null>(null);
@@ -92,6 +95,22 @@ export function ModelPicker({
 		loadSettings();
 		loadConnectedProviders();
 	}, [open]);
+
+	// Catalog changes (manual refresh, custom model added) refetch in EVERY open
+	// picker, so all cards' dropdowns stay in sync without a reload.
+	useEffect(
+		onModelsUpdated(() => {
+			loadModels();
+			loadSettings();
+			loadConnectedProviders();
+		}),
+		[],
+	);
+
+	const hardRefresh = () => {
+		setRefreshing(true);
+		void refreshModels(true).finally(() => setRefreshing(false));
+	};
 
 	useEffect(() => {
 		const onDown = (e: MouseEvent) => {
@@ -196,7 +215,7 @@ export function ModelPicker({
 					) : (
 						<>
 							<div className="flex items-center gap-1.5 border-b border-border px-2 py-1.5">
-								<Search className="size-3 text-muted-foreground" />
+								<Search className="size-3 shrink-0 text-muted-foreground" />
 								<input
 									autoFocus
 									value={query}
@@ -204,6 +223,18 @@ export function ModelPicker({
 									placeholder="Search models"
 									className="w-full bg-transparent text-xs outline-none placeholder:text-muted-foreground"
 								/>
+								<button
+									type="button"
+									aria-label="Refresh models"
+									title="Refresh models"
+									className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground"
+									onClick={(e) => {
+										e.stopPropagation();
+										hardRefresh();
+									}}
+								>
+									<RefreshCw className={cn('size-3', refreshing && 'animate-spin')} />
+								</button>
 							</div>
 
 							<div className="nowheel nodrag max-h-64 overflow-y-auto py-1">

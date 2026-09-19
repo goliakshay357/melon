@@ -260,8 +260,7 @@ export function findFreeSpot(
 			// Right column first, then the same column, then left. Within a column,
 			// nearer cells win and below is preferred over above (mind-map flow).
 			const column = ix > 0 ? 0 : ix === 0 ? 1 : 2;
-			const rank =
-				column * 1_000_000 + Math.abs(ix) * 10_000 + Math.abs(iy) * 100 + (iy < 0 ? 1 : 0);
+			const rank = column * 1_000_000 + Math.abs(ix) * 10_000 + Math.abs(iy) * 100 + (iy < 0 ? 1 : 0);
 			candidates.push({ x: desired.x + ix * stepX, y: desired.y + iy * stepY, rank });
 		}
 	}
