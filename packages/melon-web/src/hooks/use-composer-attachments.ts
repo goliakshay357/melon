@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState, type DragEvent, type HTMLAttributes } from "react";
+import { type DragEvent, type HTMLAttributes, useCallback, useRef, useState } from "react";
 import {
 	dataTransferHasFiles,
 	fileRequiresImageCapability,
@@ -37,21 +37,14 @@ interface UseComposerAttachmentsInput {
 	readonly onNotice?: (title: string, detail: string) => void;
 }
 
-function notice(
-	onNotice: UseComposerAttachmentsInput["onNotice"],
-	title: string,
-	detail: string,
-): void {
+function notice(onNotice: UseComposerAttachmentsInput["onNotice"], title: string, detail: string): void {
 	if (onNotice) onNotice(title, detail);
 	else console.warn(`[composer] ${title}: ${detail}`);
 }
 
 /** Manages composer image attachment actions, validation, and drag/drop UI state. */
-export function useComposerAttachments(
-	input: UseComposerAttachmentsInput,
-): ComposerAttachmentsController {
-	const { attachments, disabled = false, imageSupported = true, onAttachmentsChange, onNotice } =
-		input;
+export function useComposerAttachments(input: UseComposerAttachmentsInput): ComposerAttachmentsController {
+	const { attachments, disabled = false, imageSupported = true, onAttachmentsChange, onNotice } = input;
 
 	const [isDraggingFiles, setIsDraggingFiles] = useState(false);
 	const [isProcessing, setIsProcessing] = useState(false);
@@ -87,9 +80,7 @@ export function useComposerAttachments(
 
 				for (const file of files) {
 					if (file.size > MAX_COMPOSER_ATTACHMENT_BYTES) {
-						errors.push(
-							`${file.name} exceeds the ${formatAttachmentSize(MAX_COMPOSER_ATTACHMENT_BYTES)} limit.`,
-						);
+						errors.push(`${file.name} exceeds the ${formatAttachmentSize(MAX_COMPOSER_ATTACHMENT_BYTES)} limit.`);
 						continue;
 					}
 
@@ -99,9 +90,7 @@ export function useComposerAttachments(
 					}
 
 					if (!imageSupported) {
-						errors.push(
-							`${file.name} is an image, but the selected model does not support images.`,
-						);
+						errors.push(`${file.name} is an image, but the selected model does not support images.`);
 						continue;
 					}
 
@@ -109,9 +98,7 @@ export function useComposerAttachments(
 						nextAttachments.push(await fileToComposerAttachment(file));
 					} catch (cause) {
 						errors.push(
-							cause instanceof UnsupportedAttachmentTypeError
-								? cause.message
-								: `Could not read ${file.name}.`,
+							cause instanceof UnsupportedAttachmentTypeError ? cause.message : `Could not read ${file.name}.`,
 						);
 					}
 				}

@@ -1,10 +1,5 @@
 import { expect, it } from "vitest";
-import {
-	buildModelSections,
-	cursorAutoDisplayName,
-	normalizeModel,
-	type ModelInfo,
-} from "@/lib/models";
+import { buildModelSections, cursorAutoDisplayName, type ModelInfo, normalizeModel } from "@/lib/models";
 
 function model(provider: string, providerName: string, id: string, name: string): ModelInfo {
 	return { label: `${provider}/${id}`, provider, providerName, id, name };
@@ -32,9 +27,7 @@ it("pins favorites and recents first without duplicating them", () => {
 	});
 	expect(sections.map((s) => s.title)).toEqual(["Favorites", "Recents", "Anthropic"]);
 	// The provider section keeps only the unpinned model.
-	expect(sections.find((s) => s.title === "Anthropic")?.models.map((m) => m.name)).toEqual([
-		"Claude Sonnet 4",
-	]);
+	expect(sections.find((s) => s.title === "Anthropic")?.models.map((m) => m.name)).toEqual(["Claude Sonnet 4"]);
 	// No OpenAI section: its only model is pinned.
 	expect(sections.some((s) => s.title === "OpenAI")).toBe(false);
 

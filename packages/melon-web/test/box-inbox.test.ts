@@ -14,10 +14,7 @@ function card(id: string, boxInbox: BoxInboxItem[]): SessionCard {
 	};
 }
 
-function mail(
-	id: string,
-	overrides: Partial<BoxInboxItem> = {},
-): BoxInboxItem {
+function mail(id: string, overrides: Partial<BoxInboxItem> = {}): BoxInboxItem {
 	return {
 		id,
 		direction: "in",
@@ -55,9 +52,6 @@ it("orders newest first and keeps the owning card", () => {
 });
 
 it("narrows to a single box when filtered", () => {
-	const rows = pendingInboxRows(
-		[card("a", [mail("a1")]), card("b", [mail("b1")])],
-		"b",
-	);
+	const rows = pendingInboxRows([card("a", [mail("a1")]), card("b", [mail("b1")])], "b");
 	expect(rows.map((r) => r.item.id)).toEqual(["b1"]);
 });

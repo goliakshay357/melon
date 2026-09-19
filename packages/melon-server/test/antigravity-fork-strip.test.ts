@@ -13,7 +13,7 @@ describe("stripAntigravitySessionEntriesFromSessionFile", () => {
 		const file = join(dir, "child.jsonl");
 		writeFileSync(
 			file,
-			[
+			`${[
 				JSON.stringify({ type: "session", id: "s1", cwd: dir, timestamp: "t0", version: 1 }),
 				JSON.stringify({
 					type: "custom",
@@ -24,7 +24,7 @@ describe("stripAntigravitySessionEntriesFromSessionFile", () => {
 				}),
 				JSON.stringify({ type: "message", id: "m1", parentId: "c1", timestamp: "t2", role: "user" }),
 				JSON.stringify({ type: "message", id: "m2", parentId: "m1", timestamp: "t3", role: "assistant" }),
-			].join("\n") + "\n",
+			].join("\n")}\n`,
 		);
 		expect(stripAntigravitySessionEntriesFromSessionFile(file)).toBe(1);
 		const out = readFileSync(file, "utf8")
@@ -41,11 +41,10 @@ describe("stripAntigravitySessionEntriesFromSessionFile", () => {
 	it("is a no-op when no antigravity session entries exist", () => {
 		const dir = mkdtempSync(join(tmpdir(), "melon-antigravity-fork-strip-"));
 		const file = join(dir, "child.jsonl");
-		const before =
-			[
-				JSON.stringify({ type: "session", id: "s1", cwd: dir, timestamp: "t0", version: 1 }),
-				JSON.stringify({ type: "message", id: "m1", parentId: null, timestamp: "t1", role: "user" }),
-			].join("\n") + "\n";
+		const before = `${[
+			JSON.stringify({ type: "session", id: "s1", cwd: dir, timestamp: "t0", version: 1 }),
+			JSON.stringify({ type: "message", id: "m1", parentId: null, timestamp: "t1", role: "user" }),
+		].join("\n")}\n`;
 		writeFileSync(file, before);
 		expect(stripAntigravitySessionEntriesFromSessionFile(file)).toBe(0);
 		expect(readFileSync(file, "utf8")).toBe(before);

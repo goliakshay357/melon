@@ -1,13 +1,15 @@
-import { mkdirSync, readFileSync } from "fs";
-import { join, tmpdir } from "path";
+import { mkdtempSync, readFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeEach, describe, expect, it } from "vitest";
-import { createEditTool, createWriteTool } from "../src/core/tools/write.ts";
+import { createEditTool } from "../src/core/tools/edit.ts";
+import { createWriteTool } from "../src/core/tools/write.ts";
 
 describe("Write Tool Diff Feature Test", () => {
 	let testDir: string;
 
 	beforeEach(() => {
-		testDir = mkdirSync(tmpdir(), { recursive: true });
+		testDir = mkdtempSync(join(tmpdir(), "sample-write-diff-"));
 	});
 
 	it("should show diff when writing to an existing file", async () => {
@@ -36,7 +38,8 @@ describe("Write Tool Diff Feature Test", () => {
 
 		// Check that the write operation completed successfully
 		expect(writeResult.content).toBeDefined();
-		expect(writeResult.content[0]?.text).toContain("Successfully wrote");
+		const firstBlock = writeResult.content[0];
+		expect(firstBlock && firstBlock.type === "text" && firstBlock.text).toContain("Successfully wrote");
 	});
 
 	it("should handle incremental writes to the same file", async () => {

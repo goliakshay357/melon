@@ -1,4 +1,4 @@
-export type ProviderAuthType = 'api_key' | 'oauth';
+export type ProviderAuthType = "api_key" | "oauth";
 
 export interface ProviderInfo {
 	id: string;
@@ -14,7 +14,7 @@ export interface ProviderInfo {
 	error?: string;
 }
 
-const OAUTH_ONLY_PROVIDERS = new Set(['claude-bridge', 'antigravity']);
+const OAUTH_ONLY_PROVIDERS = new Set(["claude-bridge", "antigravity"]);
 
 /**
  * Providers that authenticate only through a browser login. Used as a fallback
@@ -30,25 +30,23 @@ export function isOAuthOnlyProvider(id: string): boolean {
  * crash a component that reads `authTypes`.
  */
 export function normalizeProvider(raw: Record<string, unknown>): ProviderInfo | null {
-	const id =
-		typeof raw.id === 'string' ? raw.id : typeof raw.provider === 'string' ? raw.provider : '';
+	const id = typeof raw.id === "string" ? raw.id : typeof raw.provider === "string" ? raw.provider : "";
 	if (!id) return null;
 	const authTypes = (Array.isArray(raw.authTypes) ? raw.authTypes : []).filter(
-		(t): t is ProviderAuthType => t === 'api_key' || t === 'oauth',
+		(t): t is ProviderAuthType => t === "api_key" || t === "oauth",
 	);
 	const connected = raw.connected === true || raw.configured === true;
 	return {
 		id,
 		provider: id,
-		name: typeof raw.name === 'string' && raw.name.trim() ? raw.name : id,
+		name: typeof raw.name === "string" && raw.name.trim() ? raw.name : id,
 		connected,
-		disconnectable: typeof raw.disconnectable === 'boolean' ? raw.disconnectable : connected,
-		authTypes:
-			authTypes.length > 0 ? authTypes : OAUTH_ONLY_PROVIDERS.has(id) ? ['oauth'] : ['api_key'],
-		source: typeof raw.source === 'string' ? raw.source : undefined,
-		sourceLabel: typeof raw.sourceLabel === 'string' ? raw.sourceLabel : undefined,
-		keyPreview: typeof raw.keyPreview === 'string' ? raw.keyPreview : undefined,
-		authType: typeof raw.authType === 'string' ? raw.authType : undefined,
-		error: typeof raw.error === 'string' ? raw.error : undefined,
+		disconnectable: typeof raw.disconnectable === "boolean" ? raw.disconnectable : connected,
+		authTypes: authTypes.length > 0 ? authTypes : OAUTH_ONLY_PROVIDERS.has(id) ? ["oauth"] : ["api_key"],
+		source: typeof raw.source === "string" ? raw.source : undefined,
+		sourceLabel: typeof raw.sourceLabel === "string" ? raw.sourceLabel : undefined,
+		keyPreview: typeof raw.keyPreview === "string" ? raw.keyPreview : undefined,
+		authType: typeof raw.authType === "string" ? raw.authType : undefined,
+		error: typeof raw.error === "string" ? raw.error : undefined,
 	};
 }

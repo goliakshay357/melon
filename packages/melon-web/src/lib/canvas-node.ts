@@ -1,4 +1,4 @@
-import type { SessionCard } from '@/types/session-card';
+import type { SessionCard } from "@/types/session-card";
 
 /**
  * Resolve a canvas node from a sidebar entry.

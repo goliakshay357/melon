@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Check, Inbox, Send, Trash2 } from 'lucide-react';
+import { ArrowLeft, Check, Inbox, Pencil, Send, Trash2 } from 'lucide-react';
 import { useCanvasStore } from '@/store/canvas-store';
 import { pendingInboxRows, type PendingInboxRow } from '@/lib/box-inbox';
 import { cn } from '@/lib/utils';
@@ -75,6 +75,28 @@ export function InboxView({
 
 	const selected = rows.find((r) => r.item.id === selectedId) ?? rows[0] ?? null;
 	const selectedPolicy = selected ? replyPolicyLabel(selected.item.envelope?.replyPolicy) : null;
+
+	// Inline body edit before Approve.
+	const [editingBody, setEditingBody] = useState<string | null>(null);
+	const [savingEdit, setSavingEdit] = useState(false);
+	const editing = editingBody !== null && selected !== null;
+
+	const startEdit = (row: PendingInboxRow) => {
+		setEditingBody(row.item.body);
+	};
+	const cancelEdit = () => {
+		setEditingBody(null);
+	};
+	const saveEdit = async (row: PendingInboxRow) => {
+		if (savingEdit || editingBody === null || !editingBody.trim()) return;
+		setSavingEdit(true);
+		try {
+			const ok = await useCanvasStore.getState().editBoxInbox(row.card.id, row.item.id, editingBody);
+			if (ok) setEditingBody(null);
+		} finally {
+			setSavingEdit(false);
+		}
+	};
 
 	const advance = (removedId: string) => {
 		const idx = rows.findIndex((r) => r.item.id === removedId);
@@ -296,10 +318,51 @@ export function InboxView({
 													auto-approved
 												</span>
 											) : null}
+											{!editing && (
+												<button
+													type="button"
+													onClick={() => startEdit(selected)}
+													className="ml-auto flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 transition-colors hover:bg-secondary hover:text-foreground"
+													title="Edit before approving"
+												>
+													<Pencil className="size-3" />
+													Edit
+												</button>
+											)}
 										</div>
-										<p className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-card-foreground">
-											{selected.item.body}
-										</p>
+										{editing ? (
+											<div className="flex flex-col gap-2">
+												<textarea
+													autoFocus
+													value={editingBody ?? ''}
+													onChange={(e) => setEditingBody(e.target.value)}
+													rows={Math.min(14, Math.max(4, (editingBody ?? '').split('\n').length + 1))}
+													className="w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-[13px] leading-relaxed outline-none focus:border-ring"
+												/>
+												<div className="flex justify-end gap-2">
+													<button
+														type="button"
+														className="rounded-lg px-3 py-1.5 text-[12px] text-muted-foreground transition-colors hover:bg-secondary"
+														onClick={cancelEdit}
+													>
+														Cancel
+													</button>
+													<button
+														type="button"
+														disabled={savingEdit || !editingBody?.trim()}
+														className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-[12px] font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-50"
+														onClick={() => void saveEdit(selected)}
+													>
+														<Check className="size-3.5" />
+														{savingEdit ? 'Saving…' : 'Save'}
+													</button>
+												</div>
+											</div>
+										) : (
+											<p className="whitespace-pre-wrap break-words text-[13px] leading-relaxed text-card-foreground">
+												{selected.item.body}
+											</p>
+										)}
 									</div>
 								</div>
 

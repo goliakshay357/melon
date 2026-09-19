@@ -5,12 +5,7 @@ function card(id: string, x: number, y: number, w = 320, h = 260): SpawnCardLike
 	return { id, position: { x, y }, size: { width: w, height: h } };
 }
 
-function overlaps(
-	a: { x: number; y: number },
-	w: number,
-	h: number,
-	c: SpawnCardLike,
-): boolean {
+function overlaps(a: { x: number; y: number }, w: number, h: number, c: SpawnCardLike): boolean {
 	const cw = c.size?.width ?? 320;
 	const ch = c.size?.height ?? 260;
 	return a.x < c.position.x + cw && a.x + w > c.position.x && a.y < c.position.y + ch && a.y + h > c.position.y;

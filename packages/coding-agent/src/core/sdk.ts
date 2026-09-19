@@ -11,6 +11,7 @@ import { convertToLlm } from "./messages.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import { ModelRuntime } from "./model-runtime.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
+import { captureRequest } from "./request-dump.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
@@ -328,7 +329,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				},
 			});
 		},
-		onPayload: async (payload, _model) => {
+		onPayload: async (payload, model) => {
+			if (settingsManager.getDebugRequestDump() && model) {
+				captureRequest({
+					sessionId: sessionManager.getSessionId(),
+					model: `${model.provider}/${model.id}`,
+					capturedAt: new Date().toISOString(),
+					payload,
+				});
+			}
 			const runner = extensionRunnerRef.current;
 			if (!runner?.hasHandlers("before_provider_request")) {
 				return payload;

@@ -6,11 +6,7 @@ export function isNearBottom(el: HTMLElement, threshold = STICK_NEAR_PX): boolea
 }
 
 /** Update stickiness from an onScroll handler. */
-export function syncStuckToBottom(
-	el: HTMLElement,
-	stuck: { current: boolean },
-	threshold = STICK_NEAR_PX,
-): boolean {
+export function syncStuckToBottom(el: HTMLElement, stuck: { current: boolean }, threshold = STICK_NEAR_PX): boolean {
 	stuck.current = isNearBottom(el, threshold);
 	return stuck.current;
 }
@@ -55,12 +51,12 @@ export function attachStickUnlock(
 		// Finger drag down → content moves up → reading older material.
 		if (y - startY > 8) unlock();
 	};
-	el.addEventListener('wheel', onWheel, { passive: true });
-	el.addEventListener('touchstart', onTouchStart, { passive: true });
-	el.addEventListener('touchmove', onTouchMove, { passive: true });
+	el.addEventListener("wheel", onWheel, { passive: true });
+	el.addEventListener("touchstart", onTouchStart, { passive: true });
+	el.addEventListener("touchmove", onTouchMove, { passive: true });
 	return () => {
-		el.removeEventListener('wheel', onWheel);
-		el.removeEventListener('touchstart', onTouchStart);
-		el.removeEventListener('touchmove', onTouchMove);
+		el.removeEventListener("wheel", onWheel);
+		el.removeEventListener("touchstart", onTouchStart);
+		el.removeEventListener("touchmove", onTouchMove);
 	};
 }

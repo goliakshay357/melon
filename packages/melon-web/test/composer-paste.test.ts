@@ -34,9 +34,7 @@ describe("composer paste sanitization", () => {
 	});
 
 	it("falls back to HTML when text/plain is empty", () => {
-		const text = clipboardPlainText(
-			fakeClipboard({ html: "<div>line1</div><div>line2<br></div>" }),
-		);
+		const text = clipboardPlainText(fakeClipboard({ html: "<div>line1</div><div>line2<br></div>" }));
 		expect(htmlToPlainText("<div>line1</div>")).toContain("line1");
 		expect(plainTextFromClipboard(fakeClipboard({ html: "<p>hi</p>" }))).toContain("hi");
 		expect(text.replace(/\n+/g, "\n").trim()).toBe("line1\nline2");
@@ -47,19 +45,15 @@ describe("composer paste sanitization", () => {
 	});
 
 	it("falls back to uri-list", () => {
-		expect(
-			plainTextFromClipboard(
-				fakeClipboard({ uri: "#comment\nhttps://example.com\nhttps://b.test" }),
-			),
-		).toBe("https://example.com\nhttps://b.test");
+		expect(plainTextFromClipboard(fakeClipboard({ uri: "#comment\nhttps://example.com\nhttps://b.test" }))).toBe(
+			"https://example.com\nhttps://b.test",
+		);
 	});
 
 	it("prefers text/plain over HTML when both exist", () => {
-		expect(
-			plainTextFromClipboard(
-				fakeClipboard({ plain: "from-plain", html: "<b>from-html</b>" }),
-			),
-		).toBe("from-plain");
+		expect(plainTextFromClipboard(fakeClipboard({ plain: "from-plain", html: "<b>from-html</b>" }))).toBe(
+			"from-plain",
+		);
 	});
 
 	it("inserts at caret without clobbering surroundings", () => {

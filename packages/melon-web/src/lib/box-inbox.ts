@@ -1,4 +1,4 @@
-import type { BoxInboxItem, SessionCard } from '@/types/session-card';
+import type { BoxInboxItem, SessionCard } from "@/types/session-card";
 
 export type PendingInboxRow = { card: SessionCard; item: BoxInboxItem };
 
@@ -9,15 +9,12 @@ export type PendingInboxRow = { card: SessionCard; item: BoxInboxItem };
  * decision": inbound only, status pending. Outbound / approved / dismissed
  * items are history and never appear here.
  */
-export function pendingInboxRows(
-	cards: SessionCard[],
-	filterCardId?: string | null,
-): PendingInboxRow[] {
+export function pendingInboxRows(cards: SessionCard[], filterCardId?: string | null): PendingInboxRow[] {
 	const rows: PendingInboxRow[] = [];
 	for (const card of cards) {
 		if (filterCardId && card.id !== filterCardId) continue;
 		for (const item of card.boxInbox ?? []) {
-			if (item.direction === 'in' && item.status === 'pending') {
+			if (item.direction === "in" && item.status === "pending") {
 				rows.push({ card, item });
 			}
 		}

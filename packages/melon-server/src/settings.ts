@@ -26,6 +26,11 @@ export interface MelonSettings {
 	 * Electron DevTools (Cmd+Option+I). Default / absent = false.
 	 */
 	developerDebugger?: boolean;
+	/**
+	 * When true, chat boxes expose the raw session-JSON viewer toggle.
+	 * Default / absent = false.
+	 */
+	developerSessionJson?: boolean;
 }
 
 const settingsFile = () => join(getAgentDir(), "melon", "settings.json");

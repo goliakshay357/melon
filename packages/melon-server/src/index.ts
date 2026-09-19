@@ -26,7 +26,7 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Message, uuidv7 } from "@earendil-works/pi-ai";
 import {
@@ -34,6 +34,7 @@ import {
 	createAgentSessionRuntime,
 	createAgentSessionServices,
 	getAgentDir,
+	getCapturedProviderRequest,
 	HANDOFF_ARTIFACT_SYSTEM_PROMPT,
 	MERGE_ARTIFACT_SYSTEM_PROMPT,
 	ModelRuntime,
@@ -44,21 +45,6 @@ import {
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyPluginAsync } from "fastify";
-import {
-	boxMailInboundText,
-	deliverBoxMailToRecipient,
-	recordBoxMailOutbound,
-	sessionIsStreaming,
-} from "./box-mail.ts";
-import {
-	approveBoxInboxItem,
-	dismissBoxInboxItem,
-	enqueueBoxMail,
-	getBoxInboxItem,
-	inboxSnapshot,
-	markBoxInboxDelivered,
-	takeNextApprovedInbox,
-} from "./box-inbox.ts";
 import {
 	createAgentProfile,
 	deleteAgentProfile,
@@ -89,6 +75,31 @@ import {
 	runInBoundAntigravitySession,
 	stripAntigravitySessionEntriesFromSessionFile,
 } from "./antigravity-session-binding.ts";
+import {
+	approveBoxInboxItem,
+	dismissBoxInboxItem,
+	editBoxInboxItem,
+	enqueueBoxMail,
+	getBoxInboxItem,
+	inboxSnapshot,
+	markBoxInboxDelivered,
+	takeNextApprovedInbox,
+} from "./box-inbox.ts";
+import {
+	boxMailInboundText,
+	deliverBoxMailToRecipient,
+	recordBoxMailOutbound,
+	sessionIsStreaming,
+} from "./box-mail.ts";
+import {
+	type BoxPeer,
+	bindBoxMailHost,
+	formatBoxDirectory,
+	getBoxPeers,
+	setBoxPeers,
+	unbindBoxMailHost,
+} from "./box-mail-host.ts";
+import { boxMailFileLog, mailBodyPreview } from "./box-mail-log.ts";
 import { inspectCanvasShare, shareCanvasWork } from "./canvas-share.ts";
 import {
 	CLAUDE_BRIDGE_PROVIDER_ID,
@@ -137,16 +148,15 @@ import { runInBoundCursorSession, stripCursorResumeEntriesFromSessionFile } from
 import { CardExtensionUiBridge } from "./extension-ui.ts";
 import { fileExists, noteFiles, readTextFile, resolveInside, searchFiles } from "./files.ts";
 import { fuzzyScore } from "./fuzzy.ts";
-import {
-	bindBoxMailHost,
-	formatBoxDirectory,
-	getBoxPeers,
-	setBoxPeers,
-	unbindBoxMailHost,
-	type BoxPeer,
-} from "./box-mail-host.ts";
 import { melonAskQuestionExtensionPath } from "./melon-ask-question.ts";
 import { melonSendToBoxExtensionPath } from "./melon-send-to-box.ts";
+import {
+	type CustomModelInput,
+	listCustomModels,
+	parseCustomModelInput,
+	removeCustomModel,
+	upsertCustomModel,
+} from "./model-catalog.ts";
 import { createDeltaPump, createNoteJob, emitNoteJob, getNoteJob } from "./note-jobs.ts";
 import {
 	createManual,
@@ -168,6 +178,7 @@ import {
 	uniqueHandoffFileName,
 	wireIsStale,
 } from "./notes.ts";
+import { sessionBoundaryExtensionPath } from "./session-boundary.ts";
 import {
 	abortCurrentIsolationTurn,
 	beginIsolationTurn,
@@ -179,6 +190,7 @@ import {
 	queueDisplays,
 	SessionRegistry,
 } from "./session-registry.ts";
+import { sessionSearchExtensionPath } from "./session-search.ts";
 
 const IMAGE_MIME_OK = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
@@ -190,17 +202,13 @@ function parsePromptImages(raw: unknown): QueuedPromptImage[] | undefined {
 		if (!item || typeof item !== "object") continue;
 		const rec = item as Record<string, unknown>;
 		const data = typeof rec.data === "string" ? rec.data : "";
-		const mimeType =
-			typeof rec.mimeType === "string"
-				? rec.mimeType
-				: typeof rec.mime === "string"
-					? rec.mime
-					: "";
+		const mimeType = typeof rec.mimeType === "string" ? rec.mimeType : typeof rec.mime === "string" ? rec.mime : "";
 		if (!data || !IMAGE_MIME_OK.has(mimeType)) continue;
 		out.push({ type: "image", data, mimeType });
 	}
 	return out.length > 0 ? out : undefined;
 }
+
 import {
 	clearProviderDenylist,
 	denylistModel,
@@ -299,6 +307,10 @@ async function getModelRuntime(): Promise<ModelRuntime> {
 /** Bundled provider extensions for session runtimes (picker + session catalogs match). */
 function bundledSessionExtensionPaths(): string[] {
 	const paths: string[] = [];
+	const boundary = sessionBoundaryExtensionPath();
+	if (boundary) paths.push(boundary);
+	const search = sessionSearchExtensionPath();
+	if (search) paths.push(search);
 	const askQuestion = melonAskQuestionExtensionPath();
 	if (askQuestion) paths.push(askQuestion);
 	const sendToBox = melonSendToBoxExtensionPath();
@@ -511,6 +523,12 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			markBoxInboxDelivered(cardId, item.id);
 			broadcastInbox(cardId);
 			console.log("[box-mail] flush done", { cardId, mailId: item.id, delivery: result.delivery });
+			boxMailFileLog("deliver", {
+				cardId,
+				mailId: item.id,
+				delivery: result.delivery,
+				bodyPreview: mailBodyPreview(item.body),
+			});
 			if (result.delivery === "queued") {
 				console.log("[box-mail] wake queued for afterAgentIdle", { cardId });
 				return;
@@ -645,10 +663,10 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		"Asking the user a question (always apply — ask_question, select, confirm, options, Cursor questions):",
 		"- On Claude Code / Antigravity / other non-Cursor cards: call the ask_question tool so Melon shows the card question panel. Do not invent a silent default when a material choice is needed.",
 		"- On Cursor cards: use pi__cursor_ask_question / cursor_ask_question when exposed.",
-		"- Audience: assume the user never opened the repo. No file paths, symbol names, component names, PR jargon, or \"you already know\" references. If a code word is unavoidable, say what it does in plain English in the same sentence.",
+		'- Audience: assume the user never opened the repo. No file paths, symbol names, component names, PR jargon, or "you already know" references. If a code word is unavoidable, say what it does in plain English in the same sentence.',
 		"- Voice: talk like a smart friend who is new here. Short. Everyday words. No AI-slop, no stacked adjectives, no fake formality.",
 		"- Question: one clear sentence about what they will notice or get. Ask them to pick an outcome — not to review a design or confirm an internal plan.",
-		"- Option labels: what happens for them if they pick it, in plain words (~12 words max). Outcome first. Never \"Approve X wiring\" / \"Keep current abstraction\".",
+		'- Option labels: what happens for them if they pick it, in plain words (~12 words max). Outcome first. Never "Approve X wiring" / "Keep current abstraction".',
 		"- Option descriptions (if any): one friendly beginner line. Do not restack jargon from the label. Do not explain the codebase — explain the choice.",
 		"- Prefer concrete user-visible outcomes over abstract engineering talk.",
 		'- Bad: "Confirm the fix for the Deep diving / Reasoning activity line wiring."',
@@ -722,6 +740,15 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					...(bundledExtensions.length > 0 ? { additionalExtensionPaths: bundledExtensions } : {}),
 				},
 			});
+			// Debug viewer: new sessions capture provider requests when the
+			// toggle is already on.
+			if (loadSettings().developerSessionJson === true) {
+				try {
+					services.settingsManager.setDebugRequestDump(true);
+				} catch {
+					/* non-fatal */
+				}
+			}
 			return {
 				...(await createAgentSessionFromServices({
 					services,
@@ -1384,9 +1411,10 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		if (!parentSessionFile) {
 			return reply.code(400).send({ error: "nothing to fork yet — send a message first" });
 		}
-		const leaf = typeof body?.atEntryId === "string" && body.atEntryId.trim()
-			? s.runtime.session.sessionManager.getEntry(body.atEntryId.trim())
-			: s.runtime.session.sessionManager.getLeafEntry();
+		const leaf =
+			typeof body?.atEntryId === "string" && body.atEntryId.trim()
+				? s.runtime.session.sessionManager.getEntry(body.atEntryId.trim())
+				: s.runtime.session.sessionManager.getLeafEntry();
 		if (typeof body?.atEntryId === "string" && body.atEntryId.trim() && !leaf) {
 			return reply.code(400).send({ error: "unknown fork entry" });
 		}
@@ -2123,8 +2151,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			const mr = await getModelRuntime();
 			const [providerId, modelId] = splitModel(String(card.model ?? ""));
 			const model =
-				(providerId && modelId ? mr.getModel(providerId, modelId) : undefined) ??
-				mr.getAvailableSnapshot()[0];
+				(providerId && modelId ? mr.getModel(providerId, modelId) : undefined) ?? mr.getAvailableSnapshot()[0];
 			if (!model) return { skipped: true, reason: "no model available" };
 			const res = await mr.completeSimple(
 				model,
@@ -3581,8 +3608,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			const id = m.id as string;
 			const provider = m.provider as string;
 			const rawName = typeof m.name === "string" && m.name.trim() ? m.name : id;
-			const name =
-				provider.toLowerCase() === CURSOR_PROVIDER_ID ? cursorAutoDisplayName(id, rawName) : rawName;
+			const name = provider.toLowerCase() === CURSOR_PROVIDER_ID ? cursorAutoDisplayName(id, rawName) : rawName;
 			const input = Array.isArray(m.input)
 				? (m.input as unknown[]).filter((x): x is "text" | "image" => x === "text" || x === "image")
 				: undefined;
@@ -3631,6 +3657,139 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			...(antigravity ? { antigravity } : {}),
 			...(error ? { error } : {}),
 		};
+	});
+
+	// Re-read models.json and revalidate provider catalogs. `force` bypasses the
+	// remote-catalog freshness window; the app-open auto refresh sends force=false
+	// so the network is only hit when the cached catalog is stale.
+	app.post("/models/refresh", async (req) => {
+		const body = (req.body ?? {}) as { force?: boolean };
+		const mr = await getModelRuntime();
+		const result = await mr.refresh({ allowNetwork: true, force: body.force === true });
+		return {
+			ok: !result.aborted && result.errors.size === 0,
+			total: mr.getModels().length,
+			...(result.errors.size > 0
+				? {
+						errors: [...result.errors.entries()].map(([provider, error]) => ({
+							provider,
+							error: error.message,
+						})),
+					}
+				: {}),
+		};
+	});
+
+	// Add a custom model to a known provider. Writes the coding agent's models.json
+	// (the same file the terminal TUI reads) and recomposes the runtime so the model
+	// is listed without a server restart.
+	app.post("/models/custom", async (req, reply) => {
+		const body = (req.body ?? {}) as Record<string, unknown>;
+		const providerId = typeof body.provider === "string" ? body.provider.trim() : "";
+		if (!providerId) return reply.code(400).send({ error: "provider is required." });
+		const mr = await getModelRuntime();
+		if (!mr.getProvider(providerId)) {
+			return reply.code(400).send({ error: `Unknown provider "${providerId}".` });
+		}
+		let model: CustomModelInput;
+		try {
+			model = parseCustomModelInput(body);
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+		try {
+			upsertCustomModel(providerId, model);
+			await mr.refresh({ allowNetwork: false });
+		} catch (e) {
+			return reply.code(500).send({ error: (e as Error).message });
+		}
+		return { ok: true, label: `${providerId}/${model.id}` };
+	});
+
+	// Custom models added via the GUI — what models.json holds, per provider.
+	app.get("/models/custom", async () => ({
+		models: listCustomModels(),
+	}));
+
+	// Remove a custom model from the shared models.json and recompose the runtime.
+	app.delete("/models/custom", async (req, reply) => {
+		const body = (req.body ?? {}) as Record<string, unknown>;
+		const providerId = typeof body.provider === "string" ? body.provider.trim() : "";
+		const modelId = typeof body.id === "string" ? body.id.trim() : "";
+		if (!providerId || !modelId) {
+			return reply.code(400).send({ error: "provider and id are required." });
+		}
+		const mr = await getModelRuntime();
+		try {
+			if (!removeCustomModel(providerId, modelId)) {
+				return reply.code(404).send({ error: `No custom model "${modelId}" on "${providerId}".` });
+			}
+			await mr.refresh({ allowNetwork: false });
+		} catch (e) {
+			return reply.code(500).send({ error: (e as Error).message });
+		}
+		return { ok: true };
+	});
+
+	// Raw session JSONL for the developer JSON viewer. Path must sit inside the
+	// agent dir's sessions/ tree — no other file is readable through this.
+	app.get("/sessions/raw", async (req, reply) => {
+		const requested = String((req.query as { sessionFile?: unknown }).sessionFile ?? "").trim();
+		if (!requested) return reply.code(400).send({ error: "sessionFile required" });
+		const sessionsRoot = join(getAgentDir(), "sessions");
+		const resolved = resolve(requested);
+		if (!resolved.startsWith(sessionsRoot + sep) || !resolved.endsWith(".jsonl")) {
+			return reply.code(400).send({ error: "sessionFile must be under the agent sessions directory" });
+		}
+		if (!existsSync(resolved)) return reply.code(404).send({ error: "no such session file" });
+		const text = readFileSync(resolved, "utf8");
+		return { path: resolved, lines: text.split("\n") };
+	});
+
+	// The assembled system prompt for an attached card's session (debug viewer).
+	app.get("/sessions/:cardId/system-prompt", async (req) => {
+		const { cardId } = req.params as { cardId: string };
+		const entry = registry.get(cardId);
+		// Fallback chain: live session prompt → base resource-loader prompt (the
+		// session only carries the per-turn override) → null when not attached.
+		let systemPrompt: string | null = null;
+		let source: "session" | "base" | null = null;
+		try {
+			const sp = entry?.runtime?.session?.systemPrompt;
+			if (typeof sp === "string" && sp.trim()) {
+				systemPrompt = sp;
+				source = "session";
+			}
+		} catch {
+			/* fall through to base */
+		}
+		if (systemPrompt === null) {
+			try {
+				const base = entry?.runtime?.services?.resourceLoader?.getSystemPrompt?.();
+				if (typeof base === "string" && base.trim()) {
+					systemPrompt = base;
+					source = "base";
+				}
+			} catch {
+				/* not available */
+			}
+		}
+		return { systemPrompt, source };
+	});
+
+	// The last provider request captured for this card's session (debug viewer,
+	// debugRequestDump setting). Null when capture is off or no turn has run.
+	app.get("/sessions/:cardId/last-request", async (req) => {
+		const { cardId } = req.params as { cardId: string };
+		const runtime = registry.get(cardId)?.runtime;
+		let sessionId: string | undefined;
+		try {
+			sessionId = runtime?.session.sessionManager.getSessionId();
+		} catch {
+			sessionId = undefined;
+		}
+		if (!sessionId) return { request: null };
+		return { request: getCapturedProviderRequest(sessionId) ?? null };
 	});
 
 	// Liveness probe — the frontend polls this to clear the "reconnecting" banner.
@@ -3816,6 +3975,14 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			replyReason: body?.replyReason ?? (body?.envelope as { replyReason?: unknown } | undefined)?.replyReason,
 			inReplyToMailId: body?.inReplyToMailId,
 		});
+		boxMailFileLog("send", {
+			fromCardId,
+			toCardId,
+			bodyPreview: mailBodyPreview(mailBody),
+			bodyChars: mailBody.length,
+			createdBy: body?.createdBy === "agent" ? "agent" : "user",
+			replyPolicy: body?.replyPolicy ?? (body?.envelope as { replyPolicy?: unknown } | undefined)?.replyPolicy,
+		});
 		if (!fromCardId || !toCardId) return reply.code(400).send({ error: "fromCardId and toCardId required" });
 		if (!mailBody) return reply.code(400).send({ error: "body required" });
 		if (fromCardId === toCardId) return reply.code(400).send({ error: "cannot mail a node to itself" });
@@ -3832,8 +3999,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		if (body?.replyReason !== undefined) envelopeInput.replyReason = body.replyReason;
 		if (body?.threadId !== undefined) envelopeInput.threadId = body.threadId;
 		if (body?.parentMailId !== undefined) envelopeInput.parentMailId = body.parentMailId;
-		const inReplyToMailId =
-			typeof body?.inReplyToMailId === "string" ? body.inReplyToMailId : undefined;
+		const inReplyToMailId = typeof body?.inReplyToMailId === "string" ? body.inReplyToMailId : undefined;
 
 		const resolveMailCwd = (): string => {
 			const attachedFrom = registry.get(fromCardId);
@@ -3989,6 +4155,25 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return inboxSnapshot(cardId);
 	});
 
+	// Edit a pending inbound mail before Approve. Pending only — approved and
+	// delivered mail is history.
+	app.patch("/sessions/:cardId/inbox/:mailId", async (req, reply) => {
+		const { cardId, mailId } = req.params as { cardId: string; mailId: string };
+		const body = (req.body ?? {}) as { body?: unknown };
+		const newBody = typeof body.body === "string" ? body.body : "";
+		try {
+			const item = editBoxInboxItem(cardId, mailId, newBody);
+			if (!item) return reply.code(404).send({ error: "no pending inbox item" });
+			console.log("[box-mail] edit", { cardId, mailId, bodyChars: item.body.length });
+			boxMailFileLog("edit", { cardId, mailId, bodyPreview: mailBodyPreview(item.body) });
+			broadcastInbox(cardId);
+			return { ok: true, item };
+		} catch (e) {
+			const status = (e as { statusCode?: number }).statusCode ?? 500;
+			return reply.code(status).send({ error: (e as Error).message });
+		}
+	});
+
 	app.post("/sessions/:cardId/inbox/:mailId/approve", async (req, reply) => {
 		const { cardId, mailId } = req.params as { cardId: string; mailId: string };
 		const body = (req.body ?? {}) as {
@@ -4007,14 +4192,13 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		});
 		const item = approveBoxInboxItem(cardId, mailId);
 		if (!item) return reply.code(404).send({ error: "no pending inbox item" });
+		boxMailFileLog("approve", { cardId, mailId, bodyPreview: mailBodyPreview(item.body) });
 		broadcastInbox(cardId);
 
 		// Approve must be able to wake even if the card was never attached this process.
 		if (!registry.get(cardId)) {
 			try {
-				const dir = assertCwd(
-					(typeof body.cwd === "string" && body.cwd.trim()) || config.defaultCwd,
-				);
+				const dir = assertCwd((typeof body.cwd === "string" && body.cwd.trim()) || config.defaultCwd);
 				const agentProfileId = resolveAgentProfileId(body.agentProfileId);
 				const skills = mergeProfileSkills(
 					Array.isArray(body.skills) ? body.skills.filter((x): x is string => typeof x === "string") : [],
@@ -4062,7 +4246,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 							fromTitle: after.fromTitle,
 							fromCardId: after.fromCardId,
 							body: after.body,
-					  })
+						})
 					: undefined,
 		};
 	});
@@ -4071,6 +4255,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		const { cardId, mailId } = req.params as { cardId: string; mailId: string };
 		const item = dismissBoxInboxItem(cardId, mailId);
 		if (!item) return reply.code(404).send({ error: "no pending inbox item" });
+		boxMailFileLog("dismiss", { cardId, mailId, bodyPreview: mailBodyPreview(item.body) });
 		broadcastInbox(cardId);
 		return { ok: true, item, ...inboxSnapshot(cardId) };
 	});
@@ -4250,6 +4435,21 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			}
 			next.developerDebugger = body.developerDebugger;
 		}
+		if ("developerSessionJson" in body) {
+			if (typeof body.developerSessionJson !== "boolean") {
+				return reply.code(400).send({ error: "developerSessionJson must be a boolean" });
+			}
+			next.developerSessionJson = body.developerSessionJson;
+			// Mirror into every attached session's settings so request capture
+			// follows the viewer toggle without a restart.
+			for (const [, entry] of registry.entries()) {
+				try {
+					entry.runtime.session.settingsManager.setDebugRequestDump(body.developerSessionJson);
+				} catch {
+					/* session not attached yet */
+				}
+			}
+		}
 		if ("favoriteModels" in body) {
 			const raw = body.favoriteModels;
 			if (!Array.isArray(raw) || raw.some((m: unknown) => typeof m !== "string" || !m.trim())) {
@@ -4362,9 +4562,7 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 
 			const name = mr.getProvider(pid)?.name ?? providerLabel(pid);
 			const authTypes: Array<"api_key" | "oauth"> =
-				pid === CLAUDE_BRIDGE_PROVIDER_ID || pid === ANTIGRAVITY_PROVIDER_ID
-					? ["oauth"]
-					: ["api_key"];
+				pid === CLAUDE_BRIDGE_PROVIDER_ID || pid === ANTIGRAVITY_PROVIDER_ID ? ["oauth"] : ["api_key"];
 			// Only credentials Melon itself stored can be removed from the UI.
 			// Environment / config / models.json sources are managed elsewhere.
 			const stored =
@@ -4579,7 +4777,8 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					const cm = e as any;
 					if (cm.display !== false) {
 						const text = clean(textOf(cm.content));
-						if (text) messages.push({ role: "user", text, injected: cm.customType === "melon.handoff", entryId: e.id });
+						if (text)
+							messages.push({ role: "user", text, injected: cm.customType === "melon.handoff", entryId: e.id });
 					}
 					continue;
 				}
@@ -4588,7 +4787,9 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 				if (m.role === "user") {
 					const text = clean(textOf(m.content));
 					const images = (Array.isArray(m.content) ? m.content : [])
-						.filter((b: any) => b?.type === "image" && typeof b.data === "string" && typeof b.mimeType === "string")
+						.filter(
+							(b: any) => b?.type === "image" && typeof b.data === "string" && typeof b.mimeType === "string",
+						)
 						.map((b: any) => ({ mimeType: b.mimeType as string, data: b.data as string }));
 					// Image-only turns still belong in the transcript.
 					if (text || images.length > 0) {
@@ -4693,16 +4894,11 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 			peers.push({
 				cardId: id,
 				title: typeof p.title === "string" ? p.title : id,
-				...(typeof p.agentProfileId === "string" && p.agentProfileId
-					? { agentProfileId: p.agentProfileId }
-					: {}),
+				...(typeof p.agentProfileId === "string" && p.agentProfileId ? { agentProfileId: p.agentProfileId } : {}),
 				...(typeof p.agentInstanceName === "string" && p.agentInstanceName
 					? { agentInstanceName: p.agentInstanceName }
 					: {}),
-				...(p.status === "idle" ||
-				p.status === "thinking" ||
-				p.status === "error" ||
-				p.status === "offline"
+				...(p.status === "idle" || p.status === "thinking" || p.status === "error" || p.status === "offline"
 					? { status: p.status }
 					: {}),
 			});
@@ -4985,12 +5181,44 @@ function ensureRetryDisabled(): void {
 	}
 }
 
+// Seed the Session Detective agent profile once — the box users @mention to
+// find which past session discussed a topic. Its description.md is the
+// standing-instruction script; session_search/session_read do the searching.
+function ensureSessionDetectiveProfile(): void {
+	const id = "session-detective";
+	if (readAgentProfile(id)) return;
+	try {
+		createAgentProfile({
+			id,
+			name: "Session Detective",
+			role: "Find past sessions and distill what was discussed",
+			descriptionMd: [
+				"You find which past Melon session discussed a topic, verify it, and send a distilled answer back to the card that asked you.",
+				"",
+				"## Every request",
+				"1. Call session_search with distinctive keywords from the request (avoid generic words).",
+				"2. If several sessions plausibly match, reply with a NUMBERED list — title, project, date, one-line excerpt each — and STOP. Wait for the user to pick. Never guess between candidates.",
+				"3. When one session is clearly the match (or the user picked), call session_read with focused keywords to verify the context before answering.",
+				"4. Distill the answer in plain language: what was discussed/decided, when, and any exact wording that matters (short quotes). Cite the session title and date.",
+				"5. End the answer with the session file path(s) you relied on (the file: line from session_search) — the chat UI renders them as clickable cards that open the session.",
+				"6. Send the final answer via send_to_box back to the card id in the request, then confirm here in one short line.",
+				"",
+				"Zero or contradictory matches: say so in this box instead of guessing. Read-only: never modify other sessions or files.",
+			].join("\n"),
+		});
+		console.error("[melon] seeded Session Detective agent profile");
+	} catch (e) {
+		console.error("[melon] detective profile seed failed:", (e as Error)?.message ?? e);
+	}
+}
+
 // Run directly? (vs imported by tests)
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop() ?? "")) {
 	const config = loadConfig();
 	seedFromPiIfEmpty();
 	materializeSkills();
 	ensureRetryDisabled();
+	ensureSessionDetectiveProfile();
 	const app = await buildApp();
 	const addr = await app.listen({ port: config.port, host: "127.0.0.1" });
 	const boundPort = Number(String(addr).split(":").pop());

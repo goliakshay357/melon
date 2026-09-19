@@ -1,4 +1,4 @@
-import { fuzzyScore } from '@/lib/fuzzy';
+import { fuzzyScore } from "@/lib/fuzzy";
 
 export interface ModelInfo {
 	label: string;
@@ -23,37 +23,28 @@ export function cursorAutoDisplayName(id: string, name: string): string {
 	if (!/^auto$/i.test(trimmed)) return name;
 	// Strip context (@272k) and fast (:fast / :slow) suffixes from pi ids.
 	const base = (id.split(/[@:]/)[0] ?? id).trim();
-	if (base === 'auto-smart') return 'Auto · Smart';
-	if (base === 'default' || base === 'auto') return 'Auto · Cost';
+	if (base === "auto-smart") return "Auto · Smart";
+	if (base === "default" || base === "auto") return "Auto · Cost";
 	return name;
 }
 
 /** Tolerate an older /models payload that lacks `name` / `providerName`. */
 export function normalizeModel(raw: Record<string, unknown>): ModelInfo | null {
-	const provider = typeof raw.provider === 'string' ? raw.provider : '';
-	const id = typeof raw.id === 'string' ? raw.id : '';
-	const label =
-		typeof raw.label === 'string' && raw.label
-			? raw.label
-			: provider && id
-				? `${provider}/${id}`
-				: '';
+	const provider = typeof raw.provider === "string" ? raw.provider : "";
+	const id = typeof raw.id === "string" ? raw.id : "";
+	const label = typeof raw.label === "string" && raw.label ? raw.label : provider && id ? `${provider}/${id}` : "";
 	if (!label) return null;
-	const resolvedProvider = provider || label.split('/')[0] || 'unknown';
-	const resolvedId = id || label.split('/').slice(1).join('/');
-	const rawName = typeof raw.name === 'string' && raw.name ? raw.name : resolvedId || label;
-	const name =
-		resolvedProvider.toLowerCase() === 'cursor'
-			? cursorAutoDisplayName(resolvedId, rawName)
-			: rawName;
+	const resolvedProvider = provider || label.split("/")[0] || "unknown";
+	const resolvedId = id || label.split("/").slice(1).join("/");
+	const rawName = typeof raw.name === "string" && raw.name ? raw.name : resolvedId || label;
+	const name = resolvedProvider.toLowerCase() === "cursor" ? cursorAutoDisplayName(resolvedId, rawName) : rawName;
 	const input = Array.isArray(raw.input)
-		? (raw.input as unknown[]).filter((x): x is 'text' | 'image' => x === 'text' || x === 'image')
+		? (raw.input as unknown[]).filter((x): x is "text" | "image" => x === "text" || x === "image")
 		: undefined;
 	return {
 		label,
 		provider: resolvedProvider,
-		providerName:
-			typeof raw.providerName === 'string' && raw.providerName ? raw.providerName : provider || 'Other',
+		providerName: typeof raw.providerName === "string" && raw.providerName ? raw.providerName : provider || "Other",
 		id: resolvedId,
 		name,
 		...(input?.length ? { input } : {}),
@@ -63,7 +54,7 @@ export function normalizeModel(raw: Record<string, unknown>): ModelInfo | null {
 /** Whether the model catalog row advertises image/vision input. Unknown → true. */
 export function modelSupportsImages(model: ModelInfo | null | undefined): boolean {
 	if (!model?.input?.length) return true;
-	return model.input.includes('image');
+	return model.input.includes("image");
 }
 
 /**
@@ -80,7 +71,7 @@ export function buildModelSections(input: {
 }): ModelSection[] {
 	const search = input.query.trim().toLowerCase();
 	const matches = (m: ModelInfo) =>
-		search === '' || fuzzyScore(search, `${m.name} ${m.label} ${m.providerName}`) !== null;
+		search === "" || fuzzyScore(search, `${m.name} ${m.label} ${m.providerName}`) !== null;
 
 	const byLabel = new Map(input.models.map((m) => [m.label, m]));
 	const favoriteModels = input.favorites
@@ -94,8 +85,8 @@ export function buildModelSections(input: {
 	const rest = input.models.filter((m) => !pinnedLabels.has(m.label) && matches(m));
 
 	const sections: ModelSection[] = [];
-	if (favoriteModels.length > 0) sections.push({ title: 'Favorites', models: favoriteModels });
-	if (recentModels.length > 0) sections.push({ title: 'Recents', models: recentModels });
+	if (favoriteModels.length > 0) sections.push({ title: "Favorites", models: favoriteModels });
+	if (recentModels.length > 0) sections.push({ title: "Recents", models: recentModels });
 
 	const byProvider = new Map<string, ModelInfo[]>();
 	for (const m of rest) {
@@ -107,4 +98,64 @@ export function buildModelSections(input: {
 		sections.push({ title, models: byProvider.get(title) ?? [] });
 	}
 	return sections;
+}
+
+// ---------------------------------------------------------------------------
+// Catalog refresh + cross-component change notification
+// ---------------------------------------------------------------------------
+
+const MODELS_UPDATED_EVENT = "melon:models-updated";
+
+/**
+ * Tell every mounted model picker (all cards, all pickers in this window) to
+ * refetch the catalog. Fired after a refresh or custom-model change.
+ */
+export function notifyModelsUpdated(): void {
+	window.dispatchEvent(new Event(MODELS_UPDATED_EVENT));
+}
+
+/** Subscribe to catalog changes; returns an unsubscribe function. */
+export function onModelsUpdated(listener: () => void): () => void {
+	window.addEventListener(MODELS_UPDATED_EVENT, listener);
+	return () => window.removeEventListener(MODELS_UPDATED_EVENT, listener);
+}
+
+export interface ModelsRefreshOutcome {
+	ok: boolean;
+	total: number;
+	error?: string;
+}
+
+/**
+ * Ask melon-server to re-read models.json and revalidate provider catalogs.
+ * `force` bypasses the remote-catalog freshness window; the app-open auto
+ * refresh passes false so the network is only hit when the cache is stale.
+ * Notifies all pickers on completion so every dropdown refetches.
+ */
+export async function refreshModels(force: boolean): Promise<ModelsRefreshOutcome> {
+	try {
+		const res = await fetch("/models/refresh", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ force }),
+		});
+		const d = (await res.json().catch(() => ({}))) as {
+			ok?: boolean;
+			total?: number;
+			error?: string;
+		};
+		const outcome: ModelsRefreshOutcome = {
+			ok: res.ok && d.ok !== false,
+			total: typeof d.total === "number" ? d.total : 0,
+			...(res.ok ? {} : { error: d.error ?? `Refresh failed (${res.status})` }),
+		};
+		notifyModelsUpdated();
+		return outcome;
+	} catch (e) {
+		return {
+			ok: false,
+			total: 0,
+			error: e instanceof Error ? e.message : "Network error refreshing models",
+		};
+	}
 }

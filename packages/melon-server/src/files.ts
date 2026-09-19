@@ -201,7 +201,7 @@ export function resolveInside(cwd: string, relPath: string): string | null {
 	if (!relPath || relPath.includes("..") || relPath.startsWith("/")) return null;
 	const root = resolve(cwd);
 	const abs = resolve(root, relPath);
-	if (abs !== root && !abs.startsWith(root + "/")) return null;
+	if (abs !== root && !abs.startsWith(`${root}/`)) return null;
 	return abs;
 }
 

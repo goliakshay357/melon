@@ -2,7 +2,7 @@ import { nanoid } from "nanoid";
 import { create } from "zustand";
 import { askChoice, askText, showDiff } from "@/components/dialogs";
 import { boxMentionLabel, specializedCardTitle, uniqueWordPair } from "@/lib/agent-names";
-import { boxMailLog, buildBoxMailBrief, buildHandoffDistillContext, stripMentionToken } from "@/lib/box-mail-brief";
+import { boxMailLog, buildBoxMailBrief, stripMentionToken, stripMentionTokens } from "@/lib/box-mail-brief";
 import { expandDiagramCommand, expandMentions, parseInput } from "@/lib/input-parser";
 import {
 	clampIntoView,
@@ -601,8 +601,13 @@ interface CanvasState {
 	 * Spawn a specialized chat box bound to a Settings → Agents profile.
 	 * Inherits model from the newest chat card with one, else leaves unset
 	 * (server uses lastModel). Touches profile recency on the server at attach.
+	 * `options.parentId` links the spawn to its delegator (canvas edge).
 	 */
-	spawnAgentProfile: (profileId: string, position?: { x: number; y: number }) => Promise<string | null>;
+	spawnAgentProfile: (
+		profileId: string,
+		position?: { x: number; y: number },
+		options?: { parentId?: string | null },
+	) => Promise<string | null>;
 	/**
 	 * Send box mail into the recipient's inbox (pending until Approve, or
 	 * auto-approved when Settings boxMailAutoSend is on).
@@ -623,6 +628,8 @@ interface CanvasState {
 	approveBoxInbox: (cardId: string, mailId: string) => Promise<boolean>;
 	/** Dismiss a pending inbound inbox item. */
 	dismissBoxInbox: (cardId: string, mailId: string) => Promise<boolean>;
+	/** Edit a pending inbound mail's body before approving it. */
+	editBoxInbox: (cardId: string, mailId: string, body: string) => Promise<boolean>;
 	/** Pull inbox snapshot from the server into the card. */
 	syncBoxInbox: (cardId: string) => Promise<void>;
 	forkCard: (parentId: string, atEntryId?: string) => Promise<string>;
@@ -656,9 +663,7 @@ interface CanvasState {
 	setCardDraft: (id: string, draft: string | ((prev: string) => string)) => void;
 	setCardDraftAttachments: (
 		id: string,
-		attachments:
-			| ComposerAttachment[]
-			| ((prev: ComposerAttachment[]) => ComposerAttachment[]),
+		attachments: ComposerAttachment[] | ((prev: ComposerAttachment[]) => ComposerAttachment[]),
 	) => void;
 	/** Pop image drafts stashed when a prompt was queued (cancel → composer). */
 	takeQueuedAttachments: (id: string, display: string) => ComposerAttachment[];
@@ -701,7 +706,12 @@ interface CanvasState {
 			attachments?: ComposerAttachment[];
 		},
 	) => Promise<boolean>;
-	resumeSession: (sessionFile: string) => Promise<string | null>;
+	/** Resume a past session .jsonl into a new card. `options.parentId` links it
+	 * to the delegating card (canvas edge) and places it beside it. */
+	resumeSession: (
+		sessionFile: string,
+		options?: { parentId?: string | null; position?: { x: number; y: number } },
+	) => Promise<string | null>;
 	/** Distill a card's session into a handoff note artifact spawned beside it. */
 	createHandoff: (sourceCardId: string) => Promise<void>;
 	/** /compact: archive transcript, fresh session, handoff text in composer. */
@@ -934,6 +944,33 @@ async function pickBoxAmong(title: string, candidates: SessionCard[]): Promise<s
 	});
 }
 
+const AGENT_PROFILE_NAME_RE = /\s+/g;
+
+/**
+ * Resolve an @-mention token to an agent profile id when no canvas card holds
+ * it (profile-only mention → spawn-then-mail). Matches the profile id or the
+ * name with whitespace normalized to hyphens.
+ */
+async function matchAgentProfileMention(mentionTokens: string[]): Promise<string | null> {
+	if (mentionTokens.length === 0) return null;
+	try {
+		const res = await fetch("/agents");
+		if (!res.ok) return null;
+		const d = (await res.json()) as { agents?: Array<{ id: string; name: string }> } | null;
+		const agents = d?.agents ?? [];
+		for (const token of mentionTokens) {
+			const lower = token.toLowerCase();
+			const hit = agents.find(
+				(a) => a.id.toLowerCase() === lower || a.name.toLowerCase().replace(AGENT_PROFILE_NAME_RE, "-") === lower,
+			);
+			if (hit) return hit.id;
+		}
+	} catch {
+		/* offline — fall through */
+	}
+	return null;
+}
+
 /** Agent send_to_box → recipient inbox (spawn profile box if needed). */
 async function handleBoxMailIntent(data: {
 	fromCardId: string;
@@ -952,7 +989,8 @@ async function handleBoxMailIntent(data: {
 		} else if (matches.length === 1) {
 			toCardId = matches[0]!.id;
 		} else {
-			const spawned = await state.spawnAgentProfile(data.toProfileId);
+			// Spawn beside the sender with a canvas edge — the delegation arrow.
+			const spawned = await state.spawnAgentProfile(data.toProfileId, undefined, { parentId: data.fromCardId });
 			if (spawned) toCardId = spawned;
 		}
 	}
@@ -2058,25 +2096,22 @@ function ensureCardEventStream(cardId: string): void {
 				);
 				queuedAttachmentDrafts.delete(queueAttachmentKey(cardId, um.text));
 				const images =
-					um.images?.filter((img) => img.mimeType && img.data).map((img) => ({
-						mimeType: img.mimeType,
-						data: img.data,
-					})) ?? undefined;
+					um.images
+						?.filter((img) => img.mimeType && img.data)
+						.map((img) => ({
+							mimeType: img.mimeType,
+							data: img.data,
+						})) ?? undefined;
 				if (last?.role === "user" && last.text === um.text) {
 					if (images?.length && !last.images?.length) {
 						useCanvasStore.getState().updateCard(cardId, {
-							messages: cur.messages.map((m, i) =>
-								i === cur.messages.length - 1 ? { ...m, images } : m,
-							),
+							messages: cur.messages.map((m, i) => (i === cur.messages.length - 1 ? { ...m, images } : m)),
 						});
 					}
 					return;
 				}
 				useCanvasStore.getState().updateCard(cardId, {
-					messages: [
-						...cur.messages,
-						{ role: "user", text: um.text, ...(images?.length ? { images } : {}) },
-					],
+					messages: [...cur.messages, { role: "user", text: um.text, ...(images?.length ? { images } : {}) }],
 				});
 			} else if ((data as { type: string }).type === "note_injected") {
 				// A handoff note was delivered into this card (wire from a note
@@ -3410,12 +3445,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		const cardSize = size ?? currentSpawnSize();
 		// Never drop a new card on top of an existing one. `findFreeSpot` keeps the
 		// requested position when it is free and nudges only when occupied.
-		const placed = findFreeSpot(
-			get().cards,
-			spawnPosition(position, cardSize),
-			cardSize.width,
-			cardSize.height,
-		);
+		const placed = findFreeSpot(get().cards, spawnPosition(position, cardSize), cardSize.width, cardSize.height);
 		const card: SessionCard = {
 			id: forcedId ?? newCardId(),
 			title: parent ? `↳ ${parent.title}`.slice(0, 44) : "New card",
@@ -3445,7 +3475,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		return card.id;
 	},
 
-	async spawnAgentProfile(profileId, position) {
+	async spawnAgentProfile(profileId, position, options) {
 		if (get().serverOffline || !get().folder) return null;
 		const id = profileId.trim();
 		if (!id) return null;
@@ -3467,7 +3497,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 			? profile.defaultSkillIds.filter((x: unknown): x is string => typeof x === "string")
 			: [];
 
-		const cardId = get().addCard(pos, null, undefined, "chat", size);
+		const cardId = get().addCard(pos, options?.parentId ?? null, undefined, "chat", size);
 		get().updateCard(cardId, {
 			title,
 			agentProfileId: profile.id,
@@ -3678,6 +3708,32 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}
 	},
 
+	async editBoxInbox(cardId, mailId, body) {
+		if (get().serverOffline || !body.trim()) return false;
+		try {
+			const res = await fetch(`/sessions/${encodeURIComponent(cardId)}/inbox/${encodeURIComponent(mailId)}`, {
+				method: "PATCH",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ body }),
+			});
+			if (!res.ok) return false;
+			const d = (await res.json()) as {
+				item?: { body?: unknown };
+			};
+			const newBody = typeof d.item?.body === "string" ? d.item.body : body;
+			const card = findCard(cardId);
+			if (card) {
+				get().updateCard(cardId, {
+					boxInbox: (card.boxInbox ?? []).map((i) => (i.id === mailId ? { ...i, body: newBody } : i)),
+				});
+			}
+			pushLog(cardId, "• inbox item edited");
+			return true;
+		} catch {
+			return false;
+		}
+	},
+
 	async dismissBoxInbox(cardId, mailId) {
 		if (get().serverOffline) return false;
 		try {
@@ -3866,10 +3922,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	setCardDraftAttachments(id, attachments) {
 		patchCardInStore(id, (c) => ({
 			...c,
-			draftAttachments:
-				typeof attachments === "function"
-					? attachments(c.draftAttachments ?? [])
-					: attachments,
+			draftAttachments: typeof attachments === "function" ? attachments(c.draftAttachments ?? []) : attachments,
 		}));
 	},
 
@@ -4153,7 +4206,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}
 	},
 
-	async resumeSession(sessionFile) {
+	async resumeSession(sessionFile, options) {
 		const cardId = newCardId();
 		let transcript: any = null;
 		try {
@@ -4167,15 +4220,33 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		} catch {
 			return null;
 		}
-		// Place resumed cards to the right of existing content.
+		// Default: place resumed cards to the right of existing content. With a
+		// parent (session-link click), spawn beside it so the edge reads locally.
 		const cards = get().cards;
-		const maxX = cards.length ? Math.max(...cards.map((c) => c.position.x + cardWidth(c))) : -DEFAULT_CARD_SIZE.width;
-		get().addCard({ x: maxX + 48, y: cards.length ? cards[0].position.y : 0 }, null, cardId);
+		const parent = options?.parentId ? cards.find((c) => c.id === options.parentId) : undefined;
+		const position =
+			options?.position ??
+			(parent
+				? { x: parent.position.x + cardWidth(parent) + 48, y: parent.position.y + 60 }
+				: {
+						x: cards.length
+							? Math.max(...cards.map((c) => c.position.x + cardWidth(c)))
+							: -DEFAULT_CARD_SIZE.width,
+						y: cards.length ? cards[0].position.y : 0,
+					});
+		get().addCard(position, options?.parentId ?? null, cardId);
 		const tMsgs = ((transcript?.messages ?? []) as any[]).filter(
 			(mm: any) => mm.role === "user" || mm.text || mm.thinking || mm.tools?.length,
 		);
+		const firstUser = tMsgs.find((mm: any) => mm.role === "user");
+		const firstUserText = String(firstUser?.text ?? "")
+			.replace(/\s+/g, " ")
+			.trim();
+		const title = firstUserText
+			? `${firstUserText.slice(0, 59)}${firstUserText.length > 59 ? "…" : ""}`
+			: "Resumed session";
 		get().updateCard(cardId, {
-			title: "Resumed session",
+			title,
 			sessionId: transcript?.sessionId ?? undefined,
 			messages: tMsgs.map((mm: any) => ({
 				role: mm.role,
@@ -4568,10 +4639,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 					...(Array.isArray(m.images) && m.images.length > 0
 						? {
 								images: m.images
-									.filter(
-										(img: any) =>
-											typeof img?.mimeType === "string" && typeof img?.data === "string",
-									)
+									.filter((img: any) => typeof img?.mimeType === "string" && typeof img?.data === "string")
 									.map((img: any) => ({
 										mimeType: img.mimeType as string,
 										data: img.data as string,
@@ -4645,24 +4713,62 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		});
 		const agentHit = parsed.mentions.find((m) => tokenToPeer.has(m.toLowerCase()));
 		boxMailLog("agentHit", { agentHit: agentHit ?? null, mentions: parsed.mentions });
-		let handoffDistillContext: string | null = null;
-		let handoffFileMentions: string[] | null = null;
-		if (agentHit) {
-			const to = tokenToPeer.get(agentHit.toLowerCase())!;
-			const instruction = stripMentionToken(text, agentHit);
-			handoffFileMentions = parsed.mentions.filter((m) => !tokenToPeer.has(m.toLowerCase()));
-			boxMailLog("routing → distill then send_to_box", {
+		// Profile-only mention: no canvas card holds this profile yet. Spawn its
+		// box beside this one (edge = delegation arrow), then route the mail to
+		// the new box exactly like an existing-card mention.
+		let toCard: (typeof peers)[number] | null = agentHit ? (tokenToPeer.get(agentHit.toLowerCase()) ?? null) : null;
+		if (!toCard && agentHit === undefined && parsed.mentions.length > 0) {
+			const profileId = await matchAgentProfileMention(parsed.mentions);
+			if (profileId) {
+				// Spawn beside the sender so the delegation edge is visually local.
+				const pos = { x: card.position.x + 460, y: card.position.y + 80 };
+				const spawnedId = await get().spawnAgentProfile(profileId, pos, { parentId: cardId });
+				if (spawnedId) {
+					toCard = findCard(spawnedId) ?? null;
+					pushLog(cardId, `• profile mention → spawned ${profileId} box (delegating)`);
+				}
+			}
+		}
+		if (toCard) {
+			// Direct mail: the user's words go to the target box as-is (file
+			// mentions expanded here). NO turn runs in THIS box — the whole point
+			// of delegating is that the other box does the work in its own
+			// session, and only the answer comes back via inbox.
+			const to = toCard;
+			const routedTokens = new Set(
+				[
+					agentHit,
+					to.id,
+					to.agentInstanceName,
+					to.agentProfileId,
+					to.agentProfileId?.replace(/\s+/g, "-").toLowerCase(),
+					// Title forms: "swift-otter ( Rude agent )" or legacy "Rude agent — swift-otter"
+					to.title.match(/^([a-z0-9-]+)\s*\(/i)?.[1],
+					to.title.match(/—\s*([a-z0-9-]+)$/i)?.[1],
+				].filter((x): x is string => !!x),
+			);
+			const routedTokensLower = new Set([...routedTokens].map((t) => t.toLowerCase()));
+			const instruction = agentHit ? stripMentionToken(text, agentHit) : stripMentionTokens([...routedTokens], text);
+			const fileMentions = parsed.mentions.filter((m) => !routedTokensLower.has(m.toLowerCase()));
+			const mailCwd = get().agentCwd() ?? get().folder;
+			const mailBody = (
+				await expandMentions(instruction, fileMentions, [mailCwd, get().folder !== mailCwd ? get().folder : null])
+			).trim();
+			boxMailLog("routing → direct mail (no sender turn)", {
 				toId: to.id,
 				toTitle: to.title,
-				instruction,
-				fileMentions: handoffFileMentions,
+				bodyChars: mailBody.length,
+				fileMentions,
 			});
-			handoffDistillContext = buildHandoffDistillContext({
-				from: card,
-				to,
-				userText: instruction,
+			// The transcript keeps the user's own words — nothing else is said here.
+			get().updateCard(cardId, {
+				messages: [...card.messages, { role: "user", text: displayText }],
+				status: "idle",
 			});
-			pushLog(cardId, `• handoff → ${boxMentionLabel(to)} (distill, then send_to_box)`);
+			pushLog(cardId, `• handoff → ${boxMentionLabel(to)} (direct mail — no turn in this box)`);
+			const mailed = await get().sendBoxMail(cardId, to.id, mailBody, { createdBy: "user" });
+			pushLog(cardId, mailed ? `✓ mailed to ${boxMentionLabel(to)} — approve in its inbox` : "✗ mail failed");
+			return true;
 		}
 
 		// The turn is about to start — file edits must be on disk first.
@@ -4758,16 +4864,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		// Build context separately so expansions go to the model as context,
 		// not as user text — prevents the model from echoing them back.
 		let context = "";
-		if (handoffDistillContext) {
-			context = handoffDistillContext;
-		}
 		if (parsed.command?.name === "diagram") {
 			const diagramCtx = expandDiagramCommand("", parsed.command.args).trimStart();
 			if (diagramCtx) {
 				context = context ? `${context}\n\n${diagramCtx}` : diagramCtx;
 			}
 		}
-		const mentionsForFiles = handoffFileMentions ?? parsed.mentions.filter((m) => !tokenToPeer.has(m.toLowerCase()));
+		const mentionsForFiles = parsed.mentions;
 		if (mentionsForFiles.length > 0) {
 			const fileParts = (
 				await expandMentions("", mentionsForFiles, [cwd, get().folder !== cwd ? get().folder : null])

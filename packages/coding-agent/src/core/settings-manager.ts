@@ -110,6 +110,11 @@ export interface Settings {
 	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
 	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates
 	enableAnalytics?: boolean; // default: false - opt-in analytics data sharing
+	/**
+	 * When true, the final provider request payload (messages, tool schemas,
+	 * sampling params) is captured for the debug viewer. Default false.
+	 */
+	debugRequestDump?: boolean;
 	trackingId?: string; // analytics tracking identifier, generated when analytics is enabled
 	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
 	extensions?: string[]; // Array of local extension file paths or directories
@@ -806,6 +811,17 @@ export class SettingsManager {
 
 	getRetryEnabled(): boolean {
 		return this.settings.retry?.enabled ?? true;
+	}
+
+	/** Debug viewer: capture the final provider request payload per turn. */
+	getDebugRequestDump(): boolean {
+		return this.settings.debugRequestDump === true;
+	}
+
+	setDebugRequestDump(enabled: boolean): void {
+		this.settings.debugRequestDump = enabled;
+		this.markModified("debugRequestDump");
+		this.save();
 	}
 
 	setRetryEnabled(enabled: boolean): void {

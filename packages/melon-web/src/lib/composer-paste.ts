@@ -94,7 +94,8 @@ export function sanitizePastedText(raw: string): string {
 			// C0 / DEL except \t (09) and \n (0A)
 			.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "")
 			// BOM, zero-widths, soft hyphen, bidi isolates/embeddings (caret noise)
-			.replace(/[\u00AD\u034F\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g, "")
+			// (the combining grapheme joiner \u034F can't sit in a character class)
+			.replace(/\u034F|[\u00AD\u061C\u180E\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u206F\uFEFF]/g, "")
 			// Unicode line/paragraph separators → newline
 			.replace(/[\u2028\u2029]/g, "\n")
 			// Narrow / weird spaces → regular space (wrap stays predictable)

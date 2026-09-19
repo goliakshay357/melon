@@ -292,6 +292,7 @@ export function PromptComposer({
         if (!mention) return [];
         const q = mention.query.toLowerCase();
         const out: MentionItem[] = [];
+        const profileIdsWithCards = new Set(cards.map((c) => c.agentProfileId).filter((x): x is string => !!x));
         for (const c of cards) {
             if ((c.kind ?? 'chat') !== 'chat') continue;
             if (cardId && c.id === cardId) continue;
@@ -308,6 +309,20 @@ export function PromptComposer({
             const status =
                 c.status === 'streaming' ? 'thinking' : c.status === 'error' ? 'error' : 'idle';
             out.push({ kind: 'agent', token, label, cardId: c.id, status });
+        }
+        // Profiles with no box on the canvas yet: @-mentioning one spawns its
+        // box beside this card (delegation edge) and mails the brief there.
+        for (const [profileId, profileName] of Object.entries(profileNames)) {
+            if (profileIdsWithCards.has(profileId)) continue;
+            const hay = `${profileId} ${profileName}`.toLowerCase();
+            if (q && !hay.includes(q)) continue;
+            out.push({
+                kind: 'agent',
+                token: profileId,
+                label: `${profileName} ( ${profileId} — new box )`,
+                cardId: '',
+                status: 'new box',
+            });
         }
         return out.slice(0, 12);
     }, [cards, cardId, mention, profileNames]);
