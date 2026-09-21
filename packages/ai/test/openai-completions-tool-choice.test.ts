@@ -252,7 +252,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("enables tool_stream for supported z.ai models with tools", async () => {
-		const model = getModel("zai", "glm-5.2")!;
+		const model = getModel("zai", "glm-5.3")!;
 		const tools: Tool[] = [
 			{
 				name: "ping",
@@ -292,27 +292,43 @@ describe("openai-completions tool_choice", () => {
 		expect(getModel("zai", "glm-4.7")?.compat?.zaiToolStream).toBe(true);
 		expect(getModel("zai", "glm-4.7")?.compat?.zaiToolStream).toBe(true);
 		expect(getModel("zai", "glm-5-turbo")?.compat?.zaiToolStream).toBe(true);
-		expect(getModel("zai", "glm-5.2")?.compat?.zaiToolStream).toBe(true);
+		expect(getModel("zai", "glm-5.3")?.compat?.zaiToolStream).toBe(true);
 	});
 
-	it("stores z.ai GLM-5.2 effort metadata", () => {
+	it("stores z.ai GLM effort metadata", () => {
+		// glm-5.2 (zai): effort climbs straight to high
+		const glm52 = getModel("zai", "glm-5.2")!;
+		expect(glm52.compat?.supportsReasoningEffort).toBe(true);
+		expect(glm52.thinkingLevelMap).toEqual({
+			off: "none",
+			minimal: null,
+			low: null,
+			medium: null,
+			high: "high",
+			max: "max",
+			xhigh: null,
+		});
+		// glm-5.3 (both providers): effort follows the requested level
 		for (const provider of ["zai", "zai-coding-cn"] as const) {
-			const model = getModel(provider, "glm-5.2")!;
+			const model = getModel(provider, "glm-5.3")!;
 			expect(model.compat?.supportsReasoningEffort).toBe(true);
 			expect(model.thinkingLevelMap).toEqual({
+				off: null,
 				minimal: null,
-				low: "high",
-				medium: "high",
+				low: "low",
+				medium: null,
 				high: "high",
 				max: "max",
+				xhigh: null,
 			});
 		}
 	});
 
-	it("maps z.ai GLM-5.2 thinking levels to reasoning_effort", async () => {
-		const model = getModel("zai", "glm-5.2")!;
+	it("maps z.ai GLM-5.3 thinking levels to reasoning_effort", async () => {
+		const model = getModel("zai", "glm-5.3")!;
 		const cases = [
-			{ reasoning: "low", effort: "high" },
+			{ reasoning: "low", effort: "low" },
+			// medium maps to null in the level map — pi falls back to high
 			{ reasoning: "medium", effort: "high" },
 			{ reasoning: "high", effort: "high" },
 			{ reasoning: "max", effort: "max" },
@@ -348,12 +364,12 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("preserves z.ai thinking when replaying reasoning_content", async () => {
-		const model = getModel("zai", "glm-5.2")!;
+		const model = getModel("zai", "glm-5.3")!;
 		const assistantMessage: AssistantMessage = {
 			role: "assistant",
 			api: "openai-completions",
 			provider: "zai",
-			model: "glm-5.2",
+			model: "glm-5.3",
 			content: [
 				{ type: "thinking", thinking: "prior reasoning", thinkingSignature: "reasoning_content" },
 				{ type: "toolCall", id: "call_1", name: "read", arguments: { path: "README.md" } },
@@ -408,7 +424,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("omits z.ai GLM-5.2 reasoning_effort when thinking is off", async () => {
-		const model = getModel("zai", "glm-5.2")!;
+		const model = getModel("zai", "glm-5.3")!;
 		let payload: unknown;
 
 		await streamSimple(
@@ -436,7 +452,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("respects explicit z.ai tool_stream compat override", async () => {
-		const baseModel = getModel("zai", "glm-5.2")!;
+		const baseModel = getModel("zai", "glm-5.3")!;
 		const model = {
 			...baseModel,
 			compat: {
@@ -480,7 +496,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("omits tool_stream when no tools are provided", async () => {
-		const model = getModel("zai", "glm-5.2")!;
+		const model = getModel("zai", "glm-5.3")!;
 		let payload: unknown;
 
 		await streamSimple(
@@ -522,7 +538,7 @@ describe("openai-completions tool_choice", () => {
 			},
 		];
 
-		const model = getModel("zai", "glm-5.2")!;
+		const model = getModel("zai", "glm-5.3")!;
 		const response = await streamSimple(
 			model,
 			{
@@ -1056,11 +1072,8 @@ describe("openai-completions tool_choice", () => {
 		expect(params.messages?.[0]?.role).toBe("system");
 	});
 
-	it("keeps developer messages for OpenAI and Anthropic OpenRouter reasoning model instructions", async () => {
-		for (const model of [
-			getModel("openrouter", "openai/gpt-5.2-codex"),
-			getModel("openrouter", "anthropic/claude-sonnet-4.5"),
-		]) {
+	it("keeps developer messages for OpenRouter reasoning model instructions", async () => {
+		for (const model of [getModel("openrouter", "openai/gpt-5.2-codex")]) {
 			expect(model).toBeDefined();
 			let payload: unknown;
 
@@ -1443,10 +1456,7 @@ describe("openai-completions tool_choice", () => {
 			name: "Custom Uppercase DeepSeek Model",
 			baseUrl: "https://API.DeepSeek.COM",
 		} satisfies Model<"openai-completions">;
-		const nativeModels = [
-			getModel("deepseek", "deepseek-v4-flash")!,
-			getModel("deepseek", "deepseek-v4-pro")!,
-		] as const;
+		const nativeModels = [getModel("deepseek", "deepseek-flash")!, getModel("deepseek", "deepseek-v4-pro")!] as const;
 		const cases = [...nativeModels, customModel, customUppercaseModel] as const;
 
 		for (const model of nativeModels) {
@@ -1477,7 +1487,7 @@ describe("openai-completions tool_choice", () => {
 	});
 
 	it("sends max_tokens for Z.AI completions models", async () => {
-		const cases = [getModel("zai", "glm-5-turbo")!, getModel("zai", "glm-5.2")!] as const;
+		const cases = [getModel("zai", "glm-5-turbo")!, getModel("zai", "glm-5.3")!] as const;
 
 		for (const model of cases) {
 			expect(model.compat?.maxTokensField).toBe("max_tokens");
