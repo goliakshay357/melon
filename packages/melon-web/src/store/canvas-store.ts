@@ -18,7 +18,6 @@ import {
 	type BoxInboxItem,
 	type ChatImage,
 	type ChatMessage,
-	type CompactHistoryEntry,
 	type ComposerAttachment,
 	DEFAULT_CARD_SIZE,
 	type NoteState,
@@ -492,7 +491,15 @@ export interface CanvasMeta {
 	worktreeName?: string;
 }
 
-export type AppView = "canvas" | "agents" | "skills" | "themes" | "providers" | "developer";
+export type AppView =
+	| "canvas"
+	| "agents"
+	| "skills"
+	| "themes"
+	| "providers"
+	| "developer"
+	| "webaccess"
+	| "extensions";
 
 interface CanvasState {
 	cards: SessionCard[];
@@ -655,6 +662,8 @@ interface CanvasState {
 	logCursorDebug: (cardId: string | undefined, lines: string[]) => void;
 	setCardError: (id: string, message: string) => void;
 	clearCardError: (id: string) => void;
+	/** Re-run background compaction after a failure (error banner Retry button). */
+	retryCompaction: (id: string) => void;
 	/**
 	 * Write the card's unsent composer text. The updater form reads the current
 	 * draft inside the same store write, so appends can't lose a keystroke that
@@ -714,13 +723,8 @@ interface CanvasState {
 	) => Promise<string | null>;
 	/** Distill a card's session into a handoff note artifact spawned beside it. */
 	createHandoff: (sourceCardId: string) => Promise<void>;
-	/** /compact: archive transcript, fresh session, handoff text in composer. */
-	createCompact: (sourceCardId: string) => Promise<void>;
 	/** Toggle which archived history is shown (null = live session). */
 	setViewingHistory: (cardId: string, historyId: string | null) => void;
-	latchCompactOffer: (cardId: string) => void;
-	clearCompactOfferLatch: (cardId: string) => void;
-	dismissCompactOffer: (cardId: string) => void;
 	/** Retry generation on a note card stuck in the error state. */
 	retryHandoff: (noteCardId: string) => Promise<void>;
 	/** Sync a note card with its artifact file (mount / canvas switch). */
@@ -799,8 +803,6 @@ const manualSaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
 const jobStreams = new Map<string, EventSource>();
 /** Source cards with a handoff generation in flight (double-click guard). */
 const generatingNotes = new Set<string>();
-/** Cards mid-/compact (distill + session swap). */
-const generatingCompacts = new Set<string>();
 
 function patchNote(cardId: string, patch: Partial<NoteState>) {
 	const cur = findCard(cardId);
@@ -1175,272 +1177,6 @@ async function slashHandoff(cardId: string, message: string): Promise<boolean> {
 	return true;
 }
 
-/**
- * Distill the live session into a handoff body (no note card on the canvas).
- * Streams status into the card log; optional onDelta for the composer draft.
- */
-async function waitForHandoffBody(
-	params: {
-		cwd: string;
-		sourceCardId: string;
-		sourceTitle: string;
-		model?: string;
-		focus?: string;
-		sessionFile?: string;
-	},
-	onDelta?: (chunk: string) => void,
-	onStatus?: (message: string) => void,
-): Promise<{ body: string; artifactId: string; title: string }> {
-	const res = await fetch("/notes/generate/start", {
-		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify({
-			cwd: params.cwd,
-			sourceCardId: params.sourceCardId,
-			sourceTitle: params.sourceTitle,
-			sessionFile: params.sessionFile,
-			canvasId: useCanvasStore.getState().canvasId,
-			model: params.model,
-			focus: params.focus || undefined,
-		}),
-	});
-	if (!res.ok) {
-		const d = (await res.json().catch(() => ({}))) as { error?: string };
-		throw new Error(d.error ?? `HTTP ${res.status}`);
-	}
-	const d = (await res.json()) as { id: string; jobId: string };
-	return new Promise((resolve, reject) => {
-		let body = "";
-		const es = new EventSource(`/notes/jobs/${d.jobId}/events`);
-		es.onmessage = (ev) => {
-			const data = JSON.parse(ev.data as string) as
-				| { type: "status"; message: string }
-				| { type: "delta"; text: string }
-				| {
-						type: "done";
-						artifact: { id: string; title: string; body: string };
-				  }
-				| { type: "error"; message: string };
-			if (data.type === "status") {
-				onStatus?.(data.message);
-			} else if (data.type === "delta") {
-				body += data.text;
-				onDelta?.(data.text);
-			} else if (data.type === "done") {
-				es.close();
-				resolve({
-					body: data.artifact.body || body,
-					artifactId: data.artifact.id || d.id,
-					title: data.artifact.title || params.sourceTitle,
-				});
-			} else {
-				es.close();
-				reject(new Error(data.message));
-			}
-		};
-		es.onerror = () => {
-			es.close();
-			reject(new Error("connection lost during compact distill"));
-		};
-	});
-}
-
-/** Tear down the live SSE + server runtime so POST /sessions can create a fresh one. */
-async function tearDownLiveSession(cardId: string): Promise<void> {
-	const st = streams.get(cardId);
-	if (st) {
-		st.es.close();
-		streams.delete(cardId);
-	}
-	attached.delete(cardId);
-	const card = findCard(cardId);
-	const provider = card?.model?.split("/", 1)[0]?.toLowerCase() ?? "";
-	const isolation = provider === "cursor" || provider === "claude-bridge" || provider === "antigravity";
-	try {
-		if (isolation) {
-			await fetch(`/sessions/${encodeURIComponent(cardId)}`, { method: "DELETE" });
-		} else {
-			await fetch(`/sessions/${encodeURIComponent(cardId)}/abort`, { method: "POST" });
-		}
-	} catch {
-		/* offline / already gone */
-	}
-}
-
-/**
- * /compact [focus] — distill this chat, archive the transcript under Previous
- * history, start a fresh empty session on the same card, and put the handoff
- * text in the composer so the user can edit before sending.
- */
-async function slashCompact(cardId: string, message: string): Promise<boolean> {
-	const state = useCanvasStore.getState();
-	const src = findCard(cardId);
-	if (!src || state.serverOffline || !state.folder) return false;
-	if (src.kind === "note" || src.kind === "document") {
-		patchCardInStore(cardId, (c) => ({
-			...c,
-			messages: [...c.messages, { role: "system", text: "compact works on chat cards only" }],
-		}));
-		return true;
-	}
-	if (generatingCompacts.has(cardId) || src.compacting) {
-		patchCardInStore(cardId, (c) => ({
-			...c,
-			messages: [...c.messages, { role: "system", text: "compact already in progress" }],
-		}));
-		return true;
-	}
-	if (!src.sessionFile && src.messages.filter((m) => m.role === "user" || m.role === "assistant").length === 0) {
-		patchCardInStore(cardId, (c) => ({
-			...c,
-			messages: [...c.messages, { role: "system", text: "nothing to compact yet" }],
-		}));
-		return true;
-	}
-
-	generatingCompacts.add(cardId);
-	const focus = message.trim() || undefined;
-	const label = `History ${new Date().toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}`;
-	const existingDraft = src.draft?.trim() ?? "";
-
-	patchCardInStore(cardId, (c) => ({
-		...c,
-		compacting: true,
-		viewingHistoryId: null,
-		draft: "",
-		messages: [
-			...c.messages,
-			{ role: "system", text: "Compacting… distilling this chat into a handoff for the new session" },
-		],
-	}));
-
-	// Stop any in-flight turn so the session file is stable for distill.
-	try {
-		await fetch(`/sessions/${encodeURIComponent(cardId)}/abort`, { method: "POST" });
-	} catch {
-		/* ok */
-	}
-
-	try {
-		const attachedOk = await ensureCardAttached(cardId);
-		const afterAttach = findCard(cardId) ?? src;
-		pushLog(
-			cardId,
-			`• compact start: attached=${attachedOk} sessionFile=${afterAttach.sessionFile ?? "(none)"} msgs=${afterAttach.messages.length}`,
-		);
-		if (!afterAttach.sessionFile) {
-			throw new Error("source card has no flushed session yet — send a message first");
-		}
-		const distilled = await waitForHandoffBody(
-			{
-				cwd: state.folder,
-				sourceCardId: cardId,
-				sourceTitle: (focus || src.title || "compact").slice(0, 80),
-				model: afterAttach.model ?? src.model,
-				focus,
-				sessionFile: afterAttach.sessionFile,
-			},
-			(chunk) => {
-				useCanvasStore.getState().setCardDraft(cardId, (prev) => prev + chunk);
-			},
-			(status) => pushLog(cardId, `• compact: ${status}`),
-		);
-
-		const latest = findCard(cardId);
-		if (!latest) return true;
-
-		const historyEntry: CompactHistoryEntry = {
-			id: `hist_${nanoid(8)}`,
-			sessionFile: latest.sessionFile,
-			messages: latest.messages.filter((m) => !(m.role === "system" && m.text.startsWith("Compacting…"))),
-			contextUsage: latest.contextUsage,
-			label,
-			archivedAt: Date.now(),
-		};
-
-		await tearDownLiveSession(cardId);
-
-		const cwd = state.agentCwd() ?? state.folder;
-		const res = await fetch("/sessions", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				cardId,
-				cwd,
-				model: latest.model,
-				skills: latest.skills ?? [],
-				...(latest.agentProfileId ? { agentProfileId: latest.agentProfileId } : {}),
-				...(latest.thinkingLevel ? { thinkingLevel: latest.thinkingLevel } : {}),
-			}),
-		});
-		if (!res.ok) {
-			const d = (await res.json().catch(() => ({}))) as { error?: string };
-			throw new Error(d.error ?? `fresh session HTTP ${res.status}`);
-		}
-		const info = (await res.json()) as {
-			sessionFile?: string;
-			model?: string;
-			thinkingLevel?: string;
-			thinkingLevels?: string[];
-		};
-
-		const draftBody = distilled.body.trim();
-		const draft = existingDraft ? `${draftBody}\n\n${existingDraft}` : draftBody;
-
-		useCanvasStore.getState().updateCard(cardId, {
-			sessionFile: info.sessionFile,
-			model: info.model ?? latest.model,
-			...(info.thinkingLevel ? { thinkingLevel: info.thinkingLevel } : {}),
-			...(Array.isArray(info.thinkingLevels) ? { thinkingLevels: info.thinkingLevels } : {}),
-			messages: [
-				{
-					role: "system",
-					text: `✓ compacted — previous chat saved under Previous history. Edit the handoff in the input, then send when ready.`,
-				},
-			],
-			contextUsage: undefined,
-			queue: [],
-			pendingExtensionUi: undefined,
-			error: undefined,
-			status: "idle",
-			sessionHistory: [...(latest.sessionHistory ?? []), historyEntry],
-			viewingHistoryId: null,
-			compacting: false,
-			compactOfferLatched: false,
-			compactOfferOpen: false,
-			draft,
-			pendingDraft: undefined,
-		});
-		attached.add(cardId);
-		ensureCardEventStream(cardId);
-		pushLog(
-			cardId,
-			`✓ compact done — archived as ${label}; fresh session ${info.sessionFile?.split("/").pop() ?? "?"}`,
-		);
-		return true;
-	} catch (e) {
-		const msg = e instanceof Error ? e.message : String(e);
-		const latest = findCard(cardId);
-		patchCardInStore(cardId, (c) => ({
-			...c,
-			compacting: false,
-			debug: true,
-			messages: [
-				...c.messages.filter((m) => !(m.role === "system" && m.text.startsWith("Compacting…"))),
-				{ role: "system", text: `✗ compact failed: ${msg}` },
-			],
-		}));
-		pushCursorDebug(cardId, [
-			`✗ compact failed: ${msg}`,
-			`• compact reason: ${msg}`,
-			`• compact diag: attached=${attached.has(cardId)} sessionFile=${latest?.sessionFile ?? src.sessionFile ?? "(none)"} messages=${latest?.messages.length ?? src.messages.length} model=${latest?.model ?? src.model ?? "?"}`,
-		]);
-		return false;
-	} finally {
-		generatingCompacts.delete(cardId);
-	}
-}
-
 /** Start a merge job (distill-each + synthesis, streamed live). */
 async function startMergeJob(
 	noteCardId: string,
@@ -1783,6 +1519,13 @@ function ensureCardEventStream(cardId: string): void {
 						path?: string;
 				  }
 				| { type: "raw"; text: string }
+				| {
+						type: "compaction_done";
+						fromTokens?: number;
+						toTokens?: number;
+						reason?: string;
+				  }
+				| { type: "compaction_failed"; error: string }
 				| { type: "turn_end"; stopReason?: string; error?: string }
 				| {
 						type: "agent_meta";
@@ -1991,6 +1734,21 @@ function ensureCardEventStream(cardId: string): void {
 			} else if (data.type === "raw") {
 				pushEvent(cardId, { kind: "system", name: "note", detail: data.text });
 				pushLog(cardId, `• ${data.text}`);
+			} else if (data.type === "compaction_done") {
+				const fmt = (n?: number) => (n == null ? "?" : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+				const span = data.fromTokens
+					? ` — ${fmt(data.fromTokens)} tokens${data.toTokens ? ` → ${fmt(data.toTokens)}` : " freed"}`
+					: "";
+				pushLog(cardId, `✓ compaction done${span}`);
+				patchCardInStore(cardId, (c) => ({
+					...c,
+					compactionFailed: false,
+					messages: [...c.messages, { role: "system", text: `✓ context compacted in background${span}` }],
+				}));
+			} else if (data.type === "compaction_failed") {
+				pushLog(cardId, `✗ compaction failed: ${data.error}`);
+				useCanvasStore.getState().setCardError(cardId, `Context compaction failed: ${data.error}`);
+				patchCardInStore(cardId, (c) => ({ ...c, compactionFailed: true }));
 			} else if (data.type === "turn_end") {
 				st!.segSealed = true;
 				if (data.error) {
@@ -2828,28 +2586,51 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}
 		// Persist Local with null path (not folder) so on-disk mode stays clear.
 		const pathForSave = worktreeMode === "isolated" && worktreePath && worktreePath !== folder ? worktreePath : null;
-		const res = await fetch(`/canvases/${canvasId}`, {
-			method: "PUT",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
+		const body = JSON.stringify({
+			cwd: folder,
+			allowEmpty: allowEmpty || undefined,
+			canvas: {
+				id: canvasId,
+				name: canvasName || "Untitled",
 				cwd: folder,
-				allowEmpty: allowEmpty || undefined,
-				canvas: {
-					id: canvasId,
-					name: canvasName || "Untitled",
-					cwd: folder,
-					viewport,
-					cards: cold,
-					worktreePath: pathForSave ?? undefined,
-					branch: branch ?? undefined,
-					baseBranch: baseBranch ?? undefined,
-					useWorktree,
-					worktreeMode,
-				},
-			}),
-		}).catch(() => null);
+				viewport,
+				cards: cold,
+				worktreePath: pathForSave ?? undefined,
+				branch: branch ?? undefined,
+				baseBranch: baseBranch ?? undefined,
+				useWorktree,
+				worktreeMode,
+			},
+		});
+		// keepalive lets the pagehide-flush save survive tab close/refresh.
+		const doPut = () =>
+			fetch(`/canvases/${canvasId}`, {
+				method: "PUT",
+				headers: { "content-type": "application/json" },
+				body,
+				keepalive: true,
+			});
+		let res: Response | null = null;
+		let lastNetErr: unknown;
+		for (let attempt = 0; attempt < 3; attempt++) {
+			try {
+				res = await doPut();
+				break;
+			} catch (e) {
+				lastNetErr = e;
+				// When the health poll has already flagged the server offline it
+				// owns recovery (healAfterReconnect); don't spin retries here.
+				if (get().serverOffline) break;
+				if (attempt < 2) await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+			}
+		}
 		if (!res) {
-			set({ canvasNotice: "Could not save canvas (network error)." });
+			const detail = lastNetErr instanceof Error ? `${lastNetErr.name}: ${lastNetErr.message}` : String(lastNetErr);
+			console.warn(`[canvas] save PUT /canvases/${canvasId} failed: ${detail}`);
+			// Offline banner already explains the state — don't stack a second notice.
+			if (!get().serverOffline) {
+				set({ canvasNotice: `Could not save canvas (network error: ${detail}).` });
+			}
 			return;
 		}
 		if (res.status === 409) {
@@ -3909,7 +3690,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		get().updateCard(id, { error: message });
 	},
 	clearCardError(id) {
-		get().updateCard(id, { error: undefined });
+		get().updateCard(id, { error: undefined, compactionFailed: false });
+	},
+
+	// Background compaction failed — the error banner's Retry re-runs it now.
+	retryCompaction(id) {
+		get().updateCard(id, { error: undefined, compactionFailed: false });
+		void get().sendMessage(id, "/blackhole");
 	},
 
 	setCardDraft(id, draft) {
@@ -4270,26 +4057,8 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		}
 	},
 
-	async createCompact(sourceCardId) {
-		const src = findCard(sourceCardId);
-		if (!src || get().serverOffline) return;
-		await slashCompact(sourceCardId, "");
-	},
-
 	setViewingHistory(cardId, historyId) {
 		get().updateCard(cardId, { viewingHistoryId: historyId });
-	},
-
-	clearCompactOfferLatch(cardId) {
-		get().updateCard(cardId, { compactOfferLatched: false, compactOfferOpen: false });
-	},
-
-	latchCompactOffer(cardId) {
-		get().updateCard(cardId, { compactOfferLatched: true, compactOfferOpen: true });
-	},
-
-	dismissCompactOffer(cardId) {
-		get().updateCard(cardId, { compactOfferOpen: false });
 	},
 
 	async retryHandoff(noteCardId) {
@@ -4655,6 +4424,13 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	},
 
 	async sendMessage(cardId, text, opts) {
+		// /compact is an alias for /blackhole: pi-blackhole compacts the session
+		// in place (deterministic, no LLM) — no archive, no fresh session, and
+		// nothing lands in the composer.
+		const trimmedInput = text.trim();
+		if (/^\/compact(?:\s|$)/i.test(trimmedInput)) {
+			text = trimmedInput.replace(/^\/compact/i, "/blackhole");
+		}
 		const card = findCard(cardId);
 		const attachments = opts?.attachments ?? [];
 		const images =
@@ -4687,9 +4463,6 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 		boxMailLog("parsed", { command: parsed.command, mentions: parsed.mentions });
 		if (parsed.command?.name === "handoff") {
 			return slashHandoff(cardId, parsed.command.args);
-		}
-		if (parsed.command?.name === "compact") {
-			return slashCompact(cardId, parsed.command.args);
 		}
 		if (parsed.command?.name === "send") {
 			return slashSend(cardId, parsed.command.args);

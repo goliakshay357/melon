@@ -1,6 +1,6 @@
 import { app, BrowserWindow, Menu, ipcMain, dialog, shell } from 'electron';
 import { spawn } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -9,6 +9,8 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 // Melon owns its data dir, isolated from the terminal pi CLI (~/.pi/agent).
 const MELON_AGENT_DIR = join(homedir(), '.melon', 'agent');
 const SETTINGS_FILE = join(MELON_AGENT_DIR, 'melon', 'settings.json');
+const COMPILE_CACHE_DIR = join(MELON_AGENT_DIR, 'compile-cache');
+mkdirSync(COMPILE_CACHE_DIR, { recursive: true });
 
 function loadDeveloperDebuggerEnabled() {
     try {
@@ -54,6 +56,9 @@ const serverProc = spawn(
             ELECTRON_RUN_AS_NODE: '1',
             MELON_PORT: '0',
             MELON_CODING_AGENT_DIR: MELON_AGENT_DIR,
+            // Persistent V8 module compile cache: first launch writes it, later
+            // launches skip re-parsing the server's whole module graph.
+            NODE_COMPILE_CACHE: COMPILE_CACHE_DIR,
             // Same version electron-builder stamped into package.json / DMG name.
             MELON_VERSION: app.getVersion(),
         },

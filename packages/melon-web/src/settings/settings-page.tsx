@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { SkillsManager, SkillEditor, type SkillPrefill } from '@/components/skills-manager';
 import { AgentsManager, AgentEditor, type AgentPrefill } from '@/components/agents-manager';
 import { ProvidersSection } from '@/settings/providers-section';
+import { WebAccessSection } from '@/settings/web-access-section';
+import { ExtensionsSection } from '@/settings/extensions-section';
 import { confirmAction } from '@/components/dialogs';
 import { THEMES } from '@/theme/themes';
 import { useThemeStore } from '@/theme/theme-store';
@@ -9,13 +11,15 @@ import { useDeveloperStore } from '@/settings/developer-store';
 import { useCanvasStore, type AppView } from '@/store/canvas-store';
 import { cn } from '@/lib/utils';
 
-type SettingsSection = 'agents' | 'skills' | 'themes' | 'providers' | 'developer';
+type SettingsSection = 'agents' | 'skills' | 'themes' | 'providers' | 'developer' | 'webaccess' | 'extensions';
 
 function sectionFromView(view: AppView): SettingsSection {
     if (view === 'agents') return 'agents';
     if (view === 'themes') return 'themes';
     if (view === 'providers') return 'providers';
     if (view === 'developer') return 'developer';
+    if (view === 'webaccess') return 'webaccess';
+    if (view === 'extensions') return 'extensions';
     return 'skills';
 }
 
@@ -177,6 +181,10 @@ export function SettingsPage() {
                     <div className="mx-auto flex h-full w-full max-w-3xl flex-col p-5">
                         <ProvidersSection />
                     </div>
+                ) : section === 'webaccess' ? (
+                    <WebAccessSection />
+                ) : section === 'extensions' ? (
+                    <ExtensionsSection />
                 ) : section === 'developer' ? (
                     <div className="mx-auto h-full w-full max-w-3xl overflow-y-auto p-5">
                         <div className="space-y-3">

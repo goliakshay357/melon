@@ -209,6 +209,8 @@ export interface SessionCard {
 	debug?: boolean;
 	/** Prominent error banner — the current failure reason, if any. */
 	error?: string;
+	/** Background compaction failed — the error banner shows a Retry button. */
+	compactionFailed?: boolean;
 	/** How full the model's context window is (from pi's getContextUsage). */
 	contextUsage?: { tokens: number | null; contextWindow: number; percent: number | null };
 	/** Active skill ids for this card (injected into prompts). Default OFF. */
@@ -257,12 +259,6 @@ export interface SessionCard {
 	sessionHistory?: CompactHistoryEntry[];
 	/** Which archived history is on screen; null/undefined = live session. */
 	viewingHistoryId?: string | null;
-	/** True while /compact is distilling + swapping sessions. */
-	compacting?: boolean;
-	/** Latch: already auto-offered compact for this fill cycle. */
-	compactOfferLatched?: boolean;
-	/** In-card top banner offering Compact (like the error strip). */
-	compactOfferOpen?: boolean;
 	/**
 	 * Unsent composer text. Lives here, not in the card component: React Flow
 	 * unmounts off-screen nodes (onlyRenderVisibleElements), so component state

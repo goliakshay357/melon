@@ -1686,26 +1686,6 @@ function ChatCardNodeInner({
         useCanvasStore.getState().updateCard(id, { pendingDraft: undefined });
     }, [card?.pendingDraft, id, setDraft]);
 
-    // At ~90% context, show an in-card Compact banner once per fill cycle.
-    useEffect(() => {
-        if (!card || card.kind === 'note' || card.kind === 'document') return;
-        const pct = card.contextUsage?.percent;
-        if (pct == null) return;
-        if (pct < 85 && card.compactOfferLatched) {
-            useCanvasStore.getState().clearCompactOfferLatch(id);
-            return;
-        }
-        if (pct < 90 || card.compactOfferLatched || card.compacting || serverOffline) return;
-        useCanvasStore.getState().latchCompactOffer(id);
-    }, [
-        card?.contextUsage?.percent,
-        card?.compactOfferLatched,
-        card?.compacting,
-        card?.kind,
-        id,
-        serverOffline,
-    ]);
-
     // The persisted queue is a mirror of pi's in-memory queue, which dies
     // with the server. Resync once per mount so stale chips (app restart,
     // page reload) never show messages that will never run.
@@ -2293,18 +2273,16 @@ function ChatCardNodeInner({
                 onPermissionChange={(permission) =>
                     useCanvasStore.getState().updateCard(id, { permission })
                 }
-                sending={card.status === 'streaming' || Boolean(card.compacting)}
+                sending={card.status === 'streaming'}
                 onStop={abortStream}
-                disabled={serverOffline || viewingHistory || Boolean(card.compacting)}
+                disabled={serverOffline || viewingHistory}
                 cardId={id}
                 placeholder={
                     serverOffline
                         ? 'Reconnecting to server…'
                         : viewingHistory
                           ? 'Viewing previous history — switch back to live to chat'
-                          : card.compacting
-                            ? 'Compacting… handoff will land here'
-                            : 'Ask anything…  (Enter to send, Shift+Enter for newline)'
+                          : 'Ask anything…  (Enter to send, Shift+Enter for newline)'
                 }
             />
         </div>
@@ -2348,6 +2326,18 @@ function ChatCardNodeInner({
                         <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-red-300">
                             {card.error}
                         </span>
+                        {card.compactionFailed && (
+                            <button
+                                className="nodrag shrink-0 rounded border border-red-400/40 px-2 py-0.5 text-[11px] text-red-200 transition-colors hover:bg-red-500/20"
+                                onClick={(e) => {
+                                    e.stopPropagation();
+                                    useCanvasStore.getState().retryCompaction(id);
+                                }}
+                                title="Retry background compaction"
+                            >
+                                Retry
+                            </button>
+                        )}
                         <button
                             className="nodrag shrink-0 rounded p-0.5 text-red-400 transition-colors hover:bg-red-500/20 hover:text-red-200"
                             onClick={(e) => {
@@ -2360,36 +2350,6 @@ function ChatCardNodeInner({
                         </button>
                     </div>
                 )}
-                {card.compactOfferOpen && !card.compacting ? (
-                    <div className="nodrag flex items-start gap-2 border-b border-amber-500/30 bg-amber-500/10 px-3 py-2">
-                        <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-amber-200">
-                            Context is getting full (~{contextPct ?? 90}%). Compact archives this chat under Previous history and puts a handoff in the input.
-                        </span>
-                        <button
-                            type="button"
-                            className="nodrag shrink-0 rounded-md bg-amber-500/20 px-2 py-0.5 text-[11px] font-medium text-amber-100 transition-colors hover:bg-amber-500/30 disabled:opacity-40"
-                            disabled={serverOffline}
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                useCanvasStore.getState().dismissCompactOffer(id);
-                                void useCanvasStore.getState().createCompact(id);
-                            }}
-                        >
-                            Compact
-                        </button>
-                        <button
-                            type="button"
-                            className="nodrag shrink-0 rounded p-0.5 text-amber-300/80 transition-colors hover:bg-amber-500/20 hover:text-amber-100"
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                useCanvasStore.getState().dismissCompactOffer(id);
-                            }}
-                            title="Dismiss"
-                        >
-                            <X className="size-3.5" />
-                        </button>
-                    </div>
-                ) : null}
                 {view === 'trajectory'
                     ? trajectoryBody
                     : view === 'json'
@@ -2412,6 +2372,18 @@ function ChatCardNodeInner({
                                     <span className="min-w-0 flex-1 break-words text-[11px] leading-relaxed text-red-300">
                                         {card.error}
                                     </span>
+                                    {card.compactionFailed && (
+                                        <button
+                                            className="nodrag shrink-0 rounded border border-red-400/40 px-2 py-0.5 text-[11px] text-red-200 transition-colors hover:bg-red-500/20"
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                useCanvasStore.getState().retryCompaction(id);
+                                            }}
+                                            title="Retry background compaction"
+                                        >
+                                            Retry
+                                        </button>
+                                    )}
                                     <button
                                         className="nodrag shrink-0 rounded p-0.5 text-red-400 transition-colors hover:bg-red-500/20 hover:text-red-200"
                                         onClick={(e) => {
@@ -2424,37 +2396,6 @@ function ChatCardNodeInner({
                                     </button>
                                 </div>
                             )}
-                            {card.compactOfferOpen && !card.compacting ? (
-                                <div className="nodrag flex flex-wrap items-center px-5 pt-2">
-                                    <div className="flex items-center gap-1.5 rounded-full border border-amber-500/30 bg-amber-500/10 py-1 pl-3 pr-1.5 text-[11px] text-amber-200">
-                                        <span className="tabular-nums">Context ~{contextPct ?? 90}% full</span>
-                                        <button
-                                            type="button"
-                                            className="nodrag rounded-full bg-amber-500/20 px-2 py-0.5 font-medium text-amber-100 transition-colors hover:bg-amber-500/30 disabled:opacity-40"
-                                            disabled={serverOffline}
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                useCanvasStore.getState().dismissCompactOffer(id);
-                                                void useCanvasStore.getState().createCompact(id);
-                                            }}
-                                        >
-                                            Compact
-                                        </button>
-                                        <button
-                                            type="button"
-                                            className="nodrag rounded-full p-1 text-amber-300/80 transition-colors hover:bg-amber-500/20 hover:text-amber-100"
-                                            onClick={(e) => {
-                                                e.stopPropagation();
-                                                useCanvasStore.getState().dismissCompactOffer(id);
-                                            }}
-                                            title="Dismiss"
-                                            aria-label="Dismiss context warning"
-                                        >
-                                            <X className="size-3" />
-                                        </button>
-                                    </div>
-                                </div>
-                            ) : null}
                         </>
                     }
                 >
