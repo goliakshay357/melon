@@ -593,7 +593,10 @@ interface CanvasState {
 			attachments?: ComposerAttachment[];
 		},
 	) => Promise<boolean>;
-	saveCanvas: (opts?: { allowEmpty?: boolean }) => Promise<void>;
+	saveCanvas: (opts?: {
+		allowEmpty?: boolean /** pagehide flush — may use fetch keepalive */;
+		unload?: boolean;
+	}) => Promise<void>;
 	scrollAction: ScrollAction;
 	setScrollAction: (a: ScrollAction) => void;
 	addCard: (
@@ -2561,6 +2564,7 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 	},
 
 	async saveCanvas(opts) {
+		const unload = opts?.unload === true;
 		const {
 			folder,
 			canvasId,
@@ -2602,13 +2606,15 @@ export const useCanvasStore = create<CanvasState>((set, get) => ({
 				worktreeMode,
 			},
 		});
-		// keepalive lets the pagehide-flush save survive tab close/refresh.
+		// keepalive survives tab close but Chromium rejects bodies > ~64KiB — use only
+		// on pagehide or when the payload is small; normal chat autosaves must not set it.
+		const keepalive = unload && body.length <= 64 * 1024;
 		const doPut = () =>
 			fetch(`/canvases/${canvasId}`, {
 				method: "PUT",
 				headers: { "content-type": "application/json" },
 				body,
-				keepalive: true,
+				...(keepalive ? { keepalive: true } : {}),
 			});
 		let res: Response | null = null;
 		let lastNetErr: unknown;

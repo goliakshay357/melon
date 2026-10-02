@@ -208,7 +208,7 @@ export function Canvas() {
 	useEffect(() => {
 		const onLeave = () => {
 			useCanvasStore.getState().flushPending();
-			useCanvasStore.getState().saveCanvas();
+			void useCanvasStore.getState().saveCanvas({ unload: true });
 		};
 		window.addEventListener('pagehide', onLeave);
 		return () => window.removeEventListener('pagehide', onLeave);
