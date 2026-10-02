@@ -39,6 +39,13 @@ describe("CardExtensionUiBridge", () => {
 		await expect(pending).resolves.toBe("x");
 	});
 
+	it("theme.fg is a passthrough so TUI extensions cannot crash Melon", () => {
+		const ui = new CardExtensionUiBridge("card_theme", () => {}).getUIContext();
+		expect(typeof ui.theme.fg).toBe("function");
+		expect(ui.theme.fg("success", "bh")).toBe("bh");
+		expect(ui.theme.bold("x")).toBe("x");
+	});
+
 	it("respond returns false for unknown id without settling others", async () => {
 		const bridge = new CardExtensionUiBridge("card_miss", () => {});
 		const ui = bridge.createUIContext();
