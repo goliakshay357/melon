@@ -1743,11 +1743,30 @@ function ensureCardEventStream(cardId: string): void {
 					? ` — ${fmt(data.fromTokens)} tokens${data.toTokens ? ` → ${fmt(data.toTokens)}` : " freed"}`
 					: "";
 				pushLog(cardId, `✓ compaction done${span}`);
-				patchCardInStore(cardId, (c) => ({
-					...c,
-					compactionFailed: false,
-					messages: [...c.messages, { role: "system", text: `✓ context compacted in background${span}` }],
-				}));
+				patchCardInStore(cardId, (c) => {
+					const next: typeof c = {
+						...c,
+						compactionFailed: false,
+						messages: [
+							...c.messages,
+							{ role: "system" as const, text: `✓ context compacted in background${span}` },
+						],
+					};
+					// Optimistic meter from blackhole estimate if the server estimate
+					// frame hasn't arrived yet (or context_usage was skipped).
+					const cw = c.contextUsage?.contextWindow;
+					if (typeof data.toTokens === "number" && data.toTokens >= 0 && cw && cw > 0) {
+						return {
+							...next,
+							contextUsage: {
+								tokens: data.toTokens,
+								contextWindow: cw,
+								percent: (data.toTokens / cw) * 100,
+							},
+						};
+					}
+					return next;
+				});
 			} else if (data.type === "compaction_failed") {
 				pushLog(cardId, `✗ compaction failed: ${data.error}`);
 				useCanvasStore.getState().setCardError(cardId, `Context compaction failed: ${data.error}`);

@@ -831,6 +831,31 @@ export async function buildApp(deps = {}) {
                             toTokens: ce.result.estimatedTokensAfter,
                             reason: ce.reason,
                         });
+                        // getContextUsage() returns null tokens until the next LLM turn
+                        // after compaction. Push blackhole's estimate so the meter drops now.
+                        const estimated = ce.result.estimatedTokensAfter;
+                        if (typeof estimated === "number" && estimated >= 0) {
+                            try {
+                                const cu = runtime.session.getContextUsage?.();
+                                const contextWindow = cu?.contextWindow ??
+                                    runtime.session.model?.contextWindow ??
+                                    0;
+                                if (contextWindow > 0) {
+                                    registry.broadcast(cardId, {
+                                        type: "context_usage",
+                                        tokens: estimated,
+                                        contextWindow,
+                                        percent: (estimated / contextWindow) * 100,
+                                    });
+                                }
+                            }
+                            catch {
+                                /* estimate is best-effort */
+                            }
+                        }
+                        else {
+                            broadcastCtx(true);
+                        }
                     }
                 }
                 else if (event.type === "queue_update") {
