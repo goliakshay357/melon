@@ -25,6 +25,7 @@ import {
 	watch,
 	writeFileSync,
 } from "node:fs";
+import { enableCompileCache, flushCompileCache } from "node:module";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -45,6 +46,12 @@ import {
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance, type FastifyPluginAsync } from "fastify";
+
+// Enable the on-disk V8 compile cache for anything loaded after startup
+// (dynamic extension/skill imports). The statically-imported module graph is
+// covered by NODE_COMPILE_CACHE, which the Electron parent sets in our env.
+enableCompileCache();
+
 import {
 	createAgentProfile,
 	deleteAgentProfile,
@@ -209,6 +216,14 @@ function parsePromptImages(raw: unknown): QueuedPromptImage[] | undefined {
 	return out.length > 0 ? out : undefined;
 }
 
+import {
+	installPackage,
+	listPackages,
+	loadWebSearchConfig,
+	removePackage,
+	saveWebSearchConfig,
+	updatePackages,
+} from "./extensions.ts";
 import {
 	clearProviderDenylist,
 	denylistModel,
@@ -1001,6 +1016,29 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 					});
 				} else if (event.type === "compaction_start") {
 					registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
+				} else if (event.type === "compaction_end") {
+					// Background compaction finished (auto threshold or /blackhole).
+					// Tell the client so it can notify — or offer a retry on failure.
+					const ce = event as {
+						aborted?: boolean;
+						willRetry?: boolean;
+						errorMessage?: string;
+						reason?: string;
+						result?: { tokensBefore?: number; estimatedTokensAfter?: number } | undefined;
+					};
+					if (ce.errorMessage && !ce.willRetry) {
+						registry.broadcast(cardId, {
+							type: "compaction_failed",
+							error: ce.errorMessage,
+						});
+					} else if (!ce.aborted && ce.result) {
+						registry.broadcast(cardId, {
+							type: "compaction_done",
+							fromTokens: ce.result.tokensBefore,
+							toTokens: ce.result.estimatedTokensAfter,
+							reason: ce.reason,
+						});
+					}
 				} else if (event.type === "queue_update") {
 					// pi's internal followUp queue is NOT the prompt queue anymore
 					// (the server owns queuing); only log for the trajectory.
@@ -4468,6 +4506,70 @@ export async function buildApp(deps: MelonServerDeps = {}): Promise<FastifyInsta
 		return { ok: true };
 	});
 
+	// --- Web access (pi-web-access web-search.json) ----------------------------
+
+	app.get("/web-access", async () => ({ config: loadWebSearchConfig() }));
+
+	app.put("/web-access", async (req, reply) => {
+		const body = req.body as any;
+		if (!body || typeof body !== "object" || Array.isArray(body)) {
+			return reply.code(400).send({ error: "object body required" });
+		}
+		try {
+			const config = saveWebSearchConfig(body);
+			return { ok: true, config };
+		} catch (e) {
+			return reply.code(500).send({ error: (e as Error).message });
+		}
+	});
+
+	// --- Pi package manager (extensions) --------------------------------------
+
+	app.get("/packages", async (_req, reply) => {
+		try {
+			return { packages: listPackages() };
+		} catch (e) {
+			return reply.code(500).send({ error: (e as Error).message });
+		}
+	});
+
+	app.post("/packages/install", async (req, reply) => {
+		const source = (req.body as any)?.source;
+		if (typeof source !== "string" || !source.trim()) {
+			return reply.code(400).send({ error: "source required (e.g. npm:pkg@1.2.3 or a git URL)" });
+		}
+		try {
+			const packages = await installPackage(source.trim());
+			return { ok: true, packages };
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+	});
+
+	app.post("/packages/remove", async (req, reply) => {
+		const source = (req.body as any)?.source;
+		if (typeof source !== "string" || !source.trim()) {
+			return reply.code(400).send({ error: "source required" });
+		}
+		try {
+			const { removed, packages } = await removePackage(source.trim());
+			if (!removed) return reply.code(404).send({ error: "package not found in settings" });
+			return { ok: true, packages };
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+	});
+
+	app.post("/packages/update", async (req, reply) => {
+		const source = (req.body as any)?.source;
+		try {
+			const packages = await updatePackages(typeof source === "string" && source.trim() ? source.trim() : undefined);
+			return { ok: true, packages };
+		} catch (e) {
+			return reply.code(400).send({ error: (e as Error).message });
+		}
+	});
+
 	app.get("/auth/providers", async () => {
 		const mr = await getModelRuntime();
 		const settingsData = loadSettings();
@@ -5225,6 +5327,9 @@ if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop()
 	// Structured handshake for the Electron parent — do NOT change this format.
 	console.log(`MELON_READY ${JSON.stringify({ port: boundPort })}`);
 	console.error(`melon-server on http://127.0.0.1:${boundPort}`);
+	// Persist the V8 module compile cache now: the Electron parent kills this
+	// process with SIGKILL on shutdown, which skips Node's normal exit flush.
+	flushCompileCache();
 	const shutdown = () => {
 		void app.close().finally(() => process.exit(0));
 	};

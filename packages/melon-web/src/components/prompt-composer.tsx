@@ -224,8 +224,8 @@ export function PromptComposer({
             hint: 'distill this conversation into a note — your message names it and steers the focus',
         },
         {
-            name: 'compact',
-            hint: 'archive this chat under Previous history, start fresh, put the handoff in the input',
+            name: 'blackhole',
+            hint: 'compress this conversation in place — instant, nothing lands in the input',
         },
         {
             name: 'diagram',

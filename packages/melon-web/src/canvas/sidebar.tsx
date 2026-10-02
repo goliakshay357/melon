@@ -15,6 +15,8 @@ import {
     PanelLeftClose,
     PanelLeftOpen,
     Plus,
+    Puzzle,
+    Globe,
     Search,
     Server,
     Settings,
@@ -115,7 +117,7 @@ export function Sidebar() {
     const closeInbox = useCanvasStore((s) => s.closeInbox);
     const inboxOpen = useCanvasStore((s) => s.inboxOpen);
     const totalPending = cards.reduce((n, c) => n + (c.boxInboxPending ?? 0), 0);
-    const openView = (v: 'agents' | 'skills' | 'themes' | 'providers' | 'developer') => {
+    const openView = (v: 'agents' | 'skills' | 'themes' | 'providers' | 'developer' | 'webaccess' | 'extensions') => {
         closeInbox();
         setActiveView(v);
     };
@@ -621,6 +623,30 @@ export function Sidebar() {
                         onClick={() => openView('themes')}
                     >
                         <Palette className="size-4" />
+                    </button>
+                    <button
+                        className={cn(
+                            'rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
+                            activeView === 'webaccess' && 'bg-secondary text-foreground',
+                        )}
+                        title="Web access"
+                        aria-label="Web access"
+                        aria-current={activeView === 'webaccess' ? 'page' : undefined}
+                        onClick={() => openView('webaccess')}
+                    >
+                        <Globe className="size-4" />
+                    </button>
+                    <button
+                        className={cn(
+                            'rounded-lg p-2 transition-colors hover:bg-secondary hover:text-foreground',
+                            activeView === 'extensions' && 'bg-secondary text-foreground',
+                        )}
+                        title="Extensions"
+                        aria-label="Extensions"
+                        aria-current={activeView === 'extensions' ? 'page' : undefined}
+                        onClick={() => openView('extensions')}
+                    >
+                        <Puzzle className="size-4" />
                     </button>
                     <button
                         className={cn(

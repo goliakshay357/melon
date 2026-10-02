@@ -2,7 +2,7 @@
     "name": "melon",
     "version": "0.3.2",
     "private": true,
-    "description": "Melon canvas — desktop shell (Electron)",
+    "description": "Melon canvas \u2014 desktop shell (Electron)",
     "main": "main.mjs",
     "scripts": {
         "start": "electron .",
@@ -71,7 +71,8 @@
             "node_modules/@connectrpc/**/*",
             "node_modules/@modelcontextprotocol/**/*",
             "node_modules/@hono/**/*",
-            "node_modules/@buf/**/*"
+            "node_modules/@buf/**/*",
+            "node_modules/jiti/**/*"
         ]
     }
 }

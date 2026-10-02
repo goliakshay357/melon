@@ -13,20 +13,27 @@
 //   POST /sessions/:cardId/abort
 import { randomUUID } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, watch, writeFileSync, } from "node:fs";
+import { enableCompileCache, flushCompileCache } from "node:module";
 import { homedir } from "node:os";
-import { dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { uuidv7 } from "@earendil-works/pi-ai";
-import { createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, getAgentDir, HANDOFF_ARTIFACT_SYSTEM_PROMPT, MERGE_ARTIFACT_SYSTEM_PROMPT, ModelRuntime, REFINE_ARTIFACT_SYSTEM_PROMPT, SessionManager, serializeBranchForHandoff, } from "@earendil-works/pi-coding-agent";
+import { createAgentSessionFromServices, createAgentSessionRuntime, createAgentSessionServices, getAgentDir, getCapturedProviderRequest, HANDOFF_ARTIFACT_SYSTEM_PROMPT, MERGE_ARTIFACT_SYSTEM_PROMPT, ModelRuntime, REFINE_ARTIFACT_SYSTEM_PROMPT, SessionManager, serializeBranchForHandoff, } from "@earendil-works/pi-coding-agent";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import Fastify from "fastify";
-import { boxMailInboundText, deliverBoxMailToRecipient, recordBoxMailOutbound, sessionIsStreaming, } from "./box-mail.js";
-import { approveBoxInboxItem, dismissBoxInboxItem, enqueueBoxMail, getBoxInboxItem, inboxSnapshot, markBoxInboxDelivered, takeNextApprovedInbox, } from "./box-inbox.js";
+// Enable the on-disk V8 compile cache for anything loaded after startup
+// (dynamic extension/skill imports). The statically-imported module graph is
+// covered by NODE_COMPILE_CACHE, which the Electron parent sets in our env.
+enableCompileCache();
 import { createAgentProfile, deleteAgentProfile, formatAgentStandingInstructions, isValidAgentId, listAgentProfiles, readAgentProfile, topAgentProfiles, touchAgentProfileRecent, updateAgentProfile, } from "./agents.js";
 import { ANTIGRAVITY_PROVIDER_ID, antigravityExtensionEntryPath, antigravitySessionIsolationAvailable, getAntigravityCatalogStatus, hasAntigravityAuth, loadAntigravityProviderInto, } from "./antigravity-extension.js";
 import { cancelAntigravityLogin, getAntigravityLoginStatus, logoutAntigravity, startAntigravityLogin, waitAntigravityLogin, } from "./antigravity-login.js";
 import { runInBoundAntigravitySession, stripAntigravitySessionEntriesFromSessionFile, } from "./antigravity-session-binding.js";
+import { approveBoxInboxItem, dismissBoxInboxItem, editBoxInboxItem, enqueueBoxMail, getBoxInboxItem, inboxSnapshot, markBoxInboxDelivered, takeNextApprovedInbox, } from "./box-inbox.js";
+import { boxMailInboundText, deliverBoxMailToRecipient, recordBoxMailOutbound, sessionIsStreaming, } from "./box-mail.js";
+import { bindBoxMailHost, formatBoxDirectory, getBoxPeers, setBoxPeers, unbindBoxMailHost, } from "./box-mail-host.js";
+import { boxMailFileLog, mailBodyPreview } from "./box-mail-log.js";
 import { inspectCanvasShare, shareCanvasWork } from "./canvas-share.js";
 import { CLAUDE_BRIDGE_PROVIDER_ID, claudeBridgeIsolatedExtensionPath, claudeBridgeSessionIsolationAvailable, getClaudeBridgeCatalogStatus, hasClaudeBridgeAuth, loadClaudeBridgeProviderInto, } from "./claude-bridge-extension.js";
 import { cancelClaudeBridgeLogin, getClaudeBridgeLoginStatus, logoutClaudeBridge, startClaudeBridgeLogin, waitClaudeBridgeLogin, } from "./claude-bridge-login.js";
@@ -34,16 +41,38 @@ import { applyClaudeBridgeRuntimeEnv, getClaudeBridgeRuntimeStatus, requireClaud
 import { runInBoundClaudeBridgeSession, stripClaudeBridgeSessionEntriesFromSessionFile, } from "./claude-bridge-session-binding.js";
 import { expandHome, loadConfig, modelToString, preview, structuredToolArgs, toolTextPreview, } from "./config.js";
 import { CURSOR_PROVIDER_ID, cursorExtensionPath, cursorSessionIsolationAvailable, getCursorCatalogStatus, hasRealCursorKey, loadCursorProviderInto, rewriteCursorError, } from "./cursor-extension.js";
+import { cursorAutoDisplayName } from "./cursor-model-labels.js";
 import { runInBoundCursorSession, stripCursorResumeEntriesFromSessionFile } from "./cursor-session-binding.js";
 import { CardExtensionUiBridge } from "./extension-ui.js";
 import { fileExists, noteFiles, readTextFile, resolveInside, searchFiles } from "./files.js";
 import { fuzzyScore } from "./fuzzy.js";
-import { bindBoxMailHost, formatBoxDirectory, getBoxPeers, setBoxPeers, unbindBoxMailHost, } from "./box-mail-host.js";
 import { melonAskQuestionExtensionPath } from "./melon-ask-question.js";
 import { melonSendToBoxExtensionPath } from "./melon-send-to-box.js";
+import { listCustomModels, parseCustomModelInput, removeCustomModel, upsertCustomModel, } from "./model-catalog.js";
 import { createDeltaPump, createNoteJob, emitNoteJob, getNoteJob } from "./note-jobs.js";
 import { createManual, hashBody, isValidNoteId, listNotes, listTrashedNotes, loadNote, newNoteId, notePath, parseNote, renameNoteFile, restoreNote, saveNote, slugifyTitle, snapshotRevision, trashNote, uniqueHandoffFileName, wireIsStale, } from "./notes.js";
+import { sessionBoundaryExtensionPath } from "./session-boundary.js";
 import { abortCurrentIsolationTurn, beginIsolationTurn, isCurrentIsolationTurn, isIsolationSensitiveSession, isIsolationTurnAborted, queueDisplays, SessionRegistry, } from "./session-registry.js";
+import { sessionSearchExtensionPath } from "./session-search.js";
+const IMAGE_MIME_OK = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+/** Parse and validate image attachments from a prompt body. */
+function parsePromptImages(raw) {
+    if (!Array.isArray(raw) || raw.length === 0)
+        return undefined;
+    const out = [];
+    for (const item of raw) {
+        if (!item || typeof item !== "object")
+            continue;
+        const rec = item;
+        const data = typeof rec.data === "string" ? rec.data : "";
+        const mimeType = typeof rec.mimeType === "string" ? rec.mimeType : typeof rec.mime === "string" ? rec.mime : "";
+        if (!data || !IMAGE_MIME_OK.has(mimeType))
+            continue;
+        out.push({ type: "image", data, mimeType });
+    }
+    return out.length > 0 ? out : undefined;
+}
+import { installPackage, listPackages, loadWebSearchConfig, removePackage, saveWebSearchConfig, updatePackages, } from "./extensions.js";
 import { clearProviderDenylist, denylistModel, getDefaultModel, loadSettings, saveSettings, touchRecentModel, } from "./settings.js";
 import { deleteSkill, loadSkills, materializeSkills, readSkill, saveSkill } from "./skills.js";
 import { isMutationTool, mutationDiffOutput, readFileSnapshot, resolveToolPath } from "./tool-diff.js";
@@ -138,6 +167,12 @@ async function getModelRuntime() {
 /** Bundled provider extensions for session runtimes (picker + session catalogs match). */
 function bundledSessionExtensionPaths() {
     const paths = [];
+    const boundary = sessionBoundaryExtensionPath();
+    if (boundary)
+        paths.push(boundary);
+    const search = sessionSearchExtensionPath();
+    if (search)
+        paths.push(search);
     const askQuestion = melonAskQuestionExtensionPath();
     if (askQuestion)
         paths.push(askQuestion);
@@ -351,6 +386,12 @@ export async function buildApp(deps = {}) {
             markBoxInboxDelivered(cardId, item.id);
             broadcastInbox(cardId);
             console.log("[box-mail] flush done", { cardId, mailId: item.id, delivery: result.delivery });
+            boxMailFileLog("deliver", {
+                cardId,
+                mailId: item.id,
+                delivery: result.delivery,
+                bodyPreview: mailBodyPreview(item.body),
+            });
             if (result.delivery === "queued") {
                 console.log("[box-mail] wake queued for afterAgentIdle", { cardId });
                 return;
@@ -414,7 +455,18 @@ export async function buildApp(deps = {}) {
                 // The client never optimistically renders queued messages — this
                 // event is the moment the text actually reaches the model. The
                 // user bubble shows the DISPLAY text (model directives stay hidden).
-                registry.broadcast(cardId, { type: "user_message", text: next.display ?? next.text });
+                registry.broadcast(cardId, {
+                    type: "user_message",
+                    text: next.display ?? next.text,
+                    ...(next.images?.length
+                        ? {
+                            images: next.images.map((img) => ({
+                                mimeType: img.mimeType,
+                                data: img.data,
+                            })),
+                        }
+                        : {}),
+                });
                 const isolationTurnId = beginIsolationTurn(s);
                 lastIsolationTurnId = isolationTurnId ?? lastIsolationTurnId;
                 if (isolationTurnId === undefined)
@@ -428,10 +480,14 @@ export async function buildApp(deps = {}) {
                             display: false,
                         }, { deliverAs: "nextTurn" });
                     }
+                    const promptOpts = {
+                        ...(next.images?.length ? { images: next.images } : {}),
+                        ...(s.runtime.session.isStreaming ? { streamingBehavior: "followUp" } : {}),
+                    };
                     await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => 
                     // followUp only when already mid-run; idle drains must start a real turn.
-                    s.runtime.session.isStreaming
-                        ? s.runtime.session.prompt(next.text, { streamingBehavior: "followUp" })
+                    Object.keys(promptOpts).length > 0
+                        ? s.runtime.session.prompt(next.text, promptOpts)
                         : s.runtime.session.prompt(next.text));
                     if (isolationTurnId !== undefined && isIsolationTurnAborted(s, isolationTurnId))
                         return;
@@ -471,15 +527,18 @@ export async function buildApp(deps = {}) {
         "Asking the user a question (always apply — ask_question, select, confirm, options, Cursor questions):",
         "- On Claude Code / Antigravity / other non-Cursor cards: call the ask_question tool so Melon shows the card question panel. Do not invent a silent default when a material choice is needed.",
         "- On Cursor cards: use pi__cursor_ask_question / cursor_ask_question when exposed.",
-        "- Write like you're talking to a smart friend who is new here. Short. Everyday words. No AI-slop.",
-        "- Question: one clear sentence. Ask what you need them to pick — not a design review.",
-        "- Option labels: what happens if they pick it, in plain words (about a dozen words max).",
-        "- Option descriptions (if any): one friendly line a beginner gets. Do not restack jargon from the label.",
-        "- Prefer concrete outcomes over abstract engineering talk.",
+        '- Audience: assume the user never opened the repo. No file paths, symbol names, component names, PR jargon, or "you already know" references. If a code word is unavoidable, say what it does in plain English in the same sentence.',
+        "- Voice: talk like a smart friend who is new here. Short. Everyday words. No AI-slop, no stacked adjectives, no fake formality.",
+        "- Question: one clear sentence about what they will notice or get. Ask them to pick an outcome — not to review a design or confirm an internal plan.",
+        '- Option labels: what happens for them if they pick it, in plain words (~12 words max). Outcome first. Never "Approve X wiring" / "Keep current abstraction".',
+        "- Option descriptions (if any): one friendly beginner line. Do not restack jargon from the label. Do not explain the codebase — explain the choice.",
+        "- Prefer concrete user-visible outcomes over abstract engineering talk.",
         '- Bad: "Confirm the fix for the Deep diving / Reasoning activity line wiring."',
-        '- Good: "What should Deep diving / Reasoning do while the AI is thinking?"',
+        '- Good: "What should the thinking line do while the AI is working?"',
         '- Bad option: "Keep shimmer the whole time status is streaming (like the header status dot)"',
         '- Good option: "Keep showing it the whole time the green light is on"',
+        '- Bad option: "Harden MELON_GUARDRAIL ask_question system-prompt bullets"',
+        '- Good option: "Make every question sound like I never saw the code"',
         "",
         "Inline rendering in Melon chat (always apply):",
         "- Melon renders assistant messages as rich content, NOT plain text. Fenced blocks turn into LIVE interactive viewers inside the chat card:",
@@ -532,6 +591,16 @@ export async function buildApp(deps = {}) {
                     ...(bundledExtensions.length > 0 ? { additionalExtensionPaths: bundledExtensions } : {}),
                 },
             });
+            // Debug viewer: new sessions capture provider requests when the
+            // toggle is already on.
+            if (loadSettings().developerSessionJson === true) {
+                try {
+                    services.settingsManager.setDebugRequestDump(true);
+                }
+                catch {
+                    /* non-fatal */
+                }
+            }
             return {
                 ...(await createAgentSessionFromServices({
                     services,
@@ -744,6 +813,25 @@ export async function buildApp(deps = {}) {
                 }
                 else if (event.type === "compaction_start") {
                     registry.broadcast(cardId, { type: "raw", text: "compacting context…" });
+                }
+                else if (event.type === "compaction_end") {
+                    // Background compaction finished (auto threshold or /blackhole).
+                    // Tell the client so it can notify — or offer a retry on failure.
+                    const ce = event;
+                    if (ce.errorMessage && !ce.willRetry) {
+                        registry.broadcast(cardId, {
+                            type: "compaction_failed",
+                            error: ce.errorMessage,
+                        });
+                    }
+                    else if (!ce.aborted && ce.result) {
+                        registry.broadcast(cardId, {
+                            type: "compaction_done",
+                            fromTokens: ce.result.tokensBefore,
+                            toTokens: ce.result.estimatedTokensAfter,
+                            reason: ce.reason,
+                        });
+                    }
                 }
                 else if (event.type === "queue_update") {
                     // pi's internal followUp queue is NOT the prompt queue anymore
@@ -1835,8 +1923,7 @@ export async function buildApp(deps = {}) {
         try {
             const mr = await getModelRuntime();
             const [providerId, modelId] = splitModel(String(card.model ?? ""));
-            const model = (providerId && modelId ? mr.getModel(providerId, modelId) : undefined) ??
-                mr.getAvailableSnapshot()[0];
+            const model = (providerId && modelId ? mr.getModel(providerId, modelId) : undefined) ?? mr.getAvailableSnapshot()[0];
             if (!model)
                 return { skipped: true, reason: "no model available" };
             const res = await mr.completeSimple(model, {
@@ -3213,13 +3300,23 @@ export async function buildApp(deps = {}) {
     app.get("/models", async (req) => {
         const provider = String(req.query?.provider ?? "");
         const mr = await getModelRuntime();
-        const all = mr.getModels().map((m) => ({
-            label: `${m.provider}/${m.id}`,
-            provider: m.provider,
-            providerName: mr.getProvider(m.provider)?.name ?? providerLabel(m.provider),
-            id: m.id,
-            name: typeof m.name === "string" && m.name.trim() ? m.name : m.id,
-        }));
+        const all = mr.getModels().map((m) => {
+            const id = m.id;
+            const provider = m.provider;
+            const rawName = typeof m.name === "string" && m.name.trim() ? m.name : id;
+            const name = provider.toLowerCase() === CURSOR_PROVIDER_ID ? cursorAutoDisplayName(id, rawName) : rawName;
+            const input = Array.isArray(m.input)
+                ? m.input.filter((x) => x === "text" || x === "image")
+                : undefined;
+            return {
+                label: `${provider}/${id}`,
+                provider,
+                providerName: mr.getProvider(provider)?.name ?? providerLabel(provider),
+                id,
+                name,
+                ...(input?.length ? { input } : {}),
+            };
+        });
         const denied = new Set((loadSettings().denylistedModels ?? []).map((x) => x));
         const filtered = all.filter((m) => !denied.has(m.label));
         const models = provider ? filtered.filter((m) => m.provider === provider) : filtered;
@@ -3255,6 +3352,142 @@ export async function buildApp(deps = {}) {
             ...(antigravity ? { antigravity } : {}),
             ...(error ? { error } : {}),
         };
+    });
+    // Re-read models.json and revalidate provider catalogs. `force` bypasses the
+    // remote-catalog freshness window; the app-open auto refresh sends force=false
+    // so the network is only hit when the cached catalog is stale.
+    app.post("/models/refresh", async (req) => {
+        const body = (req.body ?? {});
+        const mr = await getModelRuntime();
+        const result = await mr.refresh({ allowNetwork: true, force: body.force === true });
+        return {
+            ok: !result.aborted && result.errors.size === 0,
+            total: mr.getModels().length,
+            ...(result.errors.size > 0
+                ? {
+                    errors: [...result.errors.entries()].map(([provider, error]) => ({
+                        provider,
+                        error: error.message,
+                    })),
+                }
+                : {}),
+        };
+    });
+    // Add a custom model to a known provider. Writes the coding agent's models.json
+    // (the same file the terminal TUI reads) and recomposes the runtime so the model
+    // is listed without a server restart.
+    app.post("/models/custom", async (req, reply) => {
+        const body = (req.body ?? {});
+        const providerId = typeof body.provider === "string" ? body.provider.trim() : "";
+        if (!providerId)
+            return reply.code(400).send({ error: "provider is required." });
+        const mr = await getModelRuntime();
+        if (!mr.getProvider(providerId)) {
+            return reply.code(400).send({ error: `Unknown provider "${providerId}".` });
+        }
+        let model;
+        try {
+            model = parseCustomModelInput(body);
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+        try {
+            upsertCustomModel(providerId, model);
+            await mr.refresh({ allowNetwork: false });
+        }
+        catch (e) {
+            return reply.code(500).send({ error: e.message });
+        }
+        return { ok: true, label: `${providerId}/${model.id}` };
+    });
+    // Custom models added via the GUI — what models.json holds, per provider.
+    app.get("/models/custom", async () => ({
+        models: listCustomModels(),
+    }));
+    // Remove a custom model from the shared models.json and recompose the runtime.
+    app.delete("/models/custom", async (req, reply) => {
+        const body = (req.body ?? {});
+        const providerId = typeof body.provider === "string" ? body.provider.trim() : "";
+        const modelId = typeof body.id === "string" ? body.id.trim() : "";
+        if (!providerId || !modelId) {
+            return reply.code(400).send({ error: "provider and id are required." });
+        }
+        const mr = await getModelRuntime();
+        try {
+            if (!removeCustomModel(providerId, modelId)) {
+                return reply.code(404).send({ error: `No custom model "${modelId}" on "${providerId}".` });
+            }
+            await mr.refresh({ allowNetwork: false });
+        }
+        catch (e) {
+            return reply.code(500).send({ error: e.message });
+        }
+        return { ok: true };
+    });
+    // Raw session JSONL for the developer JSON viewer. Path must sit inside the
+    // agent dir's sessions/ tree — no other file is readable through this.
+    app.get("/sessions/raw", async (req, reply) => {
+        const requested = String(req.query.sessionFile ?? "").trim();
+        if (!requested)
+            return reply.code(400).send({ error: "sessionFile required" });
+        const sessionsRoot = join(getAgentDir(), "sessions");
+        const resolved = resolve(requested);
+        if (!resolved.startsWith(sessionsRoot + sep) || !resolved.endsWith(".jsonl")) {
+            return reply.code(400).send({ error: "sessionFile must be under the agent sessions directory" });
+        }
+        if (!existsSync(resolved))
+            return reply.code(404).send({ error: "no such session file" });
+        const text = readFileSync(resolved, "utf8");
+        return { path: resolved, lines: text.split("\n") };
+    });
+    // The assembled system prompt for an attached card's session (debug viewer).
+    app.get("/sessions/:cardId/system-prompt", async (req) => {
+        const { cardId } = req.params;
+        const entry = registry.get(cardId);
+        // Fallback chain: live session prompt → base resource-loader prompt (the
+        // session only carries the per-turn override) → null when not attached.
+        let systemPrompt = null;
+        let source = null;
+        try {
+            const sp = entry?.runtime?.session?.systemPrompt;
+            if (typeof sp === "string" && sp.trim()) {
+                systemPrompt = sp;
+                source = "session";
+            }
+        }
+        catch {
+            /* fall through to base */
+        }
+        if (systemPrompt === null) {
+            try {
+                const base = entry?.runtime?.services?.resourceLoader?.getSystemPrompt?.();
+                if (typeof base === "string" && base.trim()) {
+                    systemPrompt = base;
+                    source = "base";
+                }
+            }
+            catch {
+                /* not available */
+            }
+        }
+        return { systemPrompt, source };
+    });
+    // The last provider request captured for this card's session (debug viewer,
+    // debugRequestDump setting). Null when capture is off or no turn has run.
+    app.get("/sessions/:cardId/last-request", async (req) => {
+        const { cardId } = req.params;
+        const runtime = registry.get(cardId)?.runtime;
+        let sessionId;
+        try {
+            sessionId = runtime?.session.sessionManager.getSessionId();
+        }
+        catch {
+            sessionId = undefined;
+        }
+        if (!sessionId)
+            return { request: null };
+        return { request: getCapturedProviderRequest(sessionId) ?? null };
     });
     // Liveness probe — the frontend polls this to clear the "reconnecting" banner.
     // `version` is the same identity stamped into DMG/AppImage/exe filenames.
@@ -3413,6 +3646,14 @@ export async function buildApp(deps = {}) {
             replyReason: body?.replyReason ?? body?.envelope?.replyReason,
             inReplyToMailId: body?.inReplyToMailId,
         });
+        boxMailFileLog("send", {
+            fromCardId,
+            toCardId,
+            bodyPreview: mailBodyPreview(mailBody),
+            bodyChars: mailBody.length,
+            createdBy: body?.createdBy === "agent" ? "agent" : "user",
+            replyPolicy: body?.replyPolicy ?? body?.envelope?.replyPolicy,
+        });
         if (!fromCardId || !toCardId)
             return reply.code(400).send({ error: "fromCardId and toCardId required" });
         if (!mailBody)
@@ -3562,6 +3803,26 @@ export async function buildApp(deps = {}) {
         const cardId = req.params.cardId;
         return inboxSnapshot(cardId);
     });
+    // Edit a pending inbound mail before Approve. Pending only — approved and
+    // delivered mail is history.
+    app.patch("/sessions/:cardId/inbox/:mailId", async (req, reply) => {
+        const { cardId, mailId } = req.params;
+        const body = (req.body ?? {});
+        const newBody = typeof body.body === "string" ? body.body : "";
+        try {
+            const item = editBoxInboxItem(cardId, mailId, newBody);
+            if (!item)
+                return reply.code(404).send({ error: "no pending inbox item" });
+            console.log("[box-mail] edit", { cardId, mailId, bodyChars: item.body.length });
+            boxMailFileLog("edit", { cardId, mailId, bodyPreview: mailBodyPreview(item.body) });
+            broadcastInbox(cardId);
+            return { ok: true, item };
+        }
+        catch (e) {
+            const status = e.statusCode ?? 500;
+            return reply.code(status).send({ error: e.message });
+        }
+    });
     app.post("/sessions/:cardId/inbox/:mailId/approve", async (req, reply) => {
         const { cardId, mailId } = req.params;
         const body = (req.body ?? {});
@@ -3575,6 +3836,7 @@ export async function buildApp(deps = {}) {
         const item = approveBoxInboxItem(cardId, mailId);
         if (!item)
             return reply.code(404).send({ error: "no pending inbox item" });
+        boxMailFileLog("approve", { cardId, mailId, bodyPreview: mailBodyPreview(item.body) });
         broadcastInbox(cardId);
         // Approve must be able to wake even if the card was never attached this process.
         if (!registry.get(cardId)) {
@@ -3624,6 +3886,7 @@ export async function buildApp(deps = {}) {
         const item = dismissBoxInboxItem(cardId, mailId);
         if (!item)
             return reply.code(404).send({ error: "no pending inbox item" });
+        boxMailFileLog("dismiss", { cardId, mailId, bodyPreview: mailBodyPreview(item.body) });
         broadcastInbox(cardId);
         return { ok: true, item, ...inboxSnapshot(cardId) };
     });
@@ -3795,6 +4058,28 @@ export async function buildApp(deps = {}) {
             }
             next.boxMailAutoSend = body.boxMailAutoSend;
         }
+        if ("developerDebugger" in body) {
+            if (typeof body.developerDebugger !== "boolean") {
+                return reply.code(400).send({ error: "developerDebugger must be a boolean" });
+            }
+            next.developerDebugger = body.developerDebugger;
+        }
+        if ("developerSessionJson" in body) {
+            if (typeof body.developerSessionJson !== "boolean") {
+                return reply.code(400).send({ error: "developerSessionJson must be a boolean" });
+            }
+            next.developerSessionJson = body.developerSessionJson;
+            // Mirror into every attached session's settings so request capture
+            // follows the viewer toggle without a restart.
+            for (const [, entry] of registry.entries()) {
+                try {
+                    entry.runtime.session.settingsManager.setDebugRequestDump(body.developerSessionJson);
+                }
+                catch {
+                    /* session not attached yet */
+                }
+            }
+        }
         if ("favoriteModels" in body) {
             const raw = body.favoriteModels;
             if (!Array.isArray(raw) || raw.some((m) => typeof m !== "string" || !m.trim())) {
@@ -3811,6 +4096,68 @@ export async function buildApp(deps = {}) {
             return reply.code(400).send({ error: "invalid model" });
         touchRecentModel(model);
         return { ok: true };
+    });
+    // --- Web access (pi-web-access web-search.json) ----------------------------
+    app.get("/web-access", async () => ({ config: loadWebSearchConfig() }));
+    app.put("/web-access", async (req, reply) => {
+        const body = req.body;
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+            return reply.code(400).send({ error: "object body required" });
+        }
+        try {
+            const config = saveWebSearchConfig(body);
+            return { ok: true, config };
+        }
+        catch (e) {
+            return reply.code(500).send({ error: e.message });
+        }
+    });
+    // --- Pi package manager (extensions) --------------------------------------
+    app.get("/packages", async (_req, reply) => {
+        try {
+            return { packages: listPackages() };
+        }
+        catch (e) {
+            return reply.code(500).send({ error: e.message });
+        }
+    });
+    app.post("/packages/install", async (req, reply) => {
+        const source = req.body?.source;
+        if (typeof source !== "string" || !source.trim()) {
+            return reply.code(400).send({ error: "source required (e.g. npm:pkg@1.2.3 or a git URL)" });
+        }
+        try {
+            const packages = await installPackage(source.trim());
+            return { ok: true, packages };
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+    });
+    app.post("/packages/remove", async (req, reply) => {
+        const source = req.body?.source;
+        if (typeof source !== "string" || !source.trim()) {
+            return reply.code(400).send({ error: "source required" });
+        }
+        try {
+            const { removed, packages } = await removePackage(source.trim());
+            if (!removed)
+                return reply.code(404).send({ error: "package not found in settings" });
+            return { ok: true, packages };
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
+    });
+    app.post("/packages/update", async (req, reply) => {
+        const source = req.body?.source;
+        try {
+            const packages = await updatePackages(typeof source === "string" && source.trim() ? source.trim() : undefined);
+            return { ok: true, packages };
+        }
+        catch (e) {
+            return reply.code(400).send({ error: e.message });
+        }
     });
     app.get("/auth/providers", async () => {
         const mr = await getModelRuntime();
@@ -3887,9 +4234,7 @@ export async function buildApp(deps = {}) {
                                     ? "Log in with Google for Antigravity"
                                     : undefined;
             const name = mr.getProvider(pid)?.name ?? providerLabel(pid);
-            const authTypes = pid === CLAUDE_BRIDGE_PROVIDER_ID || pid === ANTIGRAVITY_PROVIDER_ID
-                ? ["oauth"]
-                : ["api_key"];
+            const authTypes = pid === CLAUDE_BRIDGE_PROVIDER_ID || pid === ANTIGRAVITY_PROVIDER_ID ? ["oauth"] : ["api_key"];
             // Only credentials Melon itself stored can be removed from the UI.
             // Environment / config / models.json sources are managed elsewhere.
             const stored = pid === CLAUDE_BRIDGE_PROVIDER_ID
@@ -4109,8 +4454,18 @@ export async function buildApp(deps = {}) {
                 const m = e.message;
                 if (m.role === "user") {
                     const text = clean(textOf(m.content));
-                    if (text)
-                        messages.push({ role: "user", text, entryId: e.id });
+                    const images = (Array.isArray(m.content) ? m.content : [])
+                        .filter((b) => b?.type === "image" && typeof b.data === "string" && typeof b.mimeType === "string")
+                        .map((b) => ({ mimeType: b.mimeType, data: b.data }));
+                    // Image-only turns still belong in the transcript.
+                    if (text || images.length > 0) {
+                        messages.push({
+                            role: "user",
+                            text,
+                            ...(images.length > 0 ? { images } : {}),
+                            entryId: e.id,
+                        });
+                    }
                 }
                 else if (m.role === "assistant") {
                     let text = "";
@@ -4212,16 +4567,11 @@ export async function buildApp(deps = {}) {
             peers.push({
                 cardId: id,
                 title: typeof p.title === "string" ? p.title : id,
-                ...(typeof p.agentProfileId === "string" && p.agentProfileId
-                    ? { agentProfileId: p.agentProfileId }
-                    : {}),
+                ...(typeof p.agentProfileId === "string" && p.agentProfileId ? { agentProfileId: p.agentProfileId } : {}),
                 ...(typeof p.agentInstanceName === "string" && p.agentInstanceName
                     ? { agentInstanceName: p.agentInstanceName }
                     : {}),
-                ...(p.status === "idle" ||
-                    p.status === "thinking" ||
-                    p.status === "error" ||
-                    p.status === "offline"
+                ...(p.status === "idle" || p.status === "thinking" || p.status === "error" || p.status === "offline"
                     ? { status: p.status }
                     : {}),
             });
@@ -4270,8 +4620,9 @@ export async function buildApp(deps = {}) {
             const text = String(req.body?.text ?? "");
             const display = String(req.body?.display ?? "") || undefined;
             const context = req.body?.context ?? "";
-            s.promptQueue.push({ text, display, context: context || undefined });
-            console.log(`[${cardId}] queue:push "${(display ?? text).slice(0, 40)}" (queue=${JSON.stringify(queueDisplays(s.promptQueue))})`);
+            const images = parsePromptImages(req.body?.images);
+            s.promptQueue.push({ text, display, context: context || undefined, images });
+            console.log(`[${cardId}] queue:push "${(display ?? text).slice(0, 40)}" images=${images?.length ?? 0} (queue=${JSON.stringify(queueDisplays(s.promptQueue))})`);
             registry.broadcast(cardId, { type: "queue", followUp: queueDisplays(s.promptQueue) });
             reply.send({ ok: true, queued: true });
             return;
@@ -4283,6 +4634,7 @@ export async function buildApp(deps = {}) {
         try {
             const text = req.body?.text ?? "";
             const context = req.body?.context ?? "";
+            const images = parsePromptImages(req.body?.images);
             // Inject diagram directives and file contents as custom context
             // messages (not user text) so the model doesn't echo them back.
             if (context) {
@@ -4292,7 +4644,7 @@ export async function buildApp(deps = {}) {
                     display: false,
                 }, { deliverAs: "nextTurn" });
             }
-            await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => s.runtime.session.prompt(text));
+            await runInBoundIsolationSession(s.runtime, { uiContext: s.extensionUi?.getUIContext() }, () => images?.length ? s.runtime.session.prompt(text, { images }) : s.runtime.session.prompt(text));
             console.log(`[${cardId}] prompt:end (${Date.now() - started}ms)`);
         }
         catch (e) {
@@ -4499,18 +4851,54 @@ function ensureRetryDisabled() {
         console.error("[melon] failed to disable retry:", e?.message ?? e);
     }
 }
+// Seed the Session Detective agent profile once — the box users @mention to
+// find which past session discussed a topic. Its description.md is the
+// standing-instruction script; session_search/session_read do the searching.
+function ensureSessionDetectiveProfile() {
+    const id = "session-detective";
+    if (readAgentProfile(id))
+        return;
+    try {
+        createAgentProfile({
+            id,
+            name: "Session Detective",
+            role: "Find past sessions and distill what was discussed",
+            descriptionMd: [
+                "You find which past Melon session discussed a topic, verify it, and send a distilled answer back to the card that asked you.",
+                "",
+                "## Every request",
+                "1. Call session_search with distinctive keywords from the request (avoid generic words).",
+                "2. If several sessions plausibly match, reply with a NUMBERED list — title, project, date, one-line excerpt each — and STOP. Wait for the user to pick. Never guess between candidates.",
+                "3. When one session is clearly the match (or the user picked), call session_read with focused keywords to verify the context before answering.",
+                "4. Distill the answer in plain language: what was discussed/decided, when, and any exact wording that matters (short quotes). Cite the session title and date.",
+                "5. End the answer with the session file path(s) you relied on (the file: line from session_search) — the chat UI renders them as clickable cards that open the session.",
+                "6. Send the final answer via send_to_box back to the card id in the request, then confirm here in one short line.",
+                "",
+                "Zero or contradictory matches: say so in this box instead of guessing. Read-only: never modify other sessions or files.",
+            ].join("\n"),
+        });
+        console.error("[melon] seeded Session Detective agent profile");
+    }
+    catch (e) {
+        console.error("[melon] detective profile seed failed:", e?.message ?? e);
+    }
+}
 // Run directly? (vs imported by tests)
 if (process.argv[1] && import.meta.url.endsWith(process.argv[1].split("/").pop() ?? "")) {
     const config = loadConfig();
     seedFromPiIfEmpty();
     materializeSkills();
     ensureRetryDisabled();
+    ensureSessionDetectiveProfile();
     const app = await buildApp();
     const addr = await app.listen({ port: config.port, host: "127.0.0.1" });
     const boundPort = Number(String(addr).split(":").pop());
     // Structured handshake for the Electron parent — do NOT change this format.
     console.log(`MELON_READY ${JSON.stringify({ port: boundPort })}`);
     console.error(`melon-server on http://127.0.0.1:${boundPort}`);
+    // Persist the V8 module compile cache now: the Electron parent kills this
+    // process with SIGKILL on shutdown, which skips Node's normal exit flush.
+    flushCompileCache();
     const shutdown = () => {
         void app.close().finally(() => process.exit(0));
     };
