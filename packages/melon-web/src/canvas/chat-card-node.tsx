@@ -8,7 +8,7 @@ import {
     type Node,
     type NodeProps,
 } from '@xyflow/react';
-import { Braces, Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Inbox, Minimize2, MoreHorizontal, Pencil, Plus, Search, X } from 'lucide-react';
+import { Brain, Bug, Check, ChevronDown, ChevronRight, ChevronUp, Copy, GitBranch, History, Pencil, Search, X } from 'lucide-react';
 import { askChoice } from '@/components/dialogs';
 import { useImageLightbox } from '@/components/image-lightbox';
 import { extractSessionPaths, sessionChipLabel } from '@/lib/session-links';
@@ -24,7 +24,6 @@ import { ToolRunBlock } from '@/components/tool-run-block';
 import { DEFAULT_CARD_SIZE, type ComposerAttachment, type TraceEvent } from '@/types/session-card';
 import { chatImageDataUrl } from '@/lib/composer-attachments';
 import { MinimizedCardBar } from './minimized-card-bar';
-import { MaximizeIcon } from './canvas-boxes-side-nav';
 import { FullscreenExitButton, FullscreenShell } from './fullscreen-shell';
 import {
     mentionExists,
@@ -1336,84 +1335,78 @@ function TrajectoryView({
     );
 }
 
-function CardMoreMenu({
-    debug,
-    showDebug,
-    onToggleDebug,
-    contextLabel,
+/** Same size in card header and fullscreen — do not enlarge in fullscreen. */
+function ContextMeter({
+    percent,
+    tokens,
+    contextWindow,
 }: {
-    debug: boolean;
-    showDebug: boolean;
-    onToggleDebug: () => void;
-    contextLabel: string | null;
+    percent: number;
+    tokens: number | null;
+    contextWindow: number;
 }) {
-    const [open, setOpen] = useState(false);
-    const rootRef = useRef<HTMLDivElement>(null);
-
-    useEffect(() => {
-        if (!open) return;
-        const onDoc = (e: MouseEvent) => {
-            if (!rootRef.current?.contains(e.target as globalThis.Node)) setOpen(false);
-        };
-        const onKey = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') {
-                e.stopPropagation();
-                setOpen(false);
-            }
-        };
-        document.addEventListener('mousedown', onDoc);
-        window.addEventListener('keydown', onKey, true);
-        return () => {
-            document.removeEventListener('mousedown', onDoc);
-            window.removeEventListener('keydown', onKey, true);
-        };
-    }, [open]);
-
-    if (!showDebug && !contextLabel) return null;
-
     return (
-        <div ref={rootRef} className="relative">
-            <button
-                type="button"
-                className={cn(
-                    'nodrag rounded-md p-1.5 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground',
-                    open && 'bg-secondary text-foreground',
-                )}
-                aria-label="More actions"
-                aria-expanded={open}
-                onClick={(e) => {
-                    e.stopPropagation();
-                    setOpen((v) => !v);
-                }}
-            >
-                <MoreHorizontal className="size-4" />
-            </button>
-            {open && (
+        <div
+            className="flex shrink-0 items-center gap-1"
+            title={`Context window: ${Math.round(percent)}% — ${(tokens ?? 0).toLocaleString()} of ${contextWindow.toLocaleString()} tokens`}
+        >
+            <div className="h-1 w-12 overflow-hidden rounded-full bg-secondary">
                 <div
-                    className="nodrag absolute right-0 top-full z-50 mt-1 min-w-[11.5rem] overflow-hidden rounded-lg border border-border bg-card py-1 shadow-xl"
-                    onClick={(e) => e.stopPropagation()}
-                >
-                    {contextLabel && (
-                        <div className="border-b border-border/70 px-3 py-2 text-[11px] text-muted-foreground">
-                            Context · {contextLabel}
-                        </div>
-                    )}
-                    {showDebug ? (
-                        <button
-                            type="button"
-                            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-card-foreground hover:bg-secondary"
-                            onClick={() => {
-                                onToggleDebug();
-                                setOpen(false);
-                            }}
-                        >
-                            <Bug className={cn('size-3.5', debug ? 'text-amber-500' : 'text-muted-foreground')} />
-                            {debug ? 'Hide debug' : 'Show debug'}
-                        </button>
-                    ) : null}
-                </div>
-            )}
+                    className="h-full rounded-full transition-all"
+                    style={{
+                        width: `${Math.min(percent, 100)}%`,
+                        background: percent < 70 ? '#50fa7b' : percent < 90 ? '#ffb86c' : '#ff5555',
+                    }}
+                />
+            </div>
+            <span className="text-[9px] tabular-nums text-muted-foreground">{Math.round(percent)}%</span>
         </div>
+    );
+}
+
+/** Quiet header action: professional dot, label via title only. */
+function HeaderDot({
+    title,
+    onClick,
+    active,
+    tone = 'muted',
+    badge,
+    disabled,
+}: {
+    title: string;
+    onClick: (e: React.MouseEvent) => void;
+    active?: boolean;
+    tone?: 'muted' | 'amber' | 'danger' | 'primary';
+    badge?: string | number | null;
+    disabled?: boolean;
+}) {
+    return (
+        <button
+            type="button"
+            disabled={disabled}
+            title={title}
+            aria-label={title}
+            className={cn(
+                'nodrag relative flex size-5 shrink-0 items-center justify-center rounded-full transition-colors',
+                disabled ? 'cursor-not-allowed opacity-40' : 'hover:bg-secondary',
+            )}
+            onClick={onClick}
+        >
+            <span
+                className={cn(
+                    'size-1.5 rounded-full transition-colors',
+                    tone === 'amber' && 'bg-amber-500',
+                    tone === 'danger' && 'bg-red-500/80',
+                    tone === 'primary' && 'bg-primary',
+                    tone === 'muted' && (active ? 'bg-foreground' : 'bg-muted-foreground/45'),
+                )}
+            />
+            {badge != null && badge !== '' ? (
+                <span className="absolute -right-0.5 -top-0.5 flex h-2.5 min-w-2.5 items-center justify-center rounded-full bg-secondary px-0.5 text-[7px] font-semibold tabular-nums text-muted-foreground ring-1 ring-border">
+                    {badge}
+                </span>
+            ) : null}
+        </button>
     );
 }
 
@@ -1430,7 +1423,8 @@ function ChatCardNodeInner({
     const serverOffline = useCanvasStore((s) => s.serverOffline);
     const debuggerEnabled = useDeveloperStore((s) => s.debuggerEnabled);
     const sessionJsonEnabled = useDeveloperStore((s) => s.sessionJsonEnabled);
-    const showDebugConsole = debuggerEnabled && card?.debug === true;
+    // Settings → Debugger ON opens the debug console on every card (no per-card toggle).
+    const showDebugConsole = debuggerEnabled;
     const { setCenter, getZoom } = useReactFlow();
     // The composer draft lives on the card in the store, not in component state:
     // ReactFlow unmounts off-screen nodes (onlyRenderVisibleElements), so local
@@ -1466,6 +1460,14 @@ function ChatCardNodeInner({
     useEffect(() => {
         void useCanvasStore.getState().syncBoxInbox(id);
     }, [id]);
+    // Settings → Session JSON ON replaces the chat body with the session viewer.
+    useEffect(() => {
+        if (sessionJsonEnabled && card?.sessionFile) {
+            setView('json');
+            return;
+        }
+        setView((prev) => (prev === 'json' ? 'chat' : prev));
+    }, [sessionJsonEnabled, card?.sessionFile]);
     const scrollRef = useRef<HTMLDivElement>(null);
     const maxScrollRef = useRef<HTMLDivElement>(null);
     const atBottomRef = useRef(true); // user pinned to the newest output?
@@ -1842,13 +1844,6 @@ function ChatCardNodeInner({
         })();
     };
 
-    const contextPct =
-        card.contextUsage?.percent != null ? Math.round(card.contextUsage.percent) : null;
-    const contextLabel =
-        contextPct != null && card.contextUsage
-            ? `${contextPct}% · ${(card.contextUsage.tokens ?? 0).toLocaleString()} / ${card.contextUsage.contextWindow.toLocaleString()} tokens`
-            : null;
-
     const header = (isMax: boolean) => (
         <div
             className={cn(
@@ -1905,183 +1900,83 @@ function ChatCardNodeInner({
                 </span>
             )}
 
-            {sessionJsonEnabled && card.sessionFile ? (
-                <button
-                    type="button"
-                    className={cn(
-                        'nodrag shrink-0 rounded-md p-1 transition-colors',
-                        view === 'json'
-                            ? 'bg-primary/15 text-primary'
-                            : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-                    )}
-                    onClick={(e) => {
-                        e.stopPropagation();
-                        setView(view === 'json' ? 'chat' : 'json');
-                    }}
-                    title="Session JSON — raw transcript, system prompt, last request"
-                >
-                    <Braces className="size-4" />
-                </button>
+            {card.contextUsage?.percent != null ? (
+                <ContextMeter
+                    percent={card.contextUsage.percent}
+                    tokens={card.contextUsage.tokens}
+                    contextWindow={card.contextUsage.contextWindow}
+                />
             ) : null}
 
             {isMax ? (
                 <>
-                    {/* Context only when it starts to matter — avoid chrome noise. */}
-                    {contextPct != null && contextPct >= 70 && (
-                        <span
-                            className={cn(
-                                'hidden shrink-0 text-[11px] tabular-nums sm:inline',
-                                contextPct >= 90 ? 'text-[#ff5555]' : 'text-muted-foreground',
-                            )}
-                            title={contextLabel ?? undefined}
-                        >
-                            {contextPct}%
-                        </span>
-                    )}
                     {historyEntries.length > 0 ? (
-                        <button
-                            type="button"
-                            className={cn(
-                                'nodrag relative rounded-md p-1.5 transition-colors',
-                                viewingHistory
-                                    ? 'bg-primary/15 text-primary'
-                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-                            )}
+                        <HeaderDot
+                            title={viewingHistory ? 'Back to live session' : 'Previous history'}
+                            active={viewingHistory}
+                            badge={historyEntries.length > 9 ? '9+' : historyEntries.length}
                             onClick={(e) => {
                                 e.stopPropagation();
                                 openPreviousHistory();
                             }}
-                            title={viewingHistory ? 'Back to live session' : 'Previous history'}
-                        >
-                            <History className="size-4" />
-                            <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-secondary px-0.5 text-[9px] font-semibold text-muted-foreground ring-1 ring-border">
-                                {historyEntries.length > 9 ? '9+' : historyEntries.length}
-                            </span>
-                        </button>
+                        />
                     ) : null}
-                    <CardMoreMenu
-                        debug={card.debug === true}
-                        showDebug={debuggerEnabled}
-                        contextLabel={contextLabel}
-                        onToggleDebug={() =>
-                            useCanvasStore.getState().updateCard(id, { debug: !card.debug })
-                        }
-                    />
                     <FullscreenExitButton onExit={() => setMaximized(false)} />
                 </>
             ) : (
                 <>
-                    {card.contextUsage?.percent != null && (
-                        <div
-                            className="flex shrink-0 items-center gap-1"
-                            title={`Context window: ${Math.round(card.contextUsage.percent)}% — ${(card.contextUsage.tokens ?? 0).toLocaleString()} of ${card.contextUsage.contextWindow.toLocaleString()} tokens`}
-                        >
-                            <div className="h-1 w-12 overflow-hidden rounded-full bg-secondary">
-                                <div
-                                    className="h-full rounded-full transition-all"
-                                    style={{
-                                        width: `${Math.min(card.contextUsage.percent, 100)}%`,
-                                        background:
-                                            card.contextUsage.percent < 70
-                                                ? '#50fa7b'
-                                                : card.contextUsage.percent < 90
-                                                  ? '#ffb86c'
-                                                  : '#ff5555',
-                                    }}
-                                />
-                            </div>
-                            <span className="text-[9px] tabular-nums text-muted-foreground">
-                                {Math.round(card.contextUsage.percent)}%
-                            </span>
-                        </div>
-                    )}
-                    <button
-                        className="nodrag relative flex items-center gap-0.5 rounded-md p-1 text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                    <HeaderDot
+                        title="Node inbox"
+                        tone={(card.boxInboxPending ?? 0) > 0 ? 'amber' : 'muted'}
+                        badge={
+                            (card.boxInboxPending ?? 0) > 0
+                                ? (card.boxInboxPending ?? 0) > 9
+                                    ? '9+'
+                                    : card.boxInboxPending
+                                : null
+                        }
                         onClick={(e) => {
                             e.stopPropagation();
                             useCanvasStore.getState().openInbox(id);
                         }}
-                        title="Node inbox"
-                    >
-                        <Inbox className="size-4" />
-                        {(card.boxInboxPending ?? 0) > 0 ? (
-                            <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-amber-500 px-0.5 text-[9px] font-semibold text-white">
-                                {(card.boxInboxPending ?? 0) > 9 ? '9+' : card.boxInboxPending}
-                            </span>
-                        ) : null}
-                    </button>
-                    {debuggerEnabled ? (
-                        <button
-                            className={cn(
-                                'nodrag flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium transition-colors',
-                                card.debug === true
-                                    ? 'bg-amber-500/15 text-amber-500 ring-1 ring-inset ring-amber-500/40'
-                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-                            )}
-                            onClick={(e) => {
-                                e.stopPropagation();
-                                useCanvasStore.getState().updateCard(id, { debug: !card.debug });
-                            }}
-                            title={card.debug === true ? 'Debug console ON' : 'Debug console OFF'}
-                        >
-                            <Bug className="size-3.5" />
-                            DBG
-                        </button>
-                    ) : null}
+                    />
                     {historyEntries.length > 0 ? (
-                        <button
-                            className={cn(
-                                'nodrag relative rounded-md p-1 transition-colors',
-                                viewingHistory
-                                    ? 'bg-primary/15 text-primary'
-                                    : 'text-muted-foreground hover:bg-secondary hover:text-foreground',
-                            )}
+                        <HeaderDot
+                            title={viewingHistory ? 'Back to live session' : 'Previous history'}
+                            active={viewingHistory}
+                            badge={historyEntries.length > 9 ? '9+' : historyEntries.length}
                             onClick={(e) => {
                                 e.stopPropagation();
                                 openPreviousHistory();
                             }}
-                            title={viewingHistory ? 'Back to live session' : 'Previous history'}
-                        >
-                            <History className="size-4" />
-                            <span className="absolute -right-0.5 -top-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-secondary px-0.5 text-[9px] font-semibold text-muted-foreground ring-1 ring-border">
-                                {historyEntries.length > 9 ? '9+' : historyEntries.length}
-                            </span>
-                        </button>
+                        />
                     ) : null}
-                    <button
-                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary disabled:cursor-not-allowed disabled:opacity-40"
+                    <HeaderDot
+                        title={serverOffline ? 'Reconnecting to server…' : 'Fork this conversation'}
                         disabled={serverOffline}
                         onClick={(e) => {
                             e.stopPropagation();
                             if (serverOffline) return;
                             forkThis();
                         }}
-                        title={serverOffline ? 'Reconnecting to server…' : 'Fork this conversation'}
-                    >
-                        <Plus className="size-4" />
-                    </button>
-                    <button
-                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
+                    />
+                    <HeaderDot
+                        title="Minimize to title strip"
                         onClick={(e) => {
                             e.stopPropagation();
                             useCanvasStore.getState().updateCard(id, { minimized: true });
                         }}
-                        title="Minimize to title strip"
-                    >
-                        <Minimize2 className="size-4" />
-                    </button>
-                    <button
-                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-primary"
+                    />
+                    <HeaderDot
+                        title="Full screen"
                         onClick={(e) => {
                             e.stopPropagation();
                             setMaximized(true);
                         }}
-                        title="Full screen"
-                    >
-                        <MaximizeIcon />
-                    </button>
-                    <button
-                        className="nodrag rounded-md p-1 text-muted-foreground hover:bg-secondary hover:text-red-500"
+                    />
+                    <HeaderDot
+                        title="Delete card"
+                        tone="danger"
                         onClick={async (e) => {
                             e.stopPropagation();
                             const ok = await import('@/components/dialogs').then((m) =>
@@ -2093,10 +1988,7 @@ function ChatCardNodeInner({
                             );
                             if (ok) deleteCards([id]);
                         }}
-                        title="Delete card"
-                    >
-                        <X className="size-4" />
-                    </button>
+                    />
                 </>
             )}
         </div>

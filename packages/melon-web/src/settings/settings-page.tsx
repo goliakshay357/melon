@@ -199,8 +199,8 @@ export function SettingsPage() {
                                     <div className="min-w-0">
                                         <p className="text-xs font-medium text-card-foreground">Session JSON viewer</p>
                                         <p className="text-[10px] text-muted-foreground">
-                                            Show a {'}'} toggle on every chat box: raw session transcript, entry
-                                            by entry, plus the system prompt the model receives. Read-only.
+                                            Replace every chat body with the raw session transcript (entry by
+                                            entry) and the system prompt the model receives. Read-only.
                                         </p>
                                     </div>
                                     <button
@@ -228,8 +228,8 @@ export function SettingsPage() {
                                     <div className="min-w-0">
                                         <p className="text-xs font-medium text-card-foreground">Debugger</p>
                                         <p className="text-[10px] text-muted-foreground">
-                                            Show the debugger control on every card, and allow Inspect
-                                            (Cmd+Option+I) in the desktop app.
+                                            Open the session log / debug console on every card, and allow
+                                            Inspect (Cmd+Option+I) in the desktop app.
                                         </p>
                                     </div>
                                     <button

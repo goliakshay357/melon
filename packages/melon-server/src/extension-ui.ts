@@ -5,6 +5,27 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionUIContext, ExtensionUIDialogOptions, Theme } from "@earendil-works/pi-coding-agent";
 
+/**
+ * Melon has no TUI. Extensions (e.g. pi-blackhole status bar) still call
+ * `ui.theme.fg(...)`. An empty `{}` is truthy, so blackhole skips its
+ * passthrough fallback and crashes the whole Node server with
+ * `TypeError: x.fg is not a function`. Identity theme keeps them alive.
+ */
+const PASSTHROUGH_THEME = {
+	fg: (_color: string, text: string) => text,
+	bg: (_color: string, text: string) => text,
+	bold: (text: string) => text,
+	italic: (text: string) => text,
+	underline: (text: string) => text,
+	inverse: (text: string) => text,
+	strikethrough: (text: string) => text,
+	getFgAnsi: () => "",
+	getBgAnsi: () => "",
+	getColorMode: () => "256color" as const,
+	getThinkingBorderColor: () => (s: string) => s,
+	getBashModeBorderColor: () => (s: string) => s,
+} as unknown as Theme;
+
 export type ExtensionUiDialogMethod = "select" | "confirm" | "input";
 
 /** SSE payload for a blocking dialog (shown above the card inbox). */
@@ -193,8 +214,7 @@ export class CardExtensionUiBridge {
 			setEditorComponent: () => {},
 			getEditorComponent: () => undefined,
 			get theme() {
-				// Melon never renders TUI themes from extension UI; satisfy the type.
-				return {} as Theme;
+				return PASSTHROUGH_THEME;
 			},
 			getAllThemes: () => [],
 			getTheme: () => undefined,

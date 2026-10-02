@@ -91,16 +91,13 @@ function ProviderRow({
 	return (
 		<div>
 			<div className="flex items-center gap-3 px-3 py-2.5">
-				{provider.connected ? (
+				{hasCustom ? (
 					<button
 						type="button"
 						aria-label={expanded ? 'Collapse custom models' : 'Show custom models'}
 						aria-expanded={expanded}
 						onClick={() => onToggleExpanded(provider)}
-						className={cn(
-							'grid size-5 shrink-0 place-items-center rounded text-muted-foreground transition-colors hover:text-foreground',
-							!hasCustom && 'opacity-30 hover:opacity-60 hover:text-muted-foreground',
-						)}
+						className="grid size-5 shrink-0 place-items-center rounded text-muted-foreground transition-colors hover:text-foreground"
 					>
 						<ChevronDown className={cn('size-3.5 transition-transform', expanded && 'rotate-180')} />
 					</button>
@@ -131,15 +128,26 @@ function ProviderRow({
 					) : null}
 				</div>
 				{provider.connected ? (
-					<button
-						type="button"
-						disabled={!provider.disconnectable || busy}
-						title={provider.disconnectable ? 'Disconnect' : 'Managed outside Melon'}
-						onClick={() => onDisconnect(provider)}
-						className="shrink-0 rounded-lg bg-secondary px-3 py-1.5 text-xs text-card-foreground transition-colors hover:bg-secondary/80 disabled:cursor-not-allowed disabled:opacity-50"
-					>
-						{busy ? 'Disconnecting…' : provider.disconnectable ? 'Disconnect' : 'Managed'}
-					</button>
+					<div className="flex shrink-0 items-center gap-1.5">
+						<button
+							type="button"
+							onClick={() => onAddModel(provider)}
+							title="Add a model missing from the catalog"
+							className="flex items-center gap-1 rounded-lg bg-secondary px-2.5 py-1.5 text-xs text-card-foreground transition-colors hover:bg-secondary/80"
+						>
+							<Plus className="size-3" />
+							Add model
+						</button>
+						<button
+							type="button"
+							disabled={!provider.disconnectable || busy}
+							title={provider.disconnectable ? 'Disconnect' : 'Managed outside Melon'}
+							onClick={() => onDisconnect(provider)}
+							className="rounded-lg bg-secondary px-3 py-1.5 text-xs text-card-foreground transition-colors hover:bg-secondary/80 disabled:cursor-not-allowed disabled:opacity-50"
+						>
+							{busy ? 'Disconnecting…' : provider.disconnectable ? 'Disconnect' : 'Managed'}
+						</button>
+					</div>
 				) : (
 					<button
 						type="button"
@@ -152,51 +160,39 @@ function ProviderRow({
 				)}
 			</div>
 
-			{provider.connected && expanded && (
+			{provider.connected && hasCustom && expanded && (
 				<div className="pb-2.5 pl-[52px] pr-3">
-					{customModels.length === 0 ? (
-						<p className="py-1 text-[11px] text-muted-foreground">No custom models.</p>
-					) : (
-						<div className="divide-y divide-border/60 rounded-lg border border-border/60">
-							{customModels.map((m) => {
-								const ctxLabel = formatContextWindow(m.contextWindow);
-								return (
-									<div key={m.id} className="group flex items-center gap-2 px-2.5 py-1.5">
-										<div className="min-w-0 flex-1">
-											<p className="truncate font-mono text-[11px] text-card-foreground">
-												{m.id}
+					<div className="divide-y divide-border/60 rounded-lg border border-border/60">
+						{customModels.map((m) => {
+							const ctxLabel = formatContextWindow(m.contextWindow);
+							return (
+								<div key={m.id} className="group flex items-center gap-2 px-2.5 py-1.5">
+									<div className="min-w-0 flex-1">
+										<p className="truncate font-mono text-[11px] text-card-foreground">
+											{m.id}
+										</p>
+										{(m.name || ctxLabel || m.reasoning) && (
+											<p className="truncate text-[10px] text-muted-foreground">
+												{[m.name, ctxLabel && `${ctxLabel} context`, m.reasoning ? 'reasoning' : '']
+													.filter(Boolean)
+													.join(' · ')}
 											</p>
-											{(m.name || ctxLabel || m.reasoning) && (
-												<p className="truncate text-[10px] text-muted-foreground">
-													{[m.name, ctxLabel && `${ctxLabel} context`, m.reasoning ? 'reasoning' : '']
-														.filter(Boolean)
-														.join(' · ')}
-												</p>
-											)}
-										</div>
-										<button
-											type="button"
-											aria-label={`Remove ${m.id}`}
-											title="Remove model"
-											disabled={removingModelId === `${m.provider}/${m.id}`}
-											onClick={() => onRemoveModel(provider, m)}
-											className="grid size-6 shrink-0 place-items-center rounded text-muted-foreground opacity-0 transition-[opacity,color] group-hover:opacity-100 hover:text-red-400 focus-visible:opacity-100 disabled:opacity-40"
-										>
-											<Trash2 className="size-3.5" />
-										</button>
+										)}
 									</div>
-								);
-							})}
-						</div>
-					)}
-					<button
-						type="button"
-						onClick={() => onAddModel(provider)}
-						className="mt-1.5 flex items-center gap-1.5 rounded-md px-1 py-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
-					>
-						<Plus className="size-3" />
-						Add model
-					</button>
+									<button
+										type="button"
+										aria-label={`Remove ${m.id}`}
+										title="Remove model"
+										disabled={removingModelId === `${m.provider}/${m.id}`}
+										onClick={() => onRemoveModel(provider, m)}
+										className="grid size-6 shrink-0 place-items-center rounded text-muted-foreground opacity-0 transition-[opacity,color] group-hover:opacity-100 hover:text-red-400 focus-visible:opacity-100 disabled:opacity-40"
+									>
+										<Trash2 className="size-3.5" />
+									</button>
+								</div>
+							);
+						})}
+					</div>
 				</div>
 			)}
 		</div>
@@ -726,7 +722,8 @@ export function ProvidersSection() {
 							Add model to {addModelProvider?.name}
 						</RadixDialog.Title>
 						<RadixDialog.Description className="mt-2 text-xs text-muted-foreground">
-							For models missing from the catalog. Saved to the shared models.json.
+							For models missing from the catalog (e.g. new OpenRouter free IDs). Saved under
+							this machine&apos;s agent models.json and available in the picker immediately.
 						</RadixDialog.Description>
 						<div className="mt-4 grid grid-cols-[auto_1fr] items-center gap-x-3 gap-y-2.5">
 							<label htmlFor="custom-model-id" className="text-[11px] text-muted-foreground">
@@ -737,7 +734,11 @@ export function ProvidersSection() {
 								autoFocus
 								value={addModel.id}
 								onChange={(e) => setAddModel((s) => ({ ...s, id: e.target.value }))}
-								placeholder="stealth/union-alpha"
+								placeholder={
+									addModelProvider?.id === 'openrouter'
+										? 'org/model or org/model:free'
+										: 'provider-specific model id'
+								}
 								className="w-full rounded-lg border border-input bg-background px-3 py-1.5 font-mono text-xs outline-none focus:border-ring"
 							/>
 							<label htmlFor="custom-model-name" className="text-[11px] text-muted-foreground">
